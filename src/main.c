@@ -4,12 +4,38 @@
 #include "raylib.h"
 #include "rlgl.h"
 #include "physics.h"
+#include "render.h"
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
 
 static Vector3 RV(V3 a) { return (Vector3){a.x, a.y, a.z}; }
-static V3 SUN;
+static V3 SUN, AMB, SUNC;   // baked lighting: sun direction, ambient and sun multipliers
+
+// Lighting presets (L cycles). Sky/fog colours are linear; bake* are vertex-light multipliers.
+static const Env ENVS[] = {
+    {"DUSK", {-0.62f, 0.05f, 0.78f}, {1.5f, 0.66f, 0.28f}, {0}, {0.016f, 0.032f, 0.095f}, {0.62f, 0.30f, 0.14f}, {0.075f, 0.11f, 0.22f},
+     {0.045f, 0.06f, 0.11f}, 0.0040f, 0.045f, 1.05f, 1.0f, 1.0f, {0.27f, 0.31f, 0.43f}, {0.50f, 0.31f, 0.18f}},
+    {"DAY", {0.45f, 0.85f, 0.30f}, {1.5f, 1.4f, 1.25f}, {0}, {0.10f, 0.26f, 0.62f}, {0.66f, 0.74f, 0.84f}, {0.52f, 0.64f, 0.80f},
+     {0.58f, 0.68f, 0.82f}, 0.0024f, 0.030f, 1.0f, 0.5f, 0.0f, {0.44f, 0.45f, 0.48f}, {0.64f, 0.62f, 0.58f}},
+};
+static int envIdx = 0;
+static const Env *ENV = &ENVS[0];
+
+static void set_env(int i) {
+    envIdx = i; ENV = &ENVS[i];
+    SUN = vnorm(v3(ENV->sunDir.x, ENV->sunDir.y, ENV->sunDir.z));
+    AMB = v3(ENV->bakeAmbient.x, ENV->bakeAmbient.y, ENV->bakeAmbient.z);
+    SUNC = v3(ENV->bakeSun.x, ENV->bakeSun.y, ENV->bakeSun.z);
+}
+
+// Bake ambient + sun light into a colour for a face with normal n.
+static Color lit(Color c, V3 n, float k) {
+    float d = fmaxf(vdot(n, SUN), 0.0f);
+    float sky = 0.10f * fmaxf(n.y, 0.0f);
+    float r = (AMB.x + sky + SUNC.x * d) * k, g = (AMB.y + sky + SUNC.y * d) * k, b = (AMB.z + sky * 1.2f + SUNC.z * d) * k;
+    return (Color){(unsigned char)fminf(255, c.r * r), (unsigned char)fminf(255, c.g * g), (unsigned char)fminf(255, c.b * b), c.a};
+}
 
 // ------------------------------------------------------------- terrain ----
 
@@ -29,7 +55,7 @@ static Color terrain_color(float x, float z, float y, V3 n) {
     else if (road_at(x, z) == 1) { r = g = b = 0.30f + 0.04f * noise; }                          // highway
     else if (road_at(x, z) == 2) { r = g = b = 0.27f + 0.03f * noise; }                          // town street
     else if (road_at(x + 2.2f, z) == 2 || road_at(x - 2.2f, z) == 2 || road_at(x, z + 2.2f) == 2 || road_at(x, z - 2.2f) == 2) {
-        r = 0.66f; g = 0.64f; b = 0.60f;                                                         // pavement
+        r = 0.50f; g = 0.49f; b = 0.47f;                                                         // pavement
     }
     else {                                                                                       // grass / hills
         r = 0.26f + 0.10f * noise; g = 0.47f + 0.12f * noise; b = 0.20f;
@@ -39,8 +65,7 @@ static Color terrain_color(float x, float z, float y, V3 n) {
     }
     int gx = (int)lroundf(x / CELL), gz = (int)lroundf(z / CELL);
     if (gx % 5 == 0 || gz % 5 == 0) { r *= 0.93f; g *= 0.93f; b *= 0.93f; }  // 10 m grid for speed sense
-    float l = 0.42f + 0.62f * fmaxf(vdot(n, SUN), 0.0f);
-    return (Color){(unsigned char)fminf(255, r * l * 255), (unsigned char)fminf(255, g * l * 255), (unsigned char)fminf(255, b * l * 255), 255};
+    return lit((Color){(unsigned char)fminf(255, r * 255), (unsigned char)fminf(255, g * 255), (unsigned char)fminf(255, b * 255), 255}, n, 1.0f);
 }
 
 static Model build_chunk(int cx, int cz) {
@@ -79,6 +104,7 @@ static Model build_chunk(int cx, int cz) {
 // Flat-shaded, vertex-coloured triangles with lighting baked in (like the terrain).
 
 typedef struct { float *v; unsigned char *c; int n, cap; } MeshB;
+static int mbFlat;                 // when set, mb_tri skips lighting (glowing surfaces)
 
 static void mb_push(MeshB *m, V3 p, Color c) {
     if (m->n == m->cap) {
@@ -96,10 +122,12 @@ static void mb_tri(MeshB *m, V3 a, V3 b, V3 c, Color col, V3 ref) {
     V3 n = vnorm(vcross(vsub(b, a), vsub(c, a)));
     V3 ctr = vscale(vadd(vadd(a, b), c), 1.0f / 3.0f);
     if (vdot(n, vsub(ctr, ref)) < 0) { V3 t = b; b = c; c = t; n = vscale(n, -1); }
-    float l = 0.50f + 0.58f * fmaxf(vdot(n, SUN), 0.0f) + 0.06f * n.y;
-    Color s = {(unsigned char)fminf(255, col.r * l), (unsigned char)fminf(255, col.g * l), (unsigned char)fminf(255, col.b * l), 255};
+    Color s = mbFlat ? col : lit(col, n, 1.08f);
+    s.a = 255;
     mb_push(m, a, s); mb_push(m, b, s); mb_push(m, c, s);
 }
+// Unlit triangle with per-vertex colours (glows and light pools).
+static void mb_tri3(MeshB *m, V3 a, V3 b, V3 c, Color ca, Color cb, Color cc) { mb_push(m, a, ca); mb_push(m, b, cb); mb_push(m, c, cc); }
 static void mb_quad(MeshB *m, V3 a, V3 b, V3 c, V3 d, Color col, V3 ref) {
     mb_tri(m, a, b, c, col, ref); mb_tri(m, a, c, d, col, ref);
 }
@@ -159,6 +187,108 @@ static void box_shell(MeshB *m, V3 mn, V3 mx, Color wall, Color top) {
     mb_quad(m, c[2], c[6], c[7], c[3], top, ref);    // top
 }
 
+// ---------------------------------------------------------------- lights ----
+// Glowing surfaces (lit windows, lamp heads) go in GLOW; additive light pools on walls and
+// the ground go in POOL. Both are drawn only when the environment has its lights on.
+
+static MeshB GLOW, POOL;
+static const Color WARM = {255, 196, 128, 255}, LAMP = {255, 214, 160, 255};
+
+static Color scale_col(Color c, float k) {
+    return (Color){(unsigned char)fminf(255, c.r * k), (unsigned char)fminf(255, c.g * k), (unsigned char)fminf(255, c.b * k), 255};
+}
+
+// Radial pool on the ground: bright centre fading to nothing at radius R.
+static void ground_pool(V3 c, float R, Color col) {
+    Color off = {0, 0, 0, 255};
+    V3 cc = v3(c.x, terrain_height(c.x, c.z) + 0.05f, c.z);
+    for (int k = 0; k < 14; k++) {
+        float a0 = 6.2831853f * k / 14, a1 = 6.2831853f * (k + 1) / 14;
+        V3 p0 = v3(c.x + cosf(a0) * R, 0, c.z + sinf(a0) * R), p1 = v3(c.x + cosf(a1) * R, 0, c.z + sinf(a1) * R);
+        p0.y = terrain_height(p0.x, p0.z) + 0.05f; p1.y = terrain_height(p1.x, p1.z) + 0.05f;
+        // Mid ring keeps the falloff soft instead of a linear cone.
+        V3 m0 = vlerp(cc, p0, 0.5f), m1 = vlerp(cc, p1, 0.5f);
+        m0.y = terrain_height(m0.x, m0.z) + 0.05f; m1.y = terrain_height(m1.x, m1.z) + 0.05f;
+        Color mid = scale_col(col, 0.35f);
+        mb_tri3(&POOL, cc, m0, m1, col, mid, mid);
+        mb_tri3(&POOL, m0, p0, p1, mid, off, off);
+        mb_tri3(&POOL, m0, p1, m1, mid, off, mid);
+    }
+}
+
+// A lamp on a facade at (u along it, y up): fixture, glowing lens, a wash down the wall, a pool below.
+static void wall_lamp(MeshB *m, const Building *B, int s, float u, float y) {
+    V3 o, a, n; float len;
+    facade(B, s, &o, &a, &n, &len);
+    V3 p = vadd(vadd(o, vscale(a, u)), v3(0, B->ground + y, 0));
+    V3 q = vadd(p, vscale(n, 0.28f));
+    V3 mn = v3(fminf(p.x, q.x) - 0.18f * fabsf(a.x), p.y - 0.10f, fminf(p.z, q.z) - 0.18f * fabsf(a.z));
+    V3 mx = v3(fmaxf(p.x, q.x) + 0.18f * fabsf(a.x), p.y + 0.12f, fmaxf(p.z, q.z) + 0.18f * fabsf(a.z));
+    box_shell(m, mn, mx, (Color){40, 40, 42, 255}, (Color){40, 40, 42, 255});
+    // Lens on the underside.
+    V3 l0 = v3(mn.x, mn.y - 0.01f, mn.z), l1 = v3(mx.x, mn.y - 0.01f, mn.z), l2 = v3(mx.x, mn.y - 0.01f, mx.z), l3 = v3(mn.x, mn.y - 0.01f, mx.z);
+    mbFlat = 1; mb_quad(&GLOW, l0, l1, l2, l3, LAMP, v3(0, 1e4f, 0)); mbFlat = 0;
+    // Wash down the wall.
+    V3 w0 = vadd(p, vscale(n, 0.05f));
+    V3 b0 = vadd(vadd(w0, vscale(a, -2.6f)), v3(0, -y, 0)), b1 = vadd(vadd(w0, vscale(a, 2.6f)), v3(0, -y, 0));
+    V3 s0 = vadd(w0, vscale(a, -0.9f)), s1 = vadd(w0, vscale(a, 0.9f));
+    Color hot = scale_col(LAMP, 0.55f), off = {0, 0, 0, 255};
+    mb_tri3(&POOL, s0, s1, b1, hot, hot, off);
+    mb_tri3(&POOL, s0, b1, b0, hot, off, off);
+    // Pool on the ground in front.
+    V3 g = vadd(p, vscale(n, 1.8f));
+    ground_pool(g, 4.2f, scale_col(LAMP, 0.42f));
+}
+
+// A street lamp at (x, z) with its arm reaching toward (dx, dz).
+static void street_lamp(MeshB *m, float x, float z, float dx, float dz) {
+    float g = terrain_height(x, z);
+    Color pole = {58, 60, 64, 255};
+    box_shell(m, v3(x - 0.09f, g - 0.3f, z - 0.09f), v3(x + 0.09f, g + 6.6f, z + 0.09f), pole, pole);
+    float hx = x + dx * 1.5f, hz = z + dz * 1.5f;
+    box_shell(m, v3(fminf(x, hx) - 0.05f, g + 6.45f, fminf(z, hz) - 0.05f), v3(fmaxf(x, hx) + 0.05f, g + 6.55f, fmaxf(z, hz) + 0.05f), pole, pole);
+    box_shell(m, v3(hx - 0.32f, g + 6.3f, hz - 0.18f), v3(hx + 0.32f, g + 6.5f, hz + 0.18f), pole, pole);
+    V3 l0 = v3(hx - 0.28f, g + 6.29f, hz - 0.14f), l1 = v3(hx + 0.28f, g + 6.29f, hz - 0.14f);
+    V3 l2 = v3(hx + 0.28f, g + 6.29f, hz + 0.14f), l3 = v3(hx - 0.28f, g + 6.29f, hz + 0.14f);
+    mbFlat = 1; mb_quad(&GLOW, l0, l1, l2, l3, LAMP, v3(0, 1e4f, 0)); mbFlat = 0;
+    ground_pool(v3(hx, 0, hz), 8.0f, scale_col(LAMP, 0.36f));
+}
+
+static int lamp_spot_ok(const World *w, float x, float z) {
+    float g = terrain_height(x, z);
+    return road_at(x, z) == 0 && !world_point_solid(w, v3(x, g + 1.0f, z)) &&
+           !world_point_solid(w, v3(x + 0.6f, g + 1.0f, z)) && !world_point_solid(w, v3(x - 0.6f, g + 1.0f, z)) &&
+           !world_point_solid(w, v3(x, g + 1.0f, z + 0.6f)) && !world_point_solid(w, v3(x, g + 1.0f, z - 0.6f));
+}
+
+static void place_street_lamps(MeshB *m, const World *w) {
+    for (int side = -1; side <= 1; side += 2) {
+        for (float x = 16.5f; x < 110; x += 18) {                       // avenue, both kerbs
+            if (fabsf(x - 40) < 7 || fabsf(x - 80) < 7) continue;
+            if (lamp_spot_ok(w, side * x, 43.4f)) street_lamp(m, side * x, 43.4f, 0, 1);
+            if (lamp_spot_ok(w, side * (x + 9), 52.6f)) street_lamp(m, side * (x + 9), 52.6f, 0, -1);
+        }
+        for (float x = 16.5f; x < 78; x += 18)                          // upper avenue
+            if (fabsf(x - 40) > 7 && lamp_spot_ok(w, side * x, 93.4f)) street_lamp(m, side * x, 93.4f, 0, 1);
+        for (float z = 18; z < 132; z += 20) {                          // side streets
+            if (fabsf(z - 48) < 7 || fabsf(z - 97) < 6) continue;
+            if (lamp_spot_ok(w, side * 35.4f, z)) street_lamp(m, side * 35.4f, z, side * 1.0f, 0);
+            if (z < 92 && lamp_spot_ok(w, side * 75.4f, z + 10)) street_lamp(m, side * 75.4f, z + 10, side * 1.0f, 0);
+        }
+        for (float x = 20; x < 120; x += 30)                            // highway through the start area
+            if (lamp_spot_ok(w, side * x, 8.0f)) street_lamp(m, side * x, 8.0f, 0, -1);
+    }
+    for (float x = 36; x < 76; x += 18)                                 // warehouse service road
+        if (lamp_spot_ok(w, x, -13.6f)) street_lamp(m, x, -13.6f, 0, 1);
+}
+
+// A window: glass, plus a warm glowing pane if someone is home.
+static float glowK = 1.0f;                  // brightness of lit panes (shopfronts are big, so dimmer)
+static void window(MeshB *m, const Building *B, int s, float u, float y, float w, float h, float litP, Color glass) {
+    facade_rect(m, B, s, u, y, w, h, 0.04f, glass);
+    if (brnd() < litP) { mbFlat = 1; facade_rect(&GLOW, B, s, u + 0.06f, y + 0.06f, w - 0.12f, h - 0.12f, 0.05f, scale_col(WARM, glowK * (0.75f + 0.25f * brnd()))); mbFlat = 0; }
+}
+
 static void build_building(MeshB *m, const Building *B) {
     bseed = B->seed;
     int city = B->kind == BLD_APARTMENT || B->kind == BLD_TOWER;
@@ -181,8 +311,8 @@ static void build_building(MeshB *m, const Building *B) {
             float sp = len / nc;
             for (float y = 0.6f; y + 3.0f < H; y += 3.4f)
                 for (int i = 0; i < nc; i++)
-                    facade_rect(m, B, s, i * sp + 0.12f, y, sp - 0.24f, 2.6f, 0.04f, brnd() < 0.2f ? glassLit : glass);
-            if (front) facade_rect(m, B, s, len * 0.5f - 2.0f, 0.0f, 4.0f, 3.0f, 0.06f, frame);
+                    window(m, B, s, i * sp + 0.12f, y, sp - 0.24f, 2.6f, 0.22f, brnd() < 0.2f ? glassLit : glass);
+            if (front) { facade_rect(m, B, s, len * 0.5f - 2.0f, 0.0f, 4.0f, 3.0f, 0.06f, frame); wall_lamp(m, B, s, len * 0.5f, 3.4f); }
         } break;
         case BLD_APARTMENT: case BLD_HOUSE: {
             int floors = B->kind == BLD_HOUSE ? 2 : (int)((H - 0.8f) / 3.2f);
@@ -195,16 +325,18 @@ static void build_building(MeshB *m, const Building *B) {
                 for (int i = 0; i < nc; i++) {
                     if (front && f == 0 && i == nc / 2) continue;           // the door goes here
                     float y = 0.9f + f * fh;
-                    facade_rect(m, B, s, i * sp + (sp - ww) * 0.5f, y, ww, wh, 0.04f, brnd() < 0.15f ? glassLit : glass);
+                    window(m, B, s, i * sp + (sp - ww) * 0.5f, y, ww, wh, 0.25f, brnd() < 0.15f ? glassLit : glass);
                 }
             if (front) {
                 float u = (nc / 2) * sp + sp * 0.5f;
                 facade_rect(m, B, s, u - 0.6f, 0.0f, 1.2f, 2.2f, 0.04f, (Color){90, 60, 40, 255});
+                wall_lamp(m, B, s, B->kind == BLD_HOUSE ? u + 1.1f : u, B->kind == BLD_HOUSE ? 2.3f : 3.0f);
             }
         } break;
         case BLD_SHOP:
             if (front) {                            // shopfront, sign band, door
-                facade_rect(m, B, s, 0.8f, 0.5f, len - 1.6f, 2.5f, 0.04f, glass);
+                glowK = 0.42f; window(m, B, s, 0.8f, 0.5f, len - 1.6f, 2.5f, 0.75f, glass); glowK = 1.0f;
+                wall_lamp(m, B, s, len * 0.5f, 3.3f);
                 facade_rect(m, B, s, 0.4f, H - 1.4f, len - 0.8f, 0.9f, 0.06f, SIGNS[(int)(brnd() * 5)]);
                 facade_rect(m, B, s, len * 0.5f - 0.8f, 0.0f, 1.6f, 2.4f, 0.07f, frame);
             } else if (len > 6) {
@@ -213,7 +345,11 @@ static void build_building(MeshB *m, const Building *B) {
             break;
         case BLD_WAREHOUSE:
             if (front)
-                for (float u = 2.0f; u + 4.0f < len - 1.0f; u += 6.0f) facade_rect(m, B, s, u, 0.0f, 4.0f, 4.5f, 0.04f, (Color){120, 124, 130, 255});
+                for (float u = 2.0f; u + 4.0f < len - 1.0f; u += 6.0f) {
+                    facade_rect(m, B, s, u, 0.0f, 4.0f, 4.5f, 0.04f, (Color){58, 62, 68, 255});
+                    for (float y = 0.5f; y < 4.4f; y += 0.5f) facade_rect(m, B, s, u, y, 4.0f, 0.04f, 0.05f, (Color){40, 42, 46, 255});
+                    wall_lamp(m, B, s, u + 2.0f, 5.3f);
+                }
             for (float u = 1.5f; u + 3.0f < len - 1.0f; u += 4.5f) facade_rect(m, B, s, u, H - 1.6f, 3.0f, 0.8f, 0.04f, glass);
             break;
         }
@@ -258,9 +394,12 @@ static void build_building(MeshB *m, const Building *B) {
     }
 }
 
-static Model build_city(const World *w) {
+static Model build_city(const World *w, Model *glow, Model *pool) {
     MeshB m = {0};
     for (int i = 0; i < w->nbld; i++) build_building(&m, &w->bld[i]);
+    place_street_lamps(&m, w);
+    *glow = mb_model(&GLOW);
+    *pool = mb_model(&POOL);
     // Crash wall, pillars and barriers are boxes too (not buildings): plain concrete.
     for (int b = 0; b < w->nbox; b++) {
         int isB = 0;
@@ -345,7 +484,7 @@ static void draw_trees(const World *w, Vector3 eye) {
 }
 
 static void draw_tree_shadows(const World *w, Vector3 eye) {
-    Color sh = {0, 0, 0, 55};
+    Color sh = {0, 0, 0, (unsigned char)(55 * fminf(1.0f, 0.35f + SUN.y))};
     for (int i = 0; i < w->ntree; i++) {
         const Tree *t = &w->tree[i];
         float dx = t->x - eye.x, dz = t->z - eye.z;
@@ -407,9 +546,6 @@ static void draw_skids(void) {
 
 // ----------------------------------------------------------------- car ----
 
-static Color shade(Color c, float l) {
-    return (Color){(unsigned char)fminf(255, c.r * l), (unsigned char)fminf(255, c.g * l), (unsigned char)fminf(255, c.b * l), c.a};
-}
 static Color brighten(Color c, float s) {
     return (Color){(unsigned char)fminf(255, c.r + s * 255), (unsigned char)fminf(255, c.g + s * 255), (unsigned char)fminf(255, c.b + s * 255), c.a};
 }
@@ -429,14 +565,18 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
     Color glass = {34, 46, 60, 255}, under = {35, 35, 38, 255}, tonneau = {52, 54, 58, 255}, trim = {30, 31, 33, 255};
 
     // Blob shadow: project the underside onto the ground.
-    Color sh = {0, 0, 0, 70};
+    Color sh = {0, 0, 0, 90};
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
     for (int i = 0; i < c->nt; i++) {
         const Tri *t = &c->t[i];
         if (t->kind != SURF_UNDER) continue;
         Vector3 p[3];
         for (int k = 0; k < 3; k++) { V3 v = c->n[t->v[k]].p; p[k] = (Vector3){v.x, terrain_height(v.x, v.z) + 0.04f, v.z}; }
-        DrawTriangle3D(p[0], p[2], p[1], sh); DrawTriangle3D(p[0], p[1], p[2], sh);
+        DrawTriangle3D(p[0], p[1], p[2], sh);
     }
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
 
     if (!beamView) {
         for (int i = 0; i < c->nt; i++) {
@@ -446,8 +586,12 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
             V3 nrm = vnorm(vcross(vsub(p[1], p[0]), vsub(p[2], p[0])));
             Color base = t->kind == SURF_GLASS ? glass : t->kind == SURF_UNDER ? under :
                          t->kind == SURF_TONNEAU ? tonneau : t->kind == SURF_TRIM ? trim : body;
-            float l = 0.42f + 0.68f * fmaxf(vdot(nrm, SUN), 0.0f);
-            Color col = shade(base, l);
+            Color col = lit(base, nrm, 1.0f);
+            if (t->kind == SURF_BODY) {                            // brushed steel picks up the sky
+                float f = 0.18f + 0.22f * fmaxf(nrm.y, 0.0f);
+                Color sk = {(unsigned char)(255 * powf(ENV->horizonAway.x, 0.4545f)), (unsigned char)(255 * powf(ENV->horizonAway.y, 0.4545f)), (unsigned char)(255 * powf(ENV->horizonAway.z, 0.4545f)), 255};
+                col = (Color){(unsigned char)(col.r + (sk.r - col.r) * f), (unsigned char)(col.g + (sk.g - col.g) * f), (unsigned char)(col.b + (sk.b - col.b) * f), 255};
+            }
             if (t->kind == SURF_BODY || t->kind == SURF_GLASS) {   // flat-faceted stainless / glass highlight
                 V3 hv = vnorm(vadd(SUN, vnorm(vsub(eye, p[0]))));
                 float s = powf(fmaxf(vdot(nrm, hv), 0.0f), t->kind == SURF_GLASS ? 40.0f : 14.0f);
@@ -455,13 +599,11 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
             }
             DrawTriangle3D(RV(p[0]), RV(p[1]), RV(p[2]), col);
             if (t->edges) {
-                Color edge = shade(base, 0.40f);
+                Color edge = lit(base, nrm, 0.45f);
                 for (int e = 0; e < 3; e++)
                     if (t->edges >> e & 1) DrawLine3D(RV(p[e]), RV(p[(e + 1) % 3]), edge);
             }
         }
-        draw_lightbar(c, c->lightF, 0.45f, 1.0f, (Color){245, 248, 255, 255});
-        draw_lightbar(c, c->lightR, 0.09f, -1.0f, (Color){230, 30, 30, 255});
     } else {
         for (int i = 0; i < c->nb; i++) {
             const Beam *B = &c->b[i];
@@ -496,6 +638,39 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
             V3 f0 = vadd(face, vscale(axis, out * 0.004f));
             DrawLine3D(RV(f0), RV(vadd(f0, vscale(dir, WHEEL_R * 0.66f))), (Color){70, 72, 76, 255});
         }
+    }
+}
+
+// Light bars, drawn in the emissive pass so they bloom.
+static void draw_car_lights(const Car *c, int on) {
+    float front = on ? 3.2f : 0.9f, rear = (on ? 2.2f : 1.4f) * (c->ctl.brake > 0.1f ? 2.0f : 1.0f);
+    post_emissive_begin(front);
+    draw_lightbar(c, c->lightF, 0.45f, 1.0f, (Color){235, 242, 255, 255});
+    post_emissive_end();
+    post_emissive_begin(rear);
+    draw_lightbar(c, c->lightR, 0.09f, -1.0f, (Color){255, 26, 20, 255});
+    post_emissive_end();
+}
+
+// Headlight spill on the road ahead (additive), following the terrain.
+static void draw_headlights(const Car *c) {
+    V3 f = vnorm(v3(c->fwd.x, 0, c->fwd.z)), r = v3(-f.z, 0, f.x);
+    V3 o = vadd(c->pos, vscale(f, 2.6f));
+    for (int i = 0; i < 12; i++) {
+        float d0 = 1.0f + i * 2.4f, d1 = d0 + 2.4f;
+        float w0 = 1.1f + d0 * 0.32f, w1 = 1.1f + d1 * 0.32f;
+        float k0 = 0.55f / (1.0f + d0 * 0.09f), k1 = 0.55f / (1.0f + d1 * 0.09f);
+        V3 pts[6] = {vadd(o, vadd(vscale(f, d0), vscale(r, -w0))), vadd(o, vscale(f, d0)), vadd(o, vadd(vscale(f, d0), vscale(r, w0))),
+                     vadd(o, vadd(vscale(f, d1), vscale(r, -w1))), vadd(o, vscale(f, d1)), vadd(o, vadd(vscale(f, d1), vscale(r, w1)))};
+        for (int k = 0; k < 6; k++) pts[k].y = terrain_height(pts[k].x, pts[k].z) + 0.06f;
+        Color c0 = {(unsigned char)(255 * k0), (unsigned char)(246 * k0), (unsigned char)(230 * k0), 255};
+        Color c1 = {(unsigned char)(255 * k1), (unsigned char)(246 * k1), (unsigned char)(230 * k1), 255}, off = {0, 0, 0, 255};
+        rlBegin(RL_TRIANGLES);
+        #define V(p, c) rlColor4ub(c.r, c.g, c.b, 255); rlVertex3f(p.x, p.y, p.z)
+        V(pts[0], off); V(pts[3], off); V(pts[4], c1);   V(pts[0], off); V(pts[4], c1); V(pts[1], c0);
+        V(pts[1], c0); V(pts[4], c1); V(pts[5], off);   V(pts[1], c0); V(pts[5], off); V(pts[2], off);
+        #undef V
+        rlEnd();
     }
 }
 
@@ -549,6 +724,113 @@ static void draw_shards(void) {
     }
 }
 
+// ---------------------------------------------------------- world meshes ----
+
+static Model city, cityGlow, cityPool;
+static int meshesBuilt;
+
+static void build_world_meshes(const World *w) {
+    if (meshesBuilt) {
+        for (int i = 0; i < CH_N * CH_N; i++) UnloadModel(chunks[i]);
+        UnloadModel(city); UnloadModel(cityGlow); UnloadModel(cityPool);
+        UnloadModel(treeModel[0]); UnloadModel(treeModel[1]); UnloadModel(stumpModel);
+    }
+    for (int z = 0; z < CH_N; z++) for (int x = 0; x < CH_N; x++) chunks[z * CH_N + x] = build_chunk(x, z);
+    city = build_city(w, &cityGlow, &cityPool);
+    cityGlow.materials[0].shader = post_emissive_shader();
+    cityPool.materials[0].shader = post_emissive_shader();
+    build_trees();
+    meshesBuilt = 1;
+}
+
+// ------------------------------------------------------------------- HUD ----
+
+static Font hudFont;
+static const Color HUD_ORANGE = {255, 140, 32, 255}, HUD_BG = {10, 12, 16, 200}, HUD_DIM = {160, 166, 176, 255}, HUD_LINE = {255, 255, 255, 28};
+
+static void hud_load_font(void) {
+    const char *cand[] = {"/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf", "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
+                          "/System/Library/Fonts/Supplemental/Arial Bold.ttf"};
+    hudFont = GetFontDefault();
+    for (int i = 0; i < 3; i++)
+        if (FileExists(cand[i])) {
+            hudFont = LoadFontEx(cand[i], 96, NULL, 0);
+            GenTextureMipmaps(&hudFont.texture);
+            SetTextureFilter(hudFont.texture, TEXTURE_FILTER_TRILINEAR);
+            break;
+        }
+}
+static void txt(const char *s, float x, float y, float size, Color c) { DrawTextEx(hudFont, s, (Vector2){x, y}, size, size * 0.06f, c); }
+static float txtw(const char *s, float size) { return MeasureTextEx(hudFont, s, size, size * 0.06f).x; }
+static void slash(float x, float y, float w, float h, Color c) {       // slanted accent bar
+    Vector2 A = {x + h * 0.4f, y}, B = {x + h * 0.4f + w, y}, C = {x + w, y + h}, D = {x, y + h};
+    DrawTriangle(A, D, C, c); DrawTriangle(A, C, B, c);
+}
+static void hud_panel(float x, float y, float w, float h) {
+    DrawRectangle((int)x, (int)y, (int)w, (int)h, HUD_BG);
+    DrawRectangleLines((int)x, (int)y, (int)w, (int)h, HUD_LINE);
+}
+static const char *zone_name(V3 p) {
+    if (p.x > 28 && p.x < 80 && p.z < -12 && p.z > -42) return "WAREHOUSE DISTRICT";
+    if (p.z > 12 && p.z < 140 && fabsf(p.x) < 116) return fabsf(p.x) < 9 ? "CROSS ROAD" : "TOWN";
+    if (p.x * p.x + p.z * p.z > 100 * 100) return "HILLS";
+    return "PROVING GROUND";
+}
+
+static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int slowmo, int paused, int help) {
+    float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+    const char *zn = zone_name(pc->pos);
+    hud_panel(16, 16, 74 + txtw(zn, 20), 40);
+    slash(26, 26, 5, 20, HUD_ORANGE); slash(35, 26, 5, 20, HUD_ORANGE);
+    txt(zn, 58, 26, 20, RAYWHITE);
+    const char *tr = TextFormat("%s  [L]     %d FPS", ENV->name, GetFPS());
+    txt(tr, sw - 22 - txtw(tr, 15), 22, 15, HUD_DIM);
+
+    float px = 16, py = sh - 116, pw = 470, ph = 100;
+    hud_panel(px, py, pw, ph);
+    slash(px + 12, py + 16, 4, 26, HUD_ORANGE);
+    txt("DAMAGE", px + 30, py + 14, 28, RAYWHITE);
+    Color dc = pc->damage < 15 ? HUD_ORANGE : (pc->damage < 60 ? (Color){255, 110, 30, 255} : (Color){240, 60, 50, 255});
+    txt(TextFormat("%.0f%%", pc->damage), px + 34 + txtw("DAMAGE", 28) + 10, py + 14, 28, dc);
+    DrawRectangle((int)px + 30, (int)py + 56, 230, 8, (Color){50, 52, 58, 255});
+    DrawRectangle((int)px + 30, (int)py + 56, (int)(230 * pc->damage / 100.0f), 8, dc);
+    txt(TextFormat("TORN BEAMS  %d", pc->brokenBeams), px + 30, py + 72, 14, HUD_DIM);
+    DrawLine((int)px + 290, (int)py + 14, (int)px + 290, (int)(py + ph - 14), HUD_LINE);
+    static const char *TG[] = {"LATCHED", "OPEN", "HANGING", "GONE"};
+    const char *lab[3] = {"GLASS", "TAILGATE", "TREES"};
+    char v0[16], v2[16];
+    snprintf(v0, sizeof v0, "%d/%d", pc->glassBrokenCount, pc->npanels);
+    snprintf(v2, sizeof v2, "%d", w->treesDown);
+    const char *val[3] = {v0, TG[pc->tailgate], v2};
+    for (int i = 0; i < 3; i++) {
+        txt(lab[i], px + 306, py + 14 + i * 26, 17, HUD_DIM);
+        txt(val[i], px + 396, py + 14 + i * 26, 17, HUD_ORANGE);
+    }
+
+    float bw = 210, bx = sw - bw - 16, by = sh - 84;
+    hud_panel(bx, by, bw, 68);
+    slash(bx + 14, by + 14, 5, 40, HUD_ORANGE);
+    char spd[16];
+    snprintf(spd, sizeof spd, "%.0f", fabsf(vF) * 3.6f);
+    txt(spd, bx + bw - 76 - txtw(spd, 48), by + 10, 48, RAYWHITE);
+    txt("km/h", bx + bw - 66, by + 32, 20, HUD_DIM);
+    char st[48];
+    snprintf(st, sizeof st, "%s%s%s", slowmo ? "SLOW-MO  " : "", paused ? "PAUSED  " : "", ctl.handbrake ? "HANDBRAKE" : "");
+    if (st[0]) txt(st, sw - 16 - txtw(st, 16), by - 24, 16, HUD_ORANGE);
+
+    if (help) {
+        const char *lines[] = {
+            "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
+            "C  hood cam      B  beam view (stress)", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
+            "T  slow-mo      P  pause      K  clear skids", "G  drop tailgate      L  lighting      H  hide help",
+            "", "Ramp ahead, crash wall behind you. Town up the", "cross road to the left, warehouses to the right,",
+            "forest on the hills. Small trees snap; big ones don't."};
+        int n = sizeof lines / sizeof lines[0];
+        hud_panel(16, 66, 420, 20 + n * 21);
+        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 8 ? RAYWHITE : HUD_DIM);
+    }
+}
+
 // ---------------------------------------------------------------- main ----
 
 static const V3 PALETTE[] = {{0.71f, 0.72f, 0.74f},   // bare stainless for the player
@@ -562,17 +844,18 @@ static void spawn_player(World *w) {
 static float wrap_pi(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a += 2 * PI; return a; }
 
 int main(void) {
-    SUN = vnorm(v3(0.45f, 0.85f, 0.30f));
+    set_env(0);
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1440, 900, "BeamLite — soft-body driving");
+    SetExitKey(KEY_NULL);
     SetTargetFPS(120);
 
-    for (int z = 0; z < CH_N; z++) for (int x = 0; x < CH_N; x++) chunks[z * CH_N + x] = build_chunk(x, z);
+    post_init();
+    hud_load_font();
 
     static World world;
     world_init(&world);
-    Model city = build_city(&world);
-    build_trees();
+    build_world_meshes(&world);
     world.ncars = 3;
     spawn_player(&world);
     car_build(&world.cars[1], v3(-2.2f, CAR_SPAWN_H, 26), PI / 2, PALETTE[1]);
@@ -621,6 +904,7 @@ int main(void) {
         if (IsKeyPressed(KEY_H) || IsKeyPressed(KEY_F1)) help = !help;
         if (IsKeyPressed(KEY_K)) { skidCount = 0; skidHead = 0; }
         if (IsKeyPressed(KEY_G)) car_pop_tailgate(pc);
+        if (IsKeyPressed(KEY_L)) { set_env((envIdx + 1) % (int)(sizeof ENVS / sizeof ENVS[0])); build_world_meshes(&world); }
 
         int up = IsKeyDown(KEY_W) || IsKeyDown(KEY_UP);
         int down = IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN);
@@ -688,48 +972,53 @@ int main(void) {
             camPos = cam.position;
         }
 
-        // ---- draw
-        BeginDrawing();
-        ClearBackground((Color){150, 190, 230, 255});
+        // ---- draw the world into the HDR buffer
+        post_begin_scene();
         BeginMode3D(cam);
+        post_capture_camera(cam);
         for (int i = 0; i < CH_N * CH_N; i++) DrawModel(chunks[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
         rlDisableBackfaceCulling();
-        draw_skids();
         DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
-        draw_tree_shadows(&world, cam.position);
         draw_trees(&world, cam.position);
+        rlDrawRenderBatchActive();
+        rlDisableDepthMask();                      // see-through decals: no depth writes, so overlaps just add up
+        draw_skids();
+        draw_tree_shadows(&world, cam.position);
+        rlDrawRenderBatchActive();
+        rlEnableDepthMask();
         for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z));
         draw_shards();
+        // Things that glow, then additive light pools (no depth writes so they don't occlude).
+        int lightsOn = ENV->lights > 0.01f;
+        if (lightsOn) { post_set_emissive(0.6f + 2.2f * ENV->lights); DrawModel(cityGlow, (Vector3){0, 0, 0}, 1.0f, WHITE); }
+        if (!beamView) for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car_lights(&world.cars[i], lightsOn && i == 0);
+        if (lightsOn) {
+            rlDrawRenderBatchActive();
+            rlDisableDepthMask();
+            BeginBlendMode(BLEND_ADDITIVE);
+            post_set_emissive(ENV->lights);
+            DrawModel(cityPool, (Vector3){0, 0, 0}, 1.0f, WHITE);
+            post_emissive_begin(ENV->lights);
+            draw_headlights(pc);
+            post_emissive_end();
+            EndBlendMode();
+            rlEnableDepthMask();
+        }
         rlEnableBackfaceCulling();
         EndMode3D();
+        post_end_scene();
 
-        // ---- HUD
-        int sw = GetScreenWidth(), shh = GetScreenHeight();
-        DrawRectangle(16, shh - 140, 440, 124, (Color){0, 0, 0, 120});
-        DrawText(TextFormat("%3.0f km/h", fabsf(vF) * 3.6f), 30, shh - 132, 44, RAYWHITE);
-        Color dc = pc->damage < 15 ? (Color){120, 230, 120, 255} : (pc->damage < 50 ? (Color){250, 210, 80, 255} : (Color){250, 90, 80, 255});
-        DrawText(TextFormat("damage %3.0f%%   torn beams %d", pc->damage, pc->brokenBeams), 30, shh - 80, 18, dc);
-        static const char *TG[] = {"latched", "open", "hanging", "gone"};
-        DrawText(TextFormat("glass %d/%d broken   tailgate %s   trees down %d", pc->glassBrokenCount, pc->npanels, TG[pc->tailgate], world.treesDown), 30, shh - 58, 16, RAYWHITE);
-        DrawText(TextFormat("%s%s%s", slowmo ? "SLOW-MO  " : "", paused ? "PAUSED  " : "", ctl.handbrake ? "HANDBRAKE" : ""), 30, shh - 34, 16, (Color){255, 220, 120, 255});
-        DrawFPS(sw - 90, 12);
-        if (help) {
-            const char *lines[] = {
-                "W/S or arrows  throttle / brake / reverse", "A/D            steer", "Space          handbrake",
-                "Mouse drag     orbit camera   wheel: zoom", "C  hood cam    B  beam view (stress)",
-                "N  spawn truck ahead   X  clear trucks", "Q  recover in place   R  reset to start",
-                "T  slow-mo   P  pause   K  clear skids", "G  drop the tailgate   H  hide this help",
-                "", "Ramp ahead, crash wall behind you.", "Towns up the cross road to the left (+z),",
-                "warehouses to the right, forest on the hills.", "Small trees snap; big ones don't."};
-            int n = sizeof lines / sizeof lines[0];
-            DrawRectangle(16, 16, 390, 22 + n * 20, (Color){0, 0, 0, 120});
-            for (int i = 0; i < n; i++) DrawText(lines[i], 28, 26 + i * 20, 16, RAYWHITE);
-        }
+        // ---- grade it onto the screen, then the HUD
+        BeginDrawing();
+        post_present(ENV, (float)GetTime());
+        draw_hud(pc, &world, vF, ctl, slowmo, paused, help);
         EndDrawing();
     }
 
     for (int i = 0; i < CH_N * CH_N; i++) UnloadModel(chunks[i]);
-    UnloadModel(city); UnloadModel(treeModel[0]); UnloadModel(treeModel[1]); UnloadModel(stumpModel);
+    UnloadModel(city); UnloadModel(cityGlow); UnloadModel(cityPool);
+    UnloadModel(treeModel[0]); UnloadModel(treeModel[1]); UnloadModel(stumpModel);
+    post_shutdown();
     CloseWindow();
     return 0;
 }

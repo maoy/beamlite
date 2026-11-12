@@ -27,6 +27,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | N | spawn a parked truck 20 m ahead (side-on, to T-bone) |
 | X | clear spawned trucks |
 | G | drop the tailgate |
+| L | lighting: dusk / day |
 | Q | recover (fresh car, upright, in place) |
 | R | reset to start |
 | T / P | slow-mo / pause |
@@ -72,6 +73,15 @@ Saplings and young trees snap and fall when you hit them; mature trunks stop you
   checks cheap (about 70 buildings, about 1000 trees). The renderer bakes the buildings into one
   flat-shaded mesh, with windows, doors, shopfronts, gable roofs, chimneys and rooftop plant.
   The chase camera pulls in so buildings never block the view.
+- **Rendering** (`src/render.c`): the world is drawn into a half-float HDR buffer with a depth
+  texture. A post pass rebuilds each pixel's world position from depth, then draws the sky
+  (gradient, sun, procedural clouds) behind everything and blends exponential height fog over it.
+  Bright areas are blurred at three resolutions for bloom. Last comes edge-directed
+  anti-aliasing, ACES tone mapping, a cool-shadow/warm-highlight colour grade, a vignette and
+  dithering. Lighting is baked into vertex colours from the active preset's sun and ambient
+  colours, so switching presets rebuilds those meshes. Lit windows, lamp lenses and the
+  truck's light bars draw brighter than white, so they bloom. Street lamps, wall lamps over doors
+  and the headlights add additive pools of light on walls and the road.
 - **Integration**: semi-implicit Euler at 1200 Hz fixed substeps. Each beam's stiffness and
   damping is limited by the masses it connects, which keeps the explicit integrator stable.
 
@@ -81,5 +91,6 @@ a tailgate drop, a 60 km/h wall crash, a ramp jump, a T-bone and hitting a sapli
 
 ## Ideas for next steps
 
-Node-beam wheels and tyres; opening doors and frunk; self-collision so crushed panels
+Wet roads with reflections and rain; real-time shadow maps; per-pixel lighting from nearby
+lamps; node-beam wheels and tyres; opening doors and frunk; self-collision so crushed panels
 stack up instead of passing through each other; slip-angle tyre model; Metal renderer; sound.
