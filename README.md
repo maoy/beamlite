@@ -24,7 +24,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | A / D | steer |
 | Space | handbrake (drift) |
 | Mouse drag / wheel | orbit / zoom camera |
-| C | dash cam: driver's seat (drag the mouse to look around) |
+| C | dash cam from the driver's seat: dashboard, wheel, mirror, seats, pillars (drag to look around) |
 | B | beam view: the node/beam skeleton, colored by stress and permanent deformation |
 | N | spawn a parked truck 20 m ahead (side-on, to T-bone) |
 | X | clear spawned trucks |

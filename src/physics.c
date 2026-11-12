@@ -121,7 +121,7 @@ static void define_pickup(VehicleDef *d) {
     d->brakeMax = 8000.0f; d->engineF = 20000.0f; d->enginePower = 440000.0f; d->reverseF = 9000.0f; d->driveFront = 0.45f;
     d->rearSteer = 0.30f; d->maxLock = 0.58f; d->cdA = 0.62f;
     d->spawnH = CAR_SPAWN_H;
-    d->seat = v3(-0.35f, 1.12f, -0.42f); d->dashX = 1.05f; d->dashY = 0.88f;
+    d->seat = v3(-0.35f, 1.12f, -0.42f); d->dashX = 1.05f; d->dashY = 0.88f; d->rearSeatX = -0.72f;
     d->npanels = 7; d->hasTailgate = 1; d->lightStyle = 0;
     d->smooth = 0; d->wheelStyle = 0; d->mirrorRing = -1; d->spoilerRing = -1;
     d->paint = v3(0.71f, 0.72f, 0.74f);
@@ -174,7 +174,7 @@ static void define_hatch(VehicleDef *d) {
     d->brakeMax = 3900.0f; d->engineF = 6800.0f; d->enginePower = 95000.0f; d->reverseF = 3500.0f; d->driveFront = 1.0f;
     d->rearSteer = 0.0f; d->maxLock = 0.62f; d->cdA = 0.41f;
     d->spawnH = 0.22f;
-    d->seat = v3(-0.52f, 1.00f, -0.38f); d->dashX = 0.52f; d->dashY = 0.80f;
+    d->seat = v3(-0.52f, 1.00f, -0.38f); d->dashX = 0.52f; d->dashY = 0.80f; d->rearSeatX = -1.12f;
     d->npanels = 8; d->hasTailgate = 0; d->lightStyle = 1;
     d->smooth = 1; d->wheelStyle = 1; d->mirrorRing = 8; d->spoilerRing = 16;
     d->paint = v3(0.93f, 0.33f, 0.09f);                       // bright orange
@@ -471,6 +471,16 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
         c->spoilerNode[0] = R[sr][P_TPL]; c->spoilerNode[1] = R[sr][P_TPR];
         c->spoilerNode[2] = R[sr - 1][P_TPL]; c->spoilerNode[3] = R[sr - 1][P_TPR];
     }
+
+    // Pillars: the windshield's side edges (roof-edge nodes over its glazed gaps) and the B-pillar ring.
+    c->naPillar = 0;
+    for (int r = 0; r + 1 < nr && c->naPillar < 7; r++)
+        if (ST[r].topPanel == 0) {
+            if (!c->naPillar) { c->aPillar[0][0] = R[r][P_TPL]; c->aPillar[1][0] = R[r][P_TPR]; c->naPillar = 1; }
+            c->aPillar[0][c->naPillar] = R[r + 1][P_TPL]; c->aPillar[1][c->naPillar] = R[r + 1][P_TPR]; c->naPillar++;
+        }
+    c->bPillar[0] = R[D->bRing][P_BLL]; c->bPillar[1] = R[D->bRing][P_TPL];
+    c->bPillar[2] = R[D->bRing][P_BLR]; c->bPillar[3] = R[D->bRing][P_TPR];
 
     // ---- place in the world
     float cy = cosf(yaw), sy = sinf(yaw);

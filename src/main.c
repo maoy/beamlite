@@ -666,21 +666,21 @@ static void draw_obox(V3 c, V3 ax, V3 ay, V3 az, Color col, V3 eye) {
             V3 n = vscale(axes[a], (float)sgn), u = axes[(a + 1) % 3], w = axes[(a + 2) % 3];
             V3 fc = vadd(c, n);
             V3 q0 = vsub(vsub(fc, u), w), q1 = vsub(vadd(fc, u), w), q2 = vadd(vadd(fc, u), w), q3 = vadd(vsub(fc, u), w);
-            Color k = oboxGloss > 0 ? shade_paint(col, vnorm(n), fc, eye, oboxGloss) : lit(col, vnorm(n), 0.8f);
+            Color k = oboxGloss > 0 ? shade_paint(col, vnorm(n), fc, eye, oboxGloss) : lit(col, vnorm(n), 1.15f);
             DrawTriangle3D(RV(q0), RV(q1), RV(q2), k); DrawTriangle3D(RV(q0), RV(q2), RV(q3), k);
         }
 }
 
 static V3 nodeN[MAX_NODES];
 
-static const Color INTERIOR = {38, 39, 42, 255};
+static const Color INTERIOR = {66, 66, 70, 255};          // headliner / pillar trim
 
 // From inside the cabin: dashboard, instrument binnacle, steering wheel (turned with the front wheels)
 // and rear-view mirror, all placed in car-local coordinates so they move with the body.
 static void draw_interior(const Car *c, V3 eye) {
     const VehicleDef *d = c->def;
     V3 F = c->fwd, U = c->up, Rt = c->right, S = d->seat;
-    Color dash = {30, 31, 34, 255}, dark = {20, 20, 22, 255};
+    Color dash = {48, 48, 52, 255}, dark = {28, 28, 30, 255};
     oboxGloss = 0.0f;
     V3 dc = car_local_to_world(c, v3(d->dashX - 0.28f, d->dashY - 0.10f, 0));
     draw_obox(dc, vscale(F, 0.28f), vscale(U, 0.10f), vscale(Rt, d->beltHalf * 0.92f), dash, eye);
@@ -711,6 +711,44 @@ static void draw_interior(const Car *c, V3 eye) {
     draw_obox(rm, vscale(F, 0.012f), vscale(U, 0.026f), vscale(Rt, 0.085f), dark, eye);
     draw_obox(vsub(rm, vscale(F, 0.014f)), vscale(F, 0.002f), vscale(U, 0.020f), vscale(Rt, 0.078f), (Color){90, 100, 112, 255}, eye);
     DrawCylinderEx(RV(rm), RV(vadd(rm, vadd(vscale(U, 0.07f), vscale(F, 0.03f)))), 0.008f, 0.008f, 6, dark);
+    oboxGloss = 0.6f;
+}
+
+// A pillar segment: a flattened bar between two body nodes, nudged toward the cabin centre.
+static void pillar_seg(const Car *c, V3 a, V3 b, float w, V3 eye) {
+    V3 mid = vscale(vadd(a, b), 0.5f), ax = vscale(vsub(b, a), 0.5f);
+    V3 in = vsub(c->pos, mid); in = vnorm(vsub(in, vscale(c->up, vdot(in, c->up))));   // horizontal, toward the centre
+    V3 side = vnorm(vcross(ax, in));
+    mid = vadd(mid, vscale(in, 0.025f));
+    draw_obox(mid, vadd(ax, vscale(vnorm(ax), 0.02f)), vscale(side, w), vscale(in, 0.03f), INTERIOR, eye);
+}
+
+// Seats: cushion, reclined backrest and headrest, in car-local coordinates around (x, z).
+static void draw_seat(const Car *c, float x, float z, float halfW, V3 eye) {
+    const VehicleDef *d = c->def;
+    Color fabric = {84, 82, 80, 255}, insert = {104, 100, 96, 255};
+    V3 F = c->fwd, U = c->up, Rt = c->right;
+    float cy = d->seat.y - 0.66f;                                       // cushion centre height
+    draw_obox(car_local_to_world(c, v3(x + 0.04f, cy, z)), vscale(F, 0.25f), vscale(U, 0.06f), vscale(Rt, halfW), fabric, eye);
+    draw_obox(car_local_to_world(c, v3(x + 0.05f, cy + 0.065f, z)), vscale(F, 0.20f), vscale(U, 0.005f), vscale(Rt, halfW * 0.6f), insert, eye);
+    V3 bF = vrot(F, Rt, -0.26f), bU = vrot(U, Rt, -0.26f);              // backrest leans back ~15 degrees
+    draw_obox(car_local_to_world(c, v3(x - 0.27f, cy + 0.34f, z)), vscale(bF, 0.06f), vscale(bU, 0.31f), vscale(Rt, halfW), fabric, eye);
+    draw_obox(car_local_to_world(c, v3(x - 0.20f, cy + 0.34f, z)), vscale(bF, 0.005f), vscale(bU, 0.24f), vscale(Rt, halfW * 0.6f), insert, eye);
+    draw_obox(car_local_to_world(c, v3(x - 0.36f, cy + 0.74f, z)), vscale(bF, 0.05f), vscale(bU, 0.09f), vscale(Rt, fminf(halfW, 0.13f)), fabric, eye);
+}
+
+// Cabin furniture that shows from inside, or through a broken window.
+static void draw_cabin(const Car *c, V3 eye) {
+    oboxGloss = 0.0f;
+    for (int s = 0; s < 2; s++)                                      // A-pillars
+        for (int i = 0; i + 1 < c->naPillar; i++)
+            pillar_seg(c, c->n[c->aPillar[s][i]].p, c->n[c->aPillar[s][i + 1]].p, 0.045f, eye);
+    pillar_seg(c, c->n[c->bPillar[0]].p, c->n[c->bPillar[1]].p, 0.06f, eye);   // B-pillars
+    pillar_seg(c, c->n[c->bPillar[2]].p, c->n[c->bPillar[3]].p, 0.06f, eye);
+    const VehicleDef *d = c->def;
+    draw_seat(c, d->seat.x, d->seat.z, 0.24f, eye);                   // driver
+    draw_seat(c, d->seat.x, -d->seat.z, 0.24f, eye);                  // front passenger
+    draw_seat(c, d->rearSeatX + 0.24f, 0, d->beltHalf * 0.78f, eye);  // rear bench (headrest at the centre)
     oboxGloss = 0.6f;
 }
 
@@ -832,6 +870,7 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
     }
 
     if (interior && !beamView) draw_interior(c, eye);
+    if ((interior || c->glassBrokenCount) && !beamView) draw_cabin(c, eye);
     if (!beamView && c->def->smooth) {               // black grille + lower intake up front, diffuser at the back
         // Corner-lamp cars: lights[0] / lights[2] span the nose / tail ring as {top L, top R, belt L, belt R}.
         // Within a ring, floor-edge nodes are two places from the belt nodes (P_BLL - 2 = P_FL, P_BLR + 2 = P_FR).

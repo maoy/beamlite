@@ -106,6 +106,7 @@ typedef struct {
     float spawnH;                           // drop-in floor height
     V3 seat;                                // driver's eye point (car-local; left-hand drive, so z < 0)
     float dashX, dashY;                     // dashboard top: x of its leading edge, height
+    float rearSeatX;                        // rear bench cushion centre (x)
     int npanels, hasTailgate, lightStyle;   // lightStyle: 0 full-width bars, 1 corner lamps
     int smooth;                             // smooth-shaded paint without panel outlines
     int wheelStyle;                         // 0 flat aero covers, 1 dark multi-spoke alloys
@@ -139,6 +140,8 @@ typedef struct {
     LightStrip lights[4]; int nlights;
     int mirrorNode[4];          // belt nodes L, R at the mirror ring and the ring behind it (-1 = none)
     int spoilerNode[4];         // roof-edge nodes L, R at the spoiler ring and the ring ahead of it
+    int aPillar[2][8], naPillar;  // roof-edge nodes along each windshield side (L, R), base to top
+    int bPillar[4];             // belt and roof-edge nodes at the B-pillar: L belt, L roof, R belt, R roof
     float grip;                 // road-surface grip multiplier (1 dry, ~0.85 wet, ~0.5 snow)
 } Car;
 
