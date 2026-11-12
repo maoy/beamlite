@@ -30,7 +30,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | X | clear spawned trucks |
 | G | drop the tailgate |
 | V | choose vehicle (←/→, Enter) |
-| M | map: Default / New York |
+| M | map: Default / New York / Airport |
 | J | traffic on / off |
 | L | lighting: dusk / day |
 | O | weather: dry / wet / rain / snow |
@@ -39,7 +39,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | T / P | slow-mo / pause |
 | K | clear skid marks |
 
-Two maps, switched with **M**. Both share the proving ground: a launch ramp straight ahead, a
+Three maps, switched with **M**. All share the proving ground: a launch ramp straight ahead, a
 crash-test wall behind you, concrete pillars, a warehouse district off a service road to the right,
 and forest on the hills past ~100 m. Saplings and young trees snap when you hit them; mature
 trunks stop you dead.
@@ -54,6 +54,14 @@ trunks stop you dead.
   content (tickers, video walls, colour-cycling spots), no real brands. They spill coloured light
   onto the street and smear across the wet road. There are zebra crossings, lane lines, street
   lamps and yellow cabs parked on 7th Avenue. The washboard moves south of the highway.
+- **Airport**: you start on the access road heading north toward a glass terminal, with a
+  departures forecourt under a canopy, taxis at the kerb, and two car parks. Past the terminal,
+  airliners sit nose-in at the gates with jet bridges, a control tower glows over the apron, and
+  floodlight masts light it. Further north are two hangars (one with an airliner outside) and a
+  490 m runway (09/27), with piano keys, touchdown bars, numbers, edge and threshold lights and
+  approach lights. A blue-lit taxiway runs alongside. Every so often an airliner lines up on the
+  runway, rolls and climbs out to the east. It is scenery and has no collision. The parked airliners
+  and buildings are solid. The land around the airfield is flattened, and this map has no washboard.
 
 ## How it works
 
@@ -100,7 +108,8 @@ trunks stop you dead.
   right-hand lane, follow curved paths through junctions (swinging wide on right turns, and turning
   left only where nothing else goes), and slow for corners. They stop for red, and for yellow when
   they can stop comfortably, and keep a gap to whatever is ahead, the player included. Wrecked,
-  flipped, off-route or deadlocked cars respawn out of sight. The highway past the ramp and
+  flipped, off-route or deadlocked cars respawn out of sight. At the airport the landside roads
+  are unsignalised, and cars just loop around the terminal. The highway past the ramp and
   through the crash wall is left out of the routes.
 - **Maps**: `world_init(world, map)` builds the shared proving ground plus that map's own streets,
   buildings and landmarks. Road tables, the dirt washboard's location, Broadway and the city's

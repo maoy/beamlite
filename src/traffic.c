@@ -9,9 +9,14 @@
 // Junctions can be switched off (`off` bit per node): the highway past the launch ramp (which
 // ends in a drop) and through the crash wall is no place for traffic. Every remaining junction
 // keeps at least two connections, so cars never reach a dead end.
-typedef struct { int nx, nz; float xs[5], zs[5], xh[5], zh[5]; unsigned off; } Grid;
-static const Grid GRID_DEFAULT = {3, 3, {-40, 0, 40}, {0, 48, 97}, {4, 7, 4}, {7, 4, 3}, 0};
-static const Grid GRID_NEWYORK = {3, 5, {-54, 0, 54}, {0, 47, 75, 103, 128}, {6, 8, 6}, {7, 3, 3, 3, 4}, 1u << 2};
+// Individual links can be blocked too (`blk`: pairs of node indices), and a grid can go without
+// signals (`noSignals`: always green, nothing drawn).
+typedef struct { int nx, nz; float xs[5], zs[5], xh[5], zh[5]; unsigned off; int nblk; int blk[2][2]; int noSignals; } Grid;
+static const Grid GRID_DEFAULT = {3, 3, {-40, 0, 40}, {0, 48, 97}, {4, 7, 4}, {7, 4, 3}, 0, 0, {{0}}, 0};
+static const Grid GRID_NEWYORK = {3, 5, {-54, 0, 54}, {0, 47, 75, 103, 128}, {6, 8, 6}, {7, 3, 3, 3, 4}, 1u << 2, 0, {{0}}, 0};
+// Airport landside loop: highway, access road, forecourt, the two service roads and the apron road.
+// The access road stops at the terminal (link 4-7 blocked); the highway east of the access road crosses the ramp.
+static const Grid GRID_AIRPORT = {3, 3, {-60, 0, 100}, {0, 42, 77}, {4, 7, 4}, {7, 6, 3}, 1u << 2, 1, {{4, 7}}, 1};
 static Grid G;
 static float timer;
 #define CYCLE 30.0f
@@ -22,13 +27,17 @@ static float node_x(int n) { return G.xs[ix_of(n)]; }
 static float node_z(int n) { return G.zs[iz_of(n)]; }
 
 static int node_on(int n) { return !(G.off >> n & 1); }
+static int blocked(int a, int b) {
+    for (int i = 0; i < G.nblk; i++) if ((G.blk[i][0] == a && G.blk[i][1] == b) || (G.blk[i][0] == b && G.blk[i][1] == a)) return 1;
+    return 0;
+}
 static int neighbours(int n, int out[4]) {
     int k = 0, ix = ix_of(n), iz = iz_of(n);
     if (!node_on(n)) return 0;
-    if (ix > 0 && node_on(n - 1)) out[k++] = n - 1;
-    if (ix < G.nx - 1 && node_on(n + 1)) out[k++] = n + 1;
-    if (iz > 0 && node_on(n - G.nx)) out[k++] = n - G.nx;
-    if (iz < G.nz - 1 && node_on(n + G.nx)) out[k++] = n + G.nx;
+    if (ix > 0 && node_on(n - 1) && !blocked(n, n - 1)) out[k++] = n - 1;
+    if (ix < G.nx - 1 && node_on(n + 1) && !blocked(n, n + 1)) out[k++] = n + 1;
+    if (iz > 0 && node_on(n - G.nx) && !blocked(n, n - G.nx)) out[k++] = n - G.nx;
+    if (iz < G.nz - 1 && node_on(n + G.nx) && !blocked(n, n + G.nx)) out[k++] = n + G.nx;
     return k;
 }
 
@@ -45,6 +54,7 @@ static void right_of(float dx, float dz, float *rx, float *rz) { *rx = -dz; *rz 
 
 // Signals alternate: traffic along z gets green first, then traffic along x. Offsets stagger junctions.
 static int light(int node, int axisZ) {
+    if (G.noSignals) return LIGHT_GREEN;
     float t = fmodf(timer + (float)((ix_of(node) * 4 + iz_of(node) * 7) % 30), CYCLE);
     // z: green 0-11, yellow 11-13; all red 13-15.5; x: green 15.5-25.5, yellow 25.5-27.5; all red to 30.
     if (axisZ) return t < 11 ? LIGHT_GREEN : t < 13 ? LIGHT_YELLOW : LIGHT_RED;
@@ -163,7 +173,7 @@ static void spawn(World *w, Ai *a, V3 avoid, float minDist) {
     w->cars[a->slot].active = 0;
 }
 
-void traffic_set_map(int map) { G = map == MAP_NEWYORK ? GRID_NEWYORK : GRID_DEFAULT; }
+void traffic_set_map(int map) { G = map == MAP_NEWYORK ? GRID_NEWYORK : map == MAP_AIRPORT ? GRID_AIRPORT : GRID_DEFAULT; }
 
 void traffic_init(World *w, int count, V3 avoid) {
     traffic_set_map(w->map);
@@ -254,6 +264,11 @@ static void drive(World *w, Ai *a, float dt, V3 player) {
         if (j == a->slot || !w->cars[j].active) continue;
         float ox = w->cars[j].pos.x - px, oz = w->cars[j].pos.z - pz;
         float along = ox * fx + oz * fz, lat = fabsf(ox * rx + oz * rz);
+        // Two stopped cars blocking each other across a junction (not one queue): lower slot goes first.
+        Car *o = &w->cars[j];
+        float ol = sqrtf(o->fwd.x * o->fwd.x + o->fwd.z * o->fwd.z) + 1e-6f;
+        int sameWay = (o->fwd.x * fx + o->fwd.z * fz) / ol > 0.8f;
+        if (!sameWay && fabsf(v) < 0.5f && vlen(o->vel) < 0.5f && a->slot < j) continue;
         if (along > 0 && along < 35.0f && lat < 2.4f) target = fminf(target, fmaxf(0.0f, along - 8.5f) * 0.6f);   // ~3 m bumper gap
     }
 
@@ -285,6 +300,7 @@ void traffic_update(World *w, float dt, V3 player) {
 // ----------------------------------------------------------------- signals --
 
 int traffic_signal_count(void) {
+    if (G.noSignals) return 0;
     int n = 0;
     for (int node = 0; node < G.nx * G.nz; node++) { int nb[4]; n += neighbours(node, nb); }
     return n;

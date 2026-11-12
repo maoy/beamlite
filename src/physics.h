@@ -148,7 +148,7 @@ typedef struct {
 typedef struct { V3 mn, mx; } Box;
 
 // Buildings collide as their box; the rest of this is for the renderer.
-enum { BLD_HOUSE, BLD_SHOP, BLD_APARTMENT, BLD_TOWER, BLD_WAREHOUSE, BLD_WEDGE, BLD_STEPS };   // wedge: the screen-clad tower in the bowtie; steps: the red grandstand
+enum { BLD_HOUSE, BLD_SHOP, BLD_APARTMENT, BLD_TOWER, BLD_WAREHOUSE, BLD_WEDGE, BLD_STEPS, BLD_TERMINAL, BLD_ATC, BLD_HANGAR };   // wedge: the screen-clad tower in the bowtie; steps: the red grandstand
 typedef struct {
     V3 mn, mx;                  // walls (mn.y is below ground on slopes)
     float ground;               // street level at the building
@@ -170,8 +170,12 @@ typedef struct {
 } Tree;
 
 // ---- maps
-enum { MAP_DEFAULT, MAP_NEWYORK, MAP_COUNT };
+enum { MAP_DEFAULT, MAP_NEWYORK, MAP_AIRPORT, MAP_COUNT };
 const char *map_name(int map);
+
+// A parked airliner: nose position and the unit direction from nose to tail (its fuselage collides).
+typedef struct { float x, z, dx, dz; unsigned seed; } Plane;
+#define MAX_PLANES 8
 
 typedef struct {
     int map;                    // MAP_*
@@ -180,6 +184,7 @@ typedef struct {
     Building bld[MAX_BLD]; int nbld;
     Tree tree[MAX_TREES]; int ntree;
     int treesDown;
+    Plane planes[MAX_PLANES]; int nplanes;
     // Uniform grid (CSR) of static obstacles: item < MAX_BOXES is a box, otherwise a tree.
     int gridStart[GRID_N * GRID_N + 1];
     int gridItem[MAX_GRID_ITEMS];
@@ -202,7 +207,25 @@ V3 terrain_normal(float x, float z);
 float broadway_x(float z);              // centreline x at z
 float broadway_dist(float x, float z);  // perpendicular distance from the centreline
 
-int road_at(float x, float z);          // 0 none, 1 highway, 2 street/avenue, 3 pedestrian plaza (current map)
+// Airport map: runway 09/27 along x north of the terminal, parallel taxiway, apron with gates.
+#define AP_RWY_X0 -245.0f
+#define AP_RWY_X1 245.0f
+#define AP_RWY_Z0 168.0f
+#define AP_RWY_Z1 198.0f
+#define AP_TWY_Z0 140.0f
+#define AP_TWY_Z1 150.0f
+#define AP_TWY_X 235.0f
+#define AP_APRON_Z0 80.0f
+#define AP_APRON_Z1 138.0f
+#define AP_TERM_X0 -45.0f
+#define AP_TERM_X1 85.0f
+#define AP_TERM_Z0 50.0f
+#define AP_TERM_Z1 70.0f
+#define AP_NOSE_Z 86.0f                 // where a gate airliner's nose stops
+static const float AP_GATES[4] = {-30.0f, 0.0f, 30.0f, 60.0f};
+
+// 0 none, 1 highway, 2 street/avenue, 3 pedestrian plaza, 4 runway/taxiway/car park asphalt, 5 apron concrete
+int road_at(float x, float z);
 int dirt_at(float x, float z);          // on the dirt washboard section (current map)
 int map_has_broadway(void);
 int road_rects(float (*out)[4], int max, int *nHighway);   // (x0, x1, z0, z1); highways first

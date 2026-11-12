@@ -64,6 +64,8 @@ static Color terrain_color(float x, float z, float y, V3 n) {
     if (x > 40 && x < 58 && fabsf(z) < 6.5f) { r = 0.72f; g = 0.66f; b = 0.55f; cover = 0.7f; }  // ramp
     else if (dirt_at(x, z)) { r = 0.55f; g = 0.42f; b = 0.28f; cover = 0.8f; }                  // dirt
     else if (road_at(x, z) == 3) { r = 0.50f + 0.03f * noise; g = 0.47f; b = 0.44f; cover = 0.7f; }   // plaza paving
+    else if (road_at(x, z) == 4) { r = g = b = 0.24f + 0.03f * noise; cover = 0.25f; }                 // runway / taxiway asphalt
+    else if (road_at(x, z) == 5) { r = 0.60f + 0.03f * noise; g = 0.60f; b = 0.58f; cover = 0.5f; }    // apron concrete
     else if (road_at(x, z) == 1) { r = g = b = 0.30f + 0.04f * noise; cover = 0.18f + 0.22f * noise; }   // highway (ploughed)
     else if (road_at(x, z) == 2) { r = g = b = 0.27f + 0.03f * noise; cover = 0.25f + 0.25f * noise; }   // town street
     else if (road_at(x + 2.2f, z) == 2 || road_at(x - 2.2f, z) == 2 || road_at(x, z + 2.2f) == 2 || road_at(x, z - 2.2f) == 2) {
@@ -353,8 +355,10 @@ static void paint_rect(MeshB *m, float x0, float x1, float z0, float z1) {
     c.y = terrain_height(c.x, c.z) + 0.03f; d.y = terrain_height(d.x, d.z) + 0.03f;
     mb_quad(m, a, b, c, d, (Color){222, 222, 214, 255}, v3((x0 + x1) * 0.5f, -10, (z0 + z1) * 0.5f));
 }
+static void build_markings_airport(MeshB *m);
 static void build_markings(const World *w) {
     if (hasMarkings) { UnloadModel(markings); hasMarkings = 0; }
+    if (w->map == MAP_AIRPORT) { MeshB am = {0}; build_markings_airport(&am); markings = mb_model(&am); hasMarkings = 1; return; }
     if (w->map != MAP_NEWYORK) return;
     MeshB m = {0};
     const float av[3][2] = {{-8, 8}, {48, 60}, {-60, -48}};
@@ -480,9 +484,308 @@ static void window(MeshB *m, const Building *B, int s, float u, float y, float w
     if (brnd() < litP) { mbFlat = 1; facade_rect(&GLOW, B, s, u + 0.06f, y + 0.06f, w - 0.12f, h - 0.12f, 0.05f, scale_col(WARM, glowK * (0.75f + 0.25f * brnd()))); mbFlat = 0; }
 }
 
+// -------------------------------------------------------------- airport ----
+
+static const Color LIVERY[] = {{200, 30, 40, 255}, {20, 50, 120, 255}, {0, 130, 140, 255}, {230, 110, 20, 255}, {40, 120, 60, 255}, {110, 40, 140, 255}};
+
+// An airliner (~36 m narrow-body) with its nose at `nose`, fuselage running toward `tail` (unit, horizontal).
+// Axis-aligned orientations only (the gear uses axis-aligned boxes). Livery colour from `seed`.
+static void build_airliner(MeshB *m, V3 nose, V3 tail, unsigned seed) {
+    Color white = {236, 237, 240, 255}, belly = {200, 202, 206, 255}, glass = {50, 62, 78, 255}, wingc = {205, 207, 212, 255};
+    Color liv = LIVERY[seed % 6], dark = {40, 40, 44, 255};
+    V3 up = v3(0, 1, 0), right = v3(tail.z, 0, -tail.x);                  // perpendicular, horizontal
+    #define AP(s, y, l) vadd(vadd(nose, vscale(tail, (s))), vadd(vscale(up, (y)), vscale(right, (l))))
+    // Fuselage: octagonal rings along the station s (metres back from the nose).
+    static const float ST[][3] = {{0.0f, 0.15f, 3.35f}, {0.9f, 1.0f, 3.40f}, {2.2f, 1.6f, 3.50f}, {4.0f, 1.95f, 3.55f}, {28.0f, 1.95f, 3.6f},
+                                  {31.0f, 1.5f, 3.95f}, {34.0f, 0.8f, 4.5f}, {36.0f, 0.2f, 4.9f}};
+    const int NS = (int)(sizeof ST / sizeof ST[0]);
+    for (int i = 0; i + 1 < NS; i++)
+        for (int k = 0; k < 8; k++) {
+            float a0 = (k + 0.5f) * 0.7854f, a1 = (k + 1.5f) * 0.7854f;
+            V3 p0 = AP(ST[i][0], ST[i][2] + ST[i][1] * sinf(a0), ST[i][1] * cosf(a0)), p1 = AP(ST[i][0], ST[i][2] + ST[i][1] * sinf(a1), ST[i][1] * cosf(a1));
+            V3 q0 = AP(ST[i + 1][0], ST[i + 1][2] + ST[i + 1][1] * sinf(a0), ST[i + 1][1] * cosf(a0)), q1 = AP(ST[i + 1][0], ST[i + 1][2] + ST[i + 1][1] * sinf(a1), ST[i + 1][1] * cosf(a1));
+            Color c = white;
+            if (k == 4 || k == 5 || k == 6) c = belly;                    // underside
+            if ((k == 7 || k == 3) && i == 3) c = liv;                    // cheatline along the lower flanks
+            if ((k == 0 || k == 2) && i == 3) c = (Color){226, 228, 232, 255};
+            if (i == 1 && k <= 3 && k >= 0) c = glass;                    // cockpit windows
+            V3 ctr = AP(0.5f * (ST[i][0] + ST[i + 1][0]), 0.5f * (ST[i][2] + ST[i + 1][2]), 0);
+            mb_quad(m, p0, p1, q1, q0, c, ctr);
+        }
+    for (int side = -1; side <= 1; side += 2) {                          // passenger window strip
+        V3 a = AP(5.0f, 3.95f, side * 1.86f), b = AP(27.0f, 3.95f, side * 1.86f);
+        mb_quad(m, a, b, vadd(b, v3(0, 0.35f, 0)), vadd(a, v3(0, 0.35f, 0)), glass, AP(16, 3.95f, 0));
+    }
+    // Wings (low-mounted, swept), with a little thickness.
+    for (int side = -1; side <= 1; side += 2) {
+        V3 r0 = AP(14.0f, 2.4f, side * 1.9f), r1 = AP(21.0f, 2.4f, side * 1.9f), t0 = AP(22.5f, 3.3f, side * 17.0f), t1 = AP(25.0f, 3.3f, side * 17.0f);
+        V3 d = v3(0, -0.25f, 0);
+        mb_quad(m, r0, t0, t1, r1, wingc, vadd(AP(19, 0, side * 8), v3(0, -10, 0)));
+        mb_quad(m, vadd(r0, d), vadd(t0, d), vadd(t1, d), vadd(r1, d), belly, vadd(AP(19, 0, side * 8), v3(0, 10, 0)));
+        mb_quad(m, r0, t0, vadd(t0, d), vadd(r0, d), wingc, AP(30, 3, side * 8));       // leading edge
+        // Engine nacelle under the wing.
+        for (int k = 0; k < 8; k++) {
+            float a0 = k * 0.7854f, a1 = (k + 1) * 0.7854f;
+            V3 e0 = AP(12.5f, 1.95f + 1.0f * sinf(a0), side * 6.5f + 1.0f * cosf(a0)), e1 = AP(12.5f, 1.95f + 1.0f * sinf(a1), side * 6.5f + 1.0f * cosf(a1));
+            V3 f0 = AP(17.0f, 1.95f + 0.8f * sinf(a0), side * 6.5f + 0.8f * cosf(a0)), f1 = AP(17.0f, 1.95f + 0.8f * sinf(a1), side * 6.5f + 0.8f * cosf(a1));
+            mb_quad(m, e0, e1, f1, f0, (Color){180, 182, 188, 255}, AP(14.7f, 1.95f, side * 6.5f));
+            mb_tri(m, e0, e1, AP(12.5f, 1.95f, side * 6.5f), dark, AP(20.0f, 1.95f, side * 6.5f));   // intake
+        }
+        mb_quad(m, AP(14.5f, 2.4f, side * 6.5f), AP(17.0f, 2.4f, side * 6.5f), AP(17.0f, 2.85f, side * 6.5f), AP(14.5f, 2.85f, side * 6.5f), belly, AP(15, 2.6f, 0));   // pylon
+        // Horizontal stabiliser.
+        mb_quad(m, AP(31.0f, 4.6f, side * 0.8f), AP(34.0f, 4.9f, side * 6.5f), AP(35.5f, 4.9f, side * 6.5f), AP(34.5f, 4.6f, side * 0.8f), wingc, AP(33, -5, side * 3));
+    }
+    // Fin in the livery colour, lit on both sides.
+    V3 f0 = AP(27.5f, 5.3f, 0), f1 = AP(35.0f, 5.3f, 0), f2 = AP(36.0f, 11.0f, 0), f3 = AP(33.0f, 11.0f, 0);
+    mb_quad(m, f0, f1, f2, f3, liv, AP(32, 8, -5));
+    mb_quad(m, f0, f1, f2, f3, liv, AP(32, 8, 5));
+    // Landing gear: struts and wheels.
+    V3 ng = AP(3.0f, 0, 0), mg[2] = {AP(18.5f, 0, -2.8f), AP(18.5f, 0, 2.8f)};
+    box_shell(m, v3(ng.x - 0.12f, 0.5f + ng.y, ng.z - 0.12f), v3(ng.x + 0.12f, 2.0f + ng.y, ng.z + 0.12f), (Color){150, 150, 155, 255}, dark);
+    box_shell(m, v3(ng.x - 0.4f, ng.y, ng.z - 0.4f), v3(ng.x + 0.4f, 0.7f + ng.y, ng.z + 0.4f), dark, dark);
+    for (int i = 0; i < 2; i++) {
+        box_shell(m, v3(mg[i].x - 0.15f, 0.8f + mg[i].y, mg[i].z - 0.15f), v3(mg[i].x + 0.15f, 2.4f + mg[i].y, mg[i].z + 0.15f), (Color){150, 150, 155, 255}, dark);
+        box_shell(m, v3(mg[i].x - 0.7f, mg[i].y, mg[i].z - 0.7f), v3(mg[i].x + 0.7f, 1.1f + mg[i].y, mg[i].z + 0.7f), dark, dark);
+    }
+    #undef AP
+}
+
+// Terminal: pale walls, a glass curtain on both long faces, a canopy over the forecourt kerb.
+static void build_terminal(MeshB *m, const Building *B) {
+    bseed = B->seed;
+    box_shell(m, B->mn, B->mx, (Color){212, 214, 218, 255}, (Color){150, 154, 160, 255});
+    float H = B->mx.y - B->ground, len = B->mx.x - B->mn.x;
+    Color glass = {52, 70, 90, 255};
+    for (int s = 2; s <= 3; s++) {                         // +z (airside) and -z (landside) faces
+        int nc = (int)(len / 3.0f);
+        for (int i = 0; i < nc; i++)
+            for (float y = 0.6f; y + 3.4f < H - 2.0f; y += 4.2f) window(m, B, s, i * 3.0f + 0.15f, y, 2.7f, 3.4f, 0.22f, glass);
+    }
+    for (int s = 0; s <= 1; s++) facade_rect(m, B, s, 2.0f, H - 3.0f, (B->mx.z - B->mn.z) - 4.0f, 1.6f, 0.04f, (Color){30, 90, 160, 255});
+    float g = B->ground;
+    box_shell(m, v3(B->mn.x - 2, g + 7.0f, B->mn.z - 4.5f), v3(B->mx.x + 2, g + 7.6f, B->mn.z), (Color){190, 194, 200, 255}, (Color){170, 174, 180, 255});
+    for (float x = B->mn.x + 4; x < B->mx.x; x += 14)       // canopy columns
+        box_shell(m, v3(x - 0.2f, g, B->mn.z - 4.0f), v3(x + 0.2f, g + 7.0f, B->mn.z - 3.6f), (Color){120, 124, 130, 255}, (Color){120, 124, 130, 255});
+    for (float x = B->mn.x + 6; x < B->mx.x; x += 20)       // canopy downlights
+        ground_pool(v3(x, 0, B->mn.z - 2.5f), 5.0f, scale_col(LAMP, 0.36f));
+}
+
+// Control tower: a concrete shaft, a wide glass cab that glows, a roof and a beacon mast.
+static void build_atc(MeshB *m, const Building *B) {
+    float g = B->ground, top = B->mx.y, cabLo = top - 7.0f, cabHi = top - 2.5f;
+    V3 c = v3((B->mn.x + B->mx.x) * 0.5f, 0, (B->mn.z + B->mx.z) * 0.5f);
+    Color conc = {196, 194, 188, 255};
+    box_shell(m, v3(B->mn.x + 1, B->mn.y, B->mn.z + 1), v3(B->mx.x - 1, cabLo, B->mx.z - 1), conc, conc);
+    box_shell(m, v3(c.x - 6, cabLo, c.z - 6), v3(c.x + 6, cabLo + 0.8f, c.z + 6), conc, conc);
+    box_shell(m, v3(c.x - 5.6f, cabLo + 0.8f, c.z - 5.6f), v3(c.x + 5.6f, cabHi, c.z + 5.6f), (Color){44, 58, 72, 255}, conc);
+    mbFlat = 1;
+    for (int s = 0; s < 4; s++) {                           // lit cab glazing
+        V3 n = s == 0 ? v3(1, 0, 0) : s == 1 ? v3(-1, 0, 0) : s == 2 ? v3(0, 0, 1) : v3(0, 0, -1);
+        V3 a = v3(n.z, 0, -n.x);
+        V3 base = vadd(c, vscale(n, 5.65f));
+        V3 p0 = vadd(vsub(base, vscale(a, 5.2f)), v3(0, cabLo + 1.4f, 0)), p1 = vadd(vadd(base, vscale(a, 5.2f)), v3(0, cabLo + 1.4f, 0));
+        mb_quad(&GLOW, p0, p1, vadd(p1, v3(0, cabHi - cabLo - 2.0f, 0)), vadd(p0, v3(0, cabHi - cabLo - 2.0f, 0)), (Color){170, 200, 225, 255}, c);
+    }
+    mbFlat = 0;
+    box_shell(m, v3(c.x - 6.5f, cabHi, c.z - 6.5f), v3(c.x + 6.5f, cabHi + 0.8f, c.z + 6.5f), (Color){90, 92, 96, 255}, (Color){90, 92, 96, 255});
+    box_shell(m, v3(c.x - 0.15f, cabHi + 0.8f, c.z - 0.15f), v3(c.x + 0.15f, top + 6.0f, c.z + 0.15f), (Color){180, 40, 40, 255}, (Color){180, 40, 40, 255});
+    mbFlat = 1; box_shell(&GLOW, v3(c.x - 0.3f, top + 6.0f, c.z - 0.3f), v3(c.x + 0.3f, top + 6.6f, c.z + 0.3f), (Color){255, 40, 30, 255}, (Color){255, 40, 30, 255}); mbFlat = 0;
+    (void)g;
+}
+
+// Hangar: corrugated walls, a low curved-look gable roof, huge doors with a lit gap.
+static void build_hangar(MeshB *m, const Building *B) {
+    Color wall = {168, 172, 178, 255};
+    box_shell(m, B->mn, B->mx, wall, wall);
+    float H = B->mx.y - B->ground, len = B->mx.x - B->mn.x;
+    for (float u = 0.6f; u < len; u += 1.2f) facade_rect(m, B, 3, u, 0.0f, 0.12f, H, 0.03f, (Color){150, 154, 160, 255});   // ribs (back)
+    facade_rect(m, B, 2, 1.5f, 0.0f, len - 3.0f, H * 0.82f, 0.04f, (Color){74, 78, 86, 255});                          // doors
+    for (float u = 1.5f; u < len - 1.5f; u += (len - 3.0f) / 6.0f) facade_rect(m, B, 2, u, 0.0f, 0.12f, H * 0.82f, 0.05f, (Color){50, 52, 58, 255});
+    mbFlat = 1; facade_rect(&GLOW, B, 2, len * 0.5f - 2.5f, 0.0f, 5.0f, H * 0.82f - 0.2f, 0.06f, scale_col(WARM, 0.55f)); mbFlat = 0;   // doors ajar
+    V3 o, a, n; float l;
+    facade(B, 2, &o, &a, &n, &l);
+    ground_pool(vadd(vadd(o, vscale(a, len * 0.5f)), vscale(n, 7.0f)), 9.0f, scale_col(WARM, 0.3f));
+    // Roof: gable whose ridge runs front to back.
+    float e = 0.5f, wt = B->mx.y, rt = B->mx.y + B->roof, cx = (B->mn.x + B->mx.x) * 0.5f;
+    V3 ref = v3(cx, B->mx.y - 2, (B->mn.z + B->mx.z) * 0.5f);
+    Color roofc = {130, 134, 140, 255};
+    mb_quad(m, v3(B->mn.x - e, wt, B->mn.z - e), v3(B->mn.x - e, wt, B->mx.z + e), v3(cx, rt, B->mx.z + e), v3(cx, rt, B->mn.z - e), roofc, ref);
+    mb_quad(m, v3(B->mx.x + e, wt, B->mn.z - e), v3(B->mx.x + e, wt, B->mx.z + e), v3(cx, rt, B->mx.z + e), v3(cx, rt, B->mn.z - e), roofc, ref);
+    mb_tri(m, v3(B->mn.x, wt, B->mn.z), v3(B->mx.x, wt, B->mn.z), v3(cx, rt, B->mn.z), wall, ref);
+    mb_tri(m, v3(B->mn.x, wt, B->mx.z), v3(B->mx.x, wt, B->mx.z), v3(cx, rt, B->mx.z), wall, ref);
+}
+
+// Tall apron floodlight mast.
+static void flood_mast(MeshB *m, float x, float z) {
+    float g = terrain_height(x, z);
+    Color pole = {120, 124, 130, 255};
+    box_shell(m, v3(x - 0.25f, g - 0.3f, z - 0.25f), v3(x + 0.25f, g + 20.0f, z + 0.25f), pole, pole);
+    box_shell(m, v3(x - 1.6f, g + 20.0f, z - 0.5f), v3(x + 1.6f, g + 21.2f, z + 0.5f), (Color){60, 62, 66, 255}, (Color){60, 62, 66, 255});
+    mbFlat = 1;
+    mb_quad(&GLOW, v3(x - 1.5f, g + 19.98f, z - 0.45f), v3(x + 1.5f, g + 19.98f, z - 0.45f), v3(x + 1.5f, g + 19.98f, z + 0.45f), v3(x - 1.5f, g + 19.98f, z + 0.45f), LAMP, v3(x, g + 30, z));
+    mbFlat = 0;
+    ground_pool(v3(x, 0, z), 22.0f, scale_col(LAMP, 0.30f));
+}
+
+// Static airport dressing: airliners and jet bridges, masts, landside lamps, parked cars, airfield lights.
+static void build_airport_extras(MeshB *m, const World *w) {
+    for (int i = 0; i < w->nplanes; i++) {
+        const Plane *P = &w->planes[i];
+        V3 nose = v3(P->x, terrain_height(P->x, P->z), P->z), tail = v3(P->dx, 0, P->dz);
+        build_airliner(m, nose, tail, P->seed);
+        if (P->dz > 0.5f && P->z < 100) {                  // at a gate: jet bridge from the terminal to the forward door
+            Color jb = {170, 174, 180, 255};
+            float bx = P->x - 6.0f, g = nose.y;
+            box_shell(m, v3(bx - 1.3f, g + 3.6f, AP_TERM_Z1), v3(bx + 1.3f, g + 6.2f, P->z + 2.5f), jb, jb);
+            box_shell(m, v3(bx, g + 3.4f, P->z + 2.5f), v3(P->x - 1.9f, g + 6.0f, P->z + 6.5f), jb, jb);
+            box_shell(m, v3(bx - 0.6f, g, P->z + 1.5f), v3(bx + 0.6f, g + 3.6f, P->z + 2.5f), (Color){90, 92, 96, 255}, jb);
+        }
+    }
+    for (float x = -100; x <= 110; x += 30) flood_mast(m, x, 80.8f);
+    flood_mast(m, -160, 137.5f); flood_mast(m, -130, 137.5f);
+    for (float x = -60; x < 104; x += 18) {                // forecourt lamps
+        if (lamp_spot_ok(w, x, 35.3f)) street_lamp(m, x, 35.3f, 0, 1);
+    }
+    for (float z = 12; z < 76; z += 20) {
+        if (lamp_spot_ok(w, -64.7f, z)) street_lamp(m, -64.7f, z, 1, 0);
+        if (lamp_spot_ok(w, -7.7f, z) && z < 34) street_lamp(m, -7.7f, z, 1, 0);
+    }
+    // Parked cars in the car parks: simple boxes, but they fill the bays.
+    bseed = 99u;
+    const float parks[2][4] = {{10, 90, 14, 34}, {-50, -12, 14, 34}};
+    for (int p = 0; p < 2; p++)
+        for (int row = 0; row < 2; row++)
+            for (float x = parks[p][0] + 1.6f; x < parks[p][1] - 1.6f; x += 2.6f) {
+                if (brnd() < 0.3f) continue;
+                float z0 = row ? parks[p][3] - 5.0f : parks[p][2] + 0.6f, g = terrain_height(x, z0 + 2);
+                Color c = scale_col(LIVERY[(int)(brnd() * 6)], 0.6f + 0.5f * brnd());
+                if (brnd() < 0.4f) c = (Color){(unsigned char)(170 + 60 * brnd()), (unsigned char)(170 + 60 * brnd()), (unsigned char)(175 + 60 * brnd()), 255};
+                box_shell(m, v3(x - 0.85f, g + 0.25f, z0 + 0.3f), v3(x + 0.85f, g + 0.95f, z0 + 4.4f), c, c);
+                box_shell(m, v3(x - 0.75f, g + 0.95f, z0 + 1.4f), v3(x + 0.75f, g + 1.45f, z0 + 3.4f), (Color){45, 55, 68, 255}, c);
+            }
+    // Airfield lighting (glows at dusk): runway edges white, thresholds green, taxiway edges blue, approach bars.
+    mbFlat = 1;
+    #define LIGHT(x, z, col) box_shell(&GLOW, v3((x) - 0.18f, terrain_height(x, z) + 0.05f, (z) - 0.18f), v3((x) + 0.18f, terrain_height(x, z) + 0.4f, (z) + 0.18f), col, col)
+    for (float x = AP_RWY_X0 + 2; x <= AP_RWY_X1 - 2; x += 30) { LIGHT(x, AP_RWY_Z0 + 0.6f, ((Color){255, 250, 230, 255})); LIGHT(x, AP_RWY_Z1 - 0.6f, ((Color){255, 250, 230, 255})); }
+    for (float z = AP_RWY_Z0 + 1; z <= AP_RWY_Z1 - 1; z += 2.5f) { LIGHT(AP_RWY_X0 + 0.6f, z, ((Color){60, 255, 120, 255})); LIGHT(AP_RWY_X1 - 0.6f, z, ((Color){60, 255, 120, 255})); }
+    for (float x = -AP_TWY_X; x <= AP_TWY_X; x += 25) { LIGHT(x, AP_TWY_Z0 - 0.6f, ((Color){60, 110, 255, 255})); LIGHT(x, AP_TWY_Z1 + 0.6f, ((Color){60, 110, 255, 255})); }
+    for (float x = AP_RWY_X0 - 8; x > -296; x -= 9)
+        for (float dz = -4; dz <= 4; dz += 2) LIGHT(x, (AP_RWY_Z0 + AP_RWY_Z1) * 0.5f + dz, ((Color){255, 250, 230, 255}));
+    #undef LIGHT
+    mbFlat = 0;
+}
+
+// Runway, taxiway, apron and car-park paint.
+static void paint_c(MeshB *m, float x0, float x1, float z0, float z1, Color c) {
+    V3 a = v3(x0, 0, z0), b = v3(x1, 0, z0), cc = v3(x1, 0, z1), d = v3(x0, 0, z1);
+    a.y = terrain_height(a.x, a.z) + 0.03f; b.y = terrain_height(b.x, b.z) + 0.03f; cc.y = terrain_height(cc.x, cc.z) + 0.03f; d.y = terrain_height(d.x, d.z) + 0.03f;
+    mb_quad(m, a, b, cc, d, c, v3((x0 + x1) * 0.5f, -10, (z0 + z1) * 0.5f));
+}
+// A 7-segment digit. (u, v): across and up in the reader's frame; the reader faces +x (east) or -x.
+static void paint_digit(MeshB *m, int dgt, float x, float zLeft, int east) {
+    static const unsigned char SEG[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};   // bits a b c d e f g
+    const float W = 7.0f, H = 12.0f, t = 1.2f;
+    const float r[7][4] = {{0, W, H - t, H}, {W - t, W, H / 2, H}, {W - t, W, 0, H / 2}, {0, W, 0, t}, {0, t, 0, H / 2}, {0, t, H / 2, H}, {0, W, H / 2 - t / 2, H / 2 + t / 2}};
+    Color white = {225, 225, 220, 255};
+    for (int sgm = 0; sgm < 7; sgm++) {
+        if (!(SEG[dgt] >> sgm & 1)) continue;
+        float u0 = r[sgm][0], u1 = r[sgm][1], v0 = r[sgm][2], v1 = r[sgm][3];
+        if (east) paint_c(m, x + v0, x + v1, zLeft + u0, zLeft + u1, white);
+        else paint_c(m, x - v1, x - v0, zLeft - u1, zLeft - u0, white);
+    }
+}
+static void build_markings_airport(MeshB *m) {
+    Color white = {225, 225, 220, 255}, yellow = {230, 190, 40, 255};
+    float zc = (AP_RWY_Z0 + AP_RWY_Z1) * 0.5f;
+    paint_c(m, AP_RWY_X0 + 1, AP_RWY_X1 - 1, AP_RWY_Z0 + 1.0f, AP_RWY_Z0 + 1.9f, white);       // edge lines
+    paint_c(m, AP_RWY_X0 + 1, AP_RWY_X1 - 1, AP_RWY_Z1 - 1.9f, AP_RWY_Z1 - 1.0f, white);
+    for (float x = AP_RWY_X0 + 40; x < AP_RWY_X1 - 70; x += 50) paint_c(m, x, x + 30, zc - 0.45f, zc + 0.45f, white);   // centreline
+    for (int end = 0; end < 2; end++) {
+        float x0 = end ? AP_RWY_X1 - 33 : AP_RWY_X0 + 3;
+        for (int b = 0; b < 6; b++) {                         // threshold "piano keys"
+            float z = zc + 2.5f + b * 2.4f;
+            paint_c(m, x0, x0 + 30, z, z + 1.5f, white);
+            paint_c(m, x0, x0 + 30, 2 * zc - z - 1.5f, 2 * zc - z, white);
+        }
+        float tz = end ? AP_RWY_X1 - 130 : AP_RWY_X0 + 100;  // touchdown zone bars
+        paint_c(m, tz, tz + 22, zc + 4.0f, zc + 7.0f, white); paint_c(m, tz, tz + 22, zc - 7.0f, zc - 4.0f, white);
+    }
+    // "09" read by pilots heading east, "27" by pilots heading west.
+    paint_digit(m, 0, AP_RWY_X0 + 40, zc - 8.0f, 1); paint_digit(m, 9, AP_RWY_X0 + 40, zc + 1.0f, 1);
+    paint_digit(m, 2, AP_RWY_X1 - 40, zc + 8.0f, 0); paint_digit(m, 7, AP_RWY_X1 - 40, zc - 1.0f, 0);
+    float tzc = (AP_TWY_Z0 + AP_TWY_Z1) * 0.5f;              // taxiway centreline and connectors
+    paint_c(m, -AP_TWY_X, AP_TWY_X, tzc - 0.15f, tzc + 0.15f, yellow);
+    const float cx[3] = {-235, 0, 235};
+    for (int i = 0; i < 3; i++) {
+        paint_c(m, cx[i] - 0.15f, cx[i] + 0.15f, tzc, AP_RWY_Z0, yellow);
+        paint_c(m, cx[i] - 5.5f, cx[i] + 5.5f, AP_RWY_Z0 - 6.0f, AP_RWY_Z0 - 5.7f, yellow);    // holding position
+        paint_c(m, cx[i] - 5.5f, cx[i] + 5.5f, AP_RWY_Z0 - 5.2f, AP_RWY_Z0 - 4.9f, yellow);
+    }
+    for (int g = 0; g < 4; g++) {                             // gate lead-in lines and stop bars
+        paint_c(m, AP_GATES[g] - 0.15f, AP_GATES[g] + 0.15f, AP_NOSE_Z + 2, AP_APRON_Z1 - 1, yellow);
+        paint_c(m, AP_GATES[g] - 2.0f, AP_GATES[g] + 2.0f, AP_NOSE_Z + 0.8f, AP_NOSE_Z + 1.1f, yellow);
+    }
+    paint_c(m, -110, 112, AP_APRON_Z1 - 0.6f, AP_APRON_Z1 - 0.3f, yellow);                      // apron edge
+    const float parks[2][4] = {{10, 90, 14, 34}, {-50, -12, 14, 34}};
+    for (int p = 0; p < 2; p++)                               // car-park bays
+        for (float x = parks[p][0] + 0.3f; x < parks[p][1]; x += 2.6f) {
+            paint_c(m, x, x + 0.12f, parks[p][2] + 0.3f, parks[p][2] + 5.3f, white);
+            paint_c(m, x, x + 0.12f, parks[p][3] - 5.3f, parks[p][3] - 0.3f, white);
+        }
+}
+
+// The airliner that lines up, rolls and climbs out to the east, over and over (visual only).
+static Model planeModel; static int hasPlane;
+static float apT, apX, apY, apV, apPitch; static int apPhase;
+static void plane_reset(void) { apT = 0; apPhase = 0; apX = AP_RWY_X0 + 26.0f; apY = 0; apV = 0; apPitch = 0; }
+static void build_plane_model(void) {
+    if (hasPlane) UnloadModel(planeModel);
+    MeshB m = {0};
+    build_airliner(&m, v3(18.5f, 0, 0), v3(-1, 0, 0), 3u);  // origin at the main gear, nose toward +x
+    planeModel = mb_model(&m);
+    hasPlane = 1;
+}
+static void plane_update(float dt) {
+    apT += dt;
+    if (apPhase == 0) { if (apT > 12.0f) apPhase = 1; }        // holding on the runway
+    else if (apPhase == 1) {                                    // take-off roll
+        apV += 4.5f * dt; apX += apV * dt;
+        if (apV > 48.0f) apPhase = 2;
+    } else {                                                    // rotate and climb out
+        apV = fminf(apV + 2.0f * dt, 75.0f);
+        apPitch = fminf(apPitch + 3.0f * DEG2RAD * dt, 11.0f * DEG2RAD);
+        apX += apV * cosf(apPitch) * dt;
+        if (apPitch > 6.0f * DEG2RAD) apY += apV * sinf(apPitch - 3.0f * DEG2RAD) * dt;
+        if (apX > 460.0f) plane_reset();
+    }
+}
+static V3 plane_world(V3 l) {                                  // plane-local point -> world
+    float c = cosf(apPitch), s = sinf(apPitch);
+    float zc = (AP_RWY_Z0 + AP_RWY_Z1) * 0.5f;
+    return v3(apX + l.x * c - l.y * s, terrain_height(apX, zc) * (apY < 0.1f ? 1.0f : 1.0f) + apY + l.x * s + l.y * c, zc + l.z);
+}
+static void draw_plane(void) {
+    float zc = (AP_RWY_Z0 + AP_RWY_Z1) * 0.5f;
+    Vector3 p = {apX, terrain_height(apX, zc) + apY, zc};
+    DrawModelEx(planeModel, p, (Vector3){0, 0, 1}, apPitch * RAD2DEG, (Vector3){1, 1, 1}, WHITE);
+}
+static void draw_plane_lights(float time) {                    // emissive pass: landing light, nav lights, strobes, beacon
+    V3 land = plane_world(v3(15.5f, 1.2f, 0)), wl = plane_world(v3(-6.5f, 3.3f, -17.0f)), wr = plane_world(v3(-6.5f, 3.3f, 17.0f));
+    V3 beacon = plane_world(v3(4.0f, 5.6f, 0)), tailw = plane_world(v3(-17.5f, 4.9f, 0));
+    DrawCube(RV(land), 0.5f, 0.5f, 0.5f, (Color){255, 250, 235, 255});
+    DrawCube(RV(wl), 0.35f, 0.35f, 0.35f, (Color){60, 255, 100, 255});
+    DrawCube(RV(wr), 0.35f, 0.35f, 0.35f, (Color){255, 40, 30, 255});
+    DrawCube(RV(tailw), 0.3f, 0.3f, 0.3f, (Color){255, 255, 255, 255});
+    if (fmodf(time, 1.0f) < 0.08f) { DrawCube(RV(wl), 0.6f, 0.6f, 0.6f, WHITE); DrawCube(RV(wr), 0.6f, 0.6f, 0.6f, WHITE); }
+    if (fmodf(time + 0.5f, 1.2f) < 0.15f) DrawCube(RV(beacon), 0.45f, 0.45f, 0.45f, (Color){255, 30, 20, 255});
+}
+
 static void build_building(MeshB *m, const Building *B) {
     if (B->kind == BLD_STEPS) { build_steps(m, B); return; }
     if (B->kind == BLD_WEDGE) { build_wedge(m, B); return; }
+    if (B->kind == BLD_TERMINAL) { build_terminal(m, B); return; }
+    if (B->kind == BLD_ATC) { build_atc(m, B); return; }
+    if (B->kind == BLD_HANGAR) { build_hangar(m, B); return; }
     bseed = B->seed;
     int city = B->kind == BLD_APARTMENT || B->kind == BLD_TOWER;
     Color wall = B->kind == BLD_HOUSE ? WALLS_HOUSE[(int)(brnd() * 6)] : WALLS_CITY[(int)(brnd() * 6)];
@@ -590,7 +893,9 @@ static void build_building(MeshB *m, const Building *B) {
 static Model build_city(const World *w, Model *glow, Model *pool) {
     MeshB m = {0};
     for (int i = 0; i < w->nbld; i++) build_building(&m, &w->bld[i]);
-    if (w->map == MAP_NEWYORK) place_lamps_newyork(&m, w); else place_street_lamps(&m, w);
+    if (w->map == MAP_NEWYORK) place_lamps_newyork(&m, w);
+    else if (w->map == MAP_AIRPORT) build_airport_extras(&m, w);
+    else place_street_lamps(&m, w);
     for (int i = 0; i < traffic_signal_count(); i++) {   // traffic signals: pole, mast arm, housing
         V3 head, face, pole; int st;
         traffic_signal(i, &head, &face, &pole, &st);
@@ -610,6 +915,10 @@ static Model build_city(const World *w, Model *glow, Model *pool) {
     for (int b = 0; b < w->nbox; b++) {
         int isB = 0;
         for (int i = 0; i < w->nbld && !isB; i++) isB = w->bld[i].mn.x == w->box[b].mn.x && w->bld[i].mn.z == w->box[b].mn.z;
+        for (int i = 0; i < w->nplanes && !isB; i++) {     // an airliner's hidden fuselage collider
+            const Plane *P = &w->planes[i];
+            isB = fabsf(0.5f * (w->box[b].mn.x + w->box[b].mx.x) - (P->x + P->dx * 18.0f)) < 0.5f && fabsf(0.5f * (w->box[b].mn.z + w->box[b].mx.z) - (P->z + P->dz * 18.0f)) < 0.5f;
+        }
         if (!isB) box_shell(&m, w->box[b].mn, w->box[b].mx, (Color){175, 172, 165, 255}, (Color){190, 188, 182, 255});
     }
     return mb_model(&m);
@@ -1376,6 +1685,7 @@ static void build_world_meshes(const World *w) {
     for (int z = 0; z < CH_N; z++) for (int x = 0; x < CH_N; x++) chunks[z * CH_N + x] = build_chunk(x, z);
     city = build_city(w, &cityGlow, &cityPool);
     build_markings(w);
+    if (w->map == MAP_AIRPORT) { build_plane_model(); plane_reset(); }
     cityGlow.materials[0].shader = post_emissive_shader();
     cityPool.materials[0].shader = post_emissive_shader();
     build_trees();
@@ -1412,6 +1722,15 @@ static void hud_panel(float x, float y, float w, float h) {
 }
 static const char *zone_name(V3 p, int map) {
     if (p.x > 28 && p.x < 80 && p.z < -12 && p.z > -42) return "WAREHOUSE DISTRICT";
+    if (map == MAP_AIRPORT && p.z > 8) {
+        if (p.x > AP_RWY_X0 && p.x < AP_RWY_X1 && p.z > AP_RWY_Z0 && p.z < AP_RWY_Z1) return "RUNWAY 09/27";
+        int t = road_at(p.x, p.z);
+        if (t == 4 && p.z > AP_TWY_Z0 - 1) return "TAXIWAY";
+        if (t == 5) return "APRON";
+        if (t == 4) return "CAR PARK";
+        if (p.z > 34 && p.z < 82 && p.x > -70 && p.x < 130) return "TERMINAL";
+        if (p.z < 230 && fabsf(p.x) < 268) return "AIRFIELD";
+    }
     if (map == MAP_NEWYORK && p.z > CITY_Z0 && p.z < CITY_Z1 + 6 && fabsf(p.x) < CITY_X + 6) {
         float dx = p.x - TS_X, dz = p.z - TS_Z;
         return (dx * dx + dz * dz < 40 * 40 || road_at(p.x, p.z) == 3) ? "TIMES SQUARE" : "MIDTOWN";
@@ -1468,7 +1787,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
             "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
-            "M  map: Default / New York      J  traffic on / off",
+            "M  map: Default / New York / Airport      J  traffic",
             "", "Ramp ahead, crash wall behind you, warehouses to the", "right, forest on the hills. Default: towns to the left.",
             "New York: Times Square up 7th Avenue, straight ahead."};
         int n = sizeof lines / sizeof lines[0];
@@ -1552,8 +1871,9 @@ static V3 player_paint(void) { return vehicle_def(playerType)->paint; }
 static void spawn_player(World *w) {
     skids_forget(0);
     // In the right-hand lane, clear of the junction (traffic turns through junctions).
-    float x = w->map == MAP_NEWYORK ? -4.0f : -20.0f, z = w->map == MAP_NEWYORK ? 15.0f : 3.5f;
-    float yaw = w->map == MAP_NEWYORK ? -PI / 2 : 0.0f;
+    float x = w->map == MAP_NEWYORK ? -4.0f : w->map == MAP_AIRPORT ? -3.5f : -20.0f;
+    float z = w->map == MAP_NEWYORK ? 15.0f : w->map == MAP_AIRPORT ? 16.0f : 3.5f;
+    float yaw = w->map == MAP_DEFAULT ? 0.0f : -PI / 2;
     car_build_vehicle(&w->cars[0], playerType, v3(x, terrain_height(x, z) + vehicle_def(playerType)->spawnH, z), yaw, player_paint());
 }
 
@@ -1577,7 +1897,12 @@ static void load_map(World *w, int map, int *nextSlot) {
     skidCount = skidHead = 0; shardCount = 0; dropsInit = 0;
     for (int i = 0; i < MAX_SPRAY; i++) spray[i].life = 0;
     spawn_player(w);
-    if (map == MAP_NEWYORK) {                           // yellow cabs parked along 7th Avenue, and a pickup
+    if (map == MAP_AIRPORT) {                           // cabs waiting at the departures kerb
+        w->ncars = 4;
+        car_build_vehicle(&w->cars[1], VEH_HATCH, v3(-20.0f, vehicle_def(VEH_HATCH)->spawnH, 47.0f), 0, TAXI);
+        car_build_vehicle(&w->cars[2], VEH_HATCH, v3(-12.0f, vehicle_def(VEH_HATCH)->spawnH, 47.0f), 0, TAXI);
+        car_build_vehicle(&w->cars[3], VEH_PICKUP, v3(60.0f, CAR_SPAWN_H, 47.0f), 0, PALETTE[2]);
+    } else if (map == MAP_NEWYORK) {                    // yellow cabs parked along 7th Avenue, and a pickup
         w->ncars = 4;
         car_build_vehicle(&w->cars[1], VEH_HATCH, v3(-6.8f, vehicle_def(VEH_HATCH)->spawnH, 24), -PI / 2, TAXI);   // at the kerb,
         car_build_vehicle(&w->cars[2], VEH_HATCH, v3(6.8f, vehicle_def(VEH_HATCH)->spawnH, 58), PI / 2, TAXI);     // clear of the lanes
@@ -1693,6 +2018,7 @@ int main(void) {
         pc->ctl = ctl;
 
         traffic_update(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f), pc->pos);
+        if (world.map == MAP_AIRPORT) plane_update(paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
 
         // ---- physics (fixed substeps)
         if (!paused) acc += dt * (slowmo ? 0.2f : 1.0f);
@@ -1771,6 +2097,7 @@ int main(void) {
         rlDisableBackfaceCulling();
         post_begin_objects();
         DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        if (world.map == MAP_AIRPORT && hasPlane) draw_plane();
         if (hasScreens) { post_set_billboards((float)GetTime(), 1.4f + 1.6f * ENV->lights); DrawModel(screens, (Vector3){0, 0, 0}, 1.0f, WHITE); }
         draw_trees(&world, cam.position);
         post_end_objects();
@@ -1797,6 +2124,7 @@ int main(void) {
         if (!beamView) for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car_lights(&world.cars[i], lightsOn && (i == 0 || traffic_is_ai(i)));
         if (camMode && !beamView) { post_emissive_begin(0.6f + 1.4f * ENV->lights); draw_gauges(pc); post_emissive_end(); }
         post_emissive_begin(3.5f); draw_signal_lamps(1); post_emissive_end();
+        if (world.map == MAP_AIRPORT && hasPlane) { post_emissive_begin(2.5f + 2.0f * ENV->lights); draw_plane_lights((float)GetTime()); post_emissive_end(); }
         post_emissive_begin(0.5f); draw_signal_lamps(0); post_emissive_end();
         if (lightsOn) {
             rlDrawRenderBatchActive();

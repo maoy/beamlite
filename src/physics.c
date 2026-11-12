@@ -39,13 +39,17 @@ static float smooth01(float e0, float e1, float x) {
 // ---------------------------------------------------------------- terrain --
 
 static int g_map;                                 // map the world was last built with (terrain depends on it)
-static float wash_z0(void) { return g_map == MAP_NEWYORK ? -150.0f : 40.0f; }
-static float wash_z1(void) { return g_map == MAP_NEWYORK ? -90.0f : 140.0f; }
+static float wash_z0(void) { return g_map == MAP_NEWYORK ? -150.0f : g_map == MAP_AIRPORT ? 1.0f : 40.0f; }    // (none on the airport)
+static float wash_z1(void) { return g_map == MAP_NEWYORK ? -90.0f : g_map == MAP_AIRPORT ? 0.0f : 140.0f; }
 int dirt_at(float x, float z) { return fabsf(x) < 8.0f && z > wash_z0() && z < wash_z1(); }
 
 float terrain_height(float x, float z) {
     float r = sqrtf(x * x + z * z);
     float hills = smooth01(90.0f, 170.0f, r);
+    if (g_map == MAP_AIRPORT && z > -20.0f) {          // the airfield is graded flat
+        float ox = fmaxf(0.0f, fabsf(x) - 262.0f), oz = fmaxf(0.0f, z - 218.0f);
+        hills *= smooth01(0.0f, 60.0f, fmaxf(ox, oz));
+    }
     float h = hills * (7.0f * sinf(x * 0.019f) * cosf(z * 0.016f) +
                        3.0f * sinf(x * 0.047f + z * 0.031f + 1.3f) +
                        1.2f * sinf(z * 0.11f - x * 0.05f));
@@ -895,6 +899,27 @@ static const Rect ROADS[] = {
     {-260, 260, -7, 7},          // highway
     {-7, 7, -260, 260},          // cross road (7th Avenue through Midtown)
 };
+// Airport: the cross road stops at the highway; an access road runs up to the terminal forecourt.
+static const Rect AP_ROADS[] = {
+    {-260, 260, -7, 7},          // highway
+    {-7, 7, -260, 7},            // cross road, south only
+};
+static const Rect AP_STREETS[] = {
+    {-7, 7, 0, 46},              // access road
+    {-66, 106, 36, 48},          // departures forecourt (wide enough for cabs at the kerb)
+    {-64, -56, 7, 80}, {96, 104, 38, 80},   // west and east service roads
+    {-64, 104, 74, 80},          // apron service road (between the terminal and the apron)
+    {30, 78, -13, -7},           // service road into the warehouse district
+};
+typedef struct { Rect r; int type; } Area;
+static const Area AP_AREAS[] = {
+    {{AP_RWY_X0, AP_RWY_X1, AP_RWY_Z0, AP_RWY_Z1}, 4},                    // runway 09/27
+    {{-AP_TWY_X, AP_TWY_X, AP_TWY_Z0, AP_TWY_Z1}, 4},                     // parallel taxiway
+    {{-110, 112, AP_APRON_Z0, AP_APRON_Z1}, 5},                           // apron
+    {{-212, -110, 122, AP_APRON_Z1}, 5},                                  // hangar apron
+    {{-241, -229, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{-6, 6, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{229, 241, AP_TWY_Z1, AP_RWY_Z0}, 4},   // connectors
+    {{10, 90, 14, 34}, 4}, {{-50, -12, 14, 34}, 4},                       // car parks
+};
 static const Rect DEF_STREETS[] = {
     {-112, 112, 44, 52},         // avenue
     {-80, 80, 94, 100},          // upper avenue
@@ -915,15 +940,19 @@ static const Rect KEEP_CLEAR[] = {
 };
 #define NELEM(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
-static const char *MAP_NAMES[MAP_COUNT] = {"DEFAULT", "NEW YORK"};
+static const char *MAP_NAMES[MAP_COUNT] = {"DEFAULT", "NEW YORK", "AIRPORT"};
 const char *map_name(int map) { return MAP_NAMES[map < 0 || map >= MAP_COUNT ? 0 : map]; }
 int map_has_broadway(void) { return g_map == MAP_NEWYORK; }
-#define STREETS (g_map == MAP_NEWYORK ? NY_STREETS : DEF_STREETS)
-#define NSTREETS (g_map == MAP_NEWYORK ? NELEM(NY_STREETS) : NELEM(DEF_STREETS))
+#define STREETS (g_map == MAP_NEWYORK ? NY_STREETS : g_map == MAP_AIRPORT ? AP_STREETS : DEF_STREETS)
+#define NSTREETS (g_map == MAP_NEWYORK ? NELEM(NY_STREETS) : g_map == MAP_AIRPORT ? NELEM(AP_STREETS) : NELEM(DEF_STREETS))
+#define ROADSM (g_map == MAP_AIRPORT ? AP_ROADS : ROADS)
+#define NROADS (g_map == MAP_AIRPORT ? NELEM(AP_ROADS) : NELEM(ROADS))
+#define NAREAS (g_map == MAP_AIRPORT ? NELEM(AP_AREAS) : 0)
 
 float broadway_x(float z) { return TS_X + BW_DX * (z - TS_Z); }
 float broadway_dist(float x, float z) { return fabsf(x - broadway_x(z)) / sqrtf(1.0f + BW_DX * BW_DX); }
 static int on_broadway(float x, float z, float m) { return g_map == MAP_NEWYORK && z > CITY_Z0 && z < CITY_Z1 && broadway_dist(x, z) < BW_HALF + m; }
+static int in_airport(float x, float z) { return g_map == MAP_AIRPORT && fabsf(x) < 268.0f && z > 6.0f && z < 225.0f; }
 static int in_city(float x, float z) { return g_map == MAP_NEWYORK && fabsf(x) < CITY_X + 6 && z > CITY_Z0 - 2 && z < CITY_Z1 + 6; }
 
 static int in_rect(const Rect *r, float x, float z, float m) {
@@ -934,17 +963,19 @@ static int rect_overlap(const Rect *a, const Rect *b, float m) {
 }
 
 int road_at(float x, float z) {
-    for (int i = 0; i < NELEM(ROADS); i++) if (in_rect(&ROADS[i], x, z, 0)) return 1;
+    for (int i = 0; i < NROADS; i++) if (in_rect(&ROADSM[i], x, z, 0)) return 1;
     for (int i = 0; i < NSTREETS; i++) if (in_rect(&STREETS[i], x, z, 0)) return 2;
     if (on_broadway(x, z, 0)) return fabsf(z - TS_Z) < PLAZA_HALF ? 3 : 2;
+    for (int i = 0; i < NAREAS; i++) if (in_rect(&AP_AREAS[i].r, x, z, 0)) return AP_AREAS[i].type;
     return 0;
 }
 
 int road_rects(float (*out)[4], int max, int *nHighway) {
     int n = 0;
-    for (int i = 0; i < NELEM(ROADS) && n < max; i++, n++) { out[n][0] = ROADS[i].x0; out[n][1] = ROADS[i].x1; out[n][2] = ROADS[i].z0; out[n][3] = ROADS[i].z1; }
+    for (int i = 0; i < NROADS && n < max; i++, n++) { out[n][0] = ROADSM[i].x0; out[n][1] = ROADSM[i].x1; out[n][2] = ROADSM[i].z0; out[n][3] = ROADSM[i].z1; }
     *nHighway = n;
     for (int i = 0; i < NSTREETS && n < max; i++, n++) { out[n][0] = STREETS[i].x0; out[n][1] = STREETS[i].x1; out[n][2] = STREETS[i].z0; out[n][3] = STREETS[i].z1; }
+    for (int i = 0; i < NAREAS && n < max; i++, n++) { const Rect *r = &AP_AREAS[i].r; out[n][0] = r->x0; out[n][1] = r->x1; out[n][2] = r->z0; out[n][3] = r->z1; }
     return n;
 }
 
@@ -961,7 +992,8 @@ static int add_box(World *w, V3 mn, V3 mx) {
 // Is this footprint free of roads, keep-clear zones, boxes and trees?
 static int area_free(const World *w, Rect r, float margin) {
     float rm = fminf(margin, 1.0f);             // kerb clearance is smaller than the spacing between things
-    for (int i = 0; i < NELEM(ROADS); i++) if (rect_overlap(&r, &ROADS[i], rm)) return 0;
+    for (int i = 0; i < NROADS; i++) if (rect_overlap(&r, &ROADSM[i], rm)) return 0;
+    for (int i = 0; i < NAREAS; i++) if (rect_overlap(&r, &AP_AREAS[i].r, rm)) return 0;
     for (int i = 0; i < NSTREETS; i++) if (rect_overlap(&r, &STREETS[i], rm)) return 0;
     for (int i = 0; i < NELEM(KEEP_CLEAR); i++) if (rect_overlap(&r, &KEEP_CLEAR[i], 0)) return 0;
     if (g_map == MAP_NEWYORK && r.z1 > CITY_Z0 && r.z0 < CITY_Z1) {   // Broadway: corners on both sides, or any sample point too close
@@ -1012,7 +1044,7 @@ static void add_building(World *w, Rect r, int kind, float height, int front) {
     B->mx = v3(r.x1, hi + height, r.z1);
     B->ground = hi;
     B->kind = kind; B->front = front;
-    B->roof = kind == BLD_HOUSE ? frange(2.4f, 3.4f) : (kind == BLD_WAREHOUSE ? 1.4f : 0.0f);
+    B->roof = kind == BLD_HOUSE ? frange(2.4f, 3.4f) : kind == BLD_WAREHOUSE ? 1.4f : kind == BLD_HANGAR ? 4.5f : 0.0f;
     B->seed = (unsigned)(frnd() * 4294967040.0f);
     if (add_box(w, B->mn, B->mx) >= 0) w->nbld++;
 }
@@ -1202,26 +1234,47 @@ static void build_newyork(World *w) {
     fill_block(w, &ind);
 }
 
+// Airport map: terminal, gate airliners, control tower, hangars (and a parked airliner outside them).
+static void add_plane(World *w, float x, float z, float dx, float dz) {
+    if (w->nplanes >= MAX_PLANES) return;
+    w->planes[w->nplanes++] = (Plane){x, z, dx, dz, (unsigned)(frnd() * 4294967040.0f)};
+    float g = terrain_height(x, z), tx = x + dx * 36.0f, tz = z + dz * 36.0f;
+    add_box(w, v3(fminf(x, tx) - 2.1f * fabsf(dz) - 0.2f, g + 1.4f, fminf(z, tz) - 2.1f * fabsf(dx) - 0.2f),
+               v3(fmaxf(x, tx) + 2.1f * fabsf(dz) + 0.2f, g + 5.4f, fmaxf(z, tz) + 2.1f * fabsf(dx) + 0.2f));   // fuselage
+}
+static void build_airport(World *w) {
+    add_building(w, (Rect){AP_TERM_X0, AP_TERM_X1, AP_TERM_Z0, AP_TERM_Z1}, BLD_TERMINAL, 16.0f, 3);
+    for (int g = 0; g < 4; g++) if (g != 2) add_plane(w, AP_GATES[g], AP_NOSE_Z, 0, 1);   // nose-in at the gates
+    add_building(w, (Rect){115, 123, 55, 63}, BLD_ATC, 44.0f, 3);
+    add_building(w, (Rect){-205, -160, 70, 120}, BLD_HANGAR, 18.0f, 2);
+    add_building(w, (Rect){-150, -114, 76, 120}, BLD_HANGAR, 15.0f, 2);
+    add_plane(w, -128.0f, 130.0f, -1, 0);                                   // outside the hangars
+    Block ind = {{34, 74, -38, -14}, 3};                                     // warehouses (shared proving ground)
+    fill_block(w, &ind);
+}
+
 void world_init(World *w, int map) {
     memset(w, 0, sizeof *w);
     w->map = g_map = (map < 0 || map >= MAP_COUNT) ? MAP_DEFAULT : map;
     rng_state = 20240611u;
     // Crash-test wall behind the spawn point.
     add_box(w, v3(-74, -1, -14), v3(-71, 3.0f, 14));
-    // A row of concrete pillars beside the main road (on New York, moved clear of the avenue mouths).
+    // A row of concrete pillars beside the main road (elsewhere than Default, moved clear of the side roads).
     const float pxD[6] = {-60, -46, -32, -18, 18, 32}, pxN[6] = {-66, -40, -30, -18, 18, 32};
     for (int i = 0; i < 6; i++) {
-        float x = g_map == MAP_NEWYORK ? pxN[i] : pxD[i];
+        float x = g_map == MAP_DEFAULT ? pxD[i] : pxN[i];
         add_box(w, v3(x - 0.6f, -1, 11.0f), v3(x + 0.6f, 4.0f, 12.2f));
     }
     // Low barrier blocks scattered on the plaza.
     add_box(w, v3(18, -1, -26), v3(30, 0.8f, -24.5f));
     add_box(w, v3(-30, -1, -30), v3(-28.5f, 1.2f, -18));
 
-    if (g_map == MAP_NEWYORK) build_newyork(w); else build_default(w);
+    if (g_map == MAP_NEWYORK) build_newyork(w);
+    else if (g_map == MAP_AIRPORT) build_airport(w);
+    else build_default(w);
 
     // Roadside trees along the highway and the cross road, out in the country.
-    float crossNorth = g_map == MAP_NEWYORK ? 142.0f : 100.0f;
+    float crossNorth = g_map == MAP_NEWYORK ? 142.0f : g_map == MAP_AIRPORT ? 1e9f : 100.0f;
     for (float x = 66; x < 250; x += 11) { try_tree(w, x, 14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); try_tree(w, x + 5, -14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); }
     for (float x = -86; x > -250; x -= 11) { try_tree(w, x, 14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); try_tree(w, x - 5, -14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); }
     for (float z = crossNorth; z < 250; z += 12) { try_tree(w, 12, z, frange(6, 10), TREE_CONIFER, 2.0f); try_tree(w, -12, z + 6, frange(6, 10), TREE_CONIFER, 2.0f); }
@@ -1231,14 +1284,14 @@ void world_init(World *w, int map) {
     for (int i = 0; i < 2600 && w->ntree < MAX_TREES - 40; i++) {
         float r = frange(95, 290), a = frange(0, 6.2831853f);
         float x = r * cosf(a), z = r * sinf(a);
-        if (in_city(x, z)) continue;
+        if (in_city(x, z) || in_airport(x, z)) continue;
         if (frnd() > smooth01(90, 200, r) + 0.15f) continue;
         int conifer = frnd() < 0.35f + 0.5f * smooth01(110, 220, r);
         try_tree(w, x, z, conifer ? frange(8, 15) : frange(6, 10), conifer ? TREE_CONIFER : TREE_BROADLEAF, 3.2f);
     }
     for (int i = 0; i < 120; i++) {
         float x = frange(-88, 88), z = frange(-88, 88);
-        if (x * x + z * z > 88 * 88 || in_city(x, z)) continue;
+        if (x * x + z * z > 88 * 88 || in_city(x, z) || in_airport(x, z)) continue;
         try_tree(w, x, z, frange(5, 9), frnd() < 0.7f ? TREE_BROADLEAF : TREE_CONIFER, 6.0f);
     }
 
