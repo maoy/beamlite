@@ -6,6 +6,7 @@
 #include "physics.h"
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 
 static Vector3 RV(V3 a) { return (Vector3){a.x, a.y, a.z}; }
 static V3 SUN;
@@ -18,14 +19,18 @@ static V3 SUN;
 
 static Model chunks[CH_N * CH_N];
 
-static int on_road(float x, float z) { return (fabsf(z) < 7.0f && fabsf(x) < 260) || (fabsf(x) < 7.0f && fabsf(z) < 260); }
+static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
 static Color terrain_color(float x, float z, float y, V3 n) {
     float r, g, b;
     float noise = 0.5f + 0.25f * sinf(x * 0.37f + 1.7f) * sinf(z * 0.41f) + 0.25f * sinf(x * 0.13f - z * 0.17f);
     if (x > 40 && x < 58 && fabsf(z) < 6.5f) { r = 0.72f; g = 0.66f; b = 0.55f; }               // ramp
     else if (fabsf(x) < 8 && z > 40 && z < 140) { r = 0.55f; g = 0.42f; b = 0.28f; }             // dirt
-    else if (on_road(x, z)) { r = g = b = 0.30f + 0.04f * noise; }                               // asphalt
+    else if (road_at(x, z) == 1) { r = g = b = 0.30f + 0.04f * noise; }                          // highway
+    else if (road_at(x, z) == 2) { r = g = b = 0.27f + 0.03f * noise; }                          // town street
+    else if (road_at(x + 2.2f, z) == 2 || road_at(x - 2.2f, z) == 2 || road_at(x, z + 2.2f) == 2 || road_at(x, z - 2.2f) == 2) {
+        r = 0.66f; g = 0.64f; b = 0.60f;                                                         // pavement
+    }
     else {                                                                                       // grass / hills
         r = 0.26f + 0.10f * noise; g = 0.47f + 0.12f * noise; b = 0.20f;
         float rock = fminf(fmaxf((1.0f - n.y) * 4.0f, 0), 1);
@@ -68,6 +73,298 @@ static Model build_chunk(int cx, int cz) {
     }
     UploadMesh(&m, false);
     return LoadModelFromMesh(m);
+}
+
+// ------------------------------------------------- static mesh builder ----
+// Flat-shaded, vertex-coloured triangles with lighting baked in (like the terrain).
+
+typedef struct { float *v; unsigned char *c; int n, cap; } MeshB;
+
+static void mb_push(MeshB *m, V3 p, Color c) {
+    if (m->n == m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 4096;
+        m->v = MemRealloc(m->v, m->cap * 3 * sizeof(float));
+        m->c = MemRealloc(m->c, m->cap * 4);
+    }
+    m->v[m->n * 3] = p.x; m->v[m->n * 3 + 1] = p.y; m->v[m->n * 3 + 2] = p.z;
+    m->c[m->n * 4] = c.r; m->c[m->n * 4 + 1] = c.g; m->c[m->n * 4 + 2] = c.b; m->c[m->n * 4 + 3] = 255;
+    m->n++;
+}
+
+// Triangle wound and lit so its normal faces away from `ref`.
+static void mb_tri(MeshB *m, V3 a, V3 b, V3 c, Color col, V3 ref) {
+    V3 n = vnorm(vcross(vsub(b, a), vsub(c, a)));
+    V3 ctr = vscale(vadd(vadd(a, b), c), 1.0f / 3.0f);
+    if (vdot(n, vsub(ctr, ref)) < 0) { V3 t = b; b = c; c = t; n = vscale(n, -1); }
+    float l = 0.50f + 0.58f * fmaxf(vdot(n, SUN), 0.0f) + 0.06f * n.y;
+    Color s = {(unsigned char)fminf(255, col.r * l), (unsigned char)fminf(255, col.g * l), (unsigned char)fminf(255, col.b * l), 255};
+    mb_push(m, a, s); mb_push(m, b, s); mb_push(m, c, s);
+}
+static void mb_quad(MeshB *m, V3 a, V3 b, V3 c, V3 d, Color col, V3 ref) {
+    mb_tri(m, a, b, c, col, ref); mb_tri(m, a, c, d, col, ref);
+}
+
+static Model mb_model(MeshB *m) {
+    Mesh mesh = {0};
+    mesh.vertexCount = m->n;
+    mesh.triangleCount = m->n / 3;
+    mesh.vertices = MemAlloc(m->n * 3 * sizeof(float));
+    mesh.colors = MemAlloc(m->n * 4);
+    memcpy(mesh.vertices, m->v, m->n * 3 * sizeof(float));
+    memcpy(mesh.colors, m->c, m->n * 4);
+    UploadMesh(&mesh, false);
+    MemFree(m->v); MemFree(m->c);
+    memset(m, 0, sizeof *m);
+    return LoadModelFromMesh(mesh);
+}
+
+// ------------------------------------------------------------ buildings ----
+
+static unsigned bseed;
+static float brnd(void) { bseed = bseed * 1664525u + 1013904223u; return (bseed >> 8) / 16777216.0f; }
+
+static const Color WALLS_HOUSE[] = {{226, 214, 190}, {200, 170, 140}, {236, 230, 220}, {180, 196, 206}, {214, 190, 160}, {172, 120, 96}};
+static const Color WALLS_CITY[] = {{190, 188, 182}, {168, 160, 150}, {150, 156, 166}, {206, 198, 184}, {140, 120, 104}, {120, 128, 136}};
+static const Color ROOFS[] = {{120, 56, 44}, {82, 82, 88}, {100, 74, 60}, {64, 70, 80}};
+static const Color SIGNS[] = {{200, 50, 40}, {40, 110, 190}, {230, 170, 30}, {40, 150, 90}, {150, 60, 160}};
+
+// Facade frame for side s (0 +x, 1 -x, 2 +z, 3 -z): origin corner, unit along-vector, outward normal, length.
+static void facade(const Building *B, int s, V3 *o, V3 *a, V3 *n, float *len) {
+    switch (s) {
+        case 0: *o = v3(B->mx.x, 0, B->mn.z); *a = v3(0, 0, 1); *n = v3(1, 0, 0); *len = B->mx.z - B->mn.z; break;
+        case 1: *o = v3(B->mn.x, 0, B->mx.z); *a = v3(0, 0, -1); *n = v3(-1, 0, 0); *len = B->mx.z - B->mn.z; break;
+        case 2: *o = v3(B->mx.x, 0, B->mx.z); *a = v3(-1, 0, 0); *n = v3(0, 0, 1); *len = B->mx.x - B->mn.x; break;
+        default: *o = v3(B->mn.x, 0, B->mn.z); *a = v3(1, 0, 0); *n = v3(0, 0, -1); *len = B->mx.x - B->mn.x; break;
+    }
+}
+
+// A rectangle on a facade, `u` along it and `y` up from street level, standing proud by `out`.
+static void facade_rect(MeshB *m, const Building *B, int s, float u, float y, float w, float h, float out, Color col) {
+    V3 o, a, n; float len;
+    facade(B, s, &o, &a, &n, &len);
+    V3 base = vadd(vadd(o, vscale(n, out)), v3(0, B->ground, 0));
+    V3 p0 = vadd(base, vadd(vscale(a, u), v3(0, y, 0)));
+    V3 p1 = vadd(p0, vscale(a, w)), p2 = vadd(p1, v3(0, h, 0)), p3 = vadd(p0, v3(0, h, 0));
+    mb_quad(m, p0, p1, p2, p3, col, vsub(p0, n));
+}
+
+static void box_shell(MeshB *m, V3 mn, V3 mx, Color wall, Color top) {
+    V3 ref = vscale(vadd(mn, mx), 0.5f);
+    V3 c[8];
+    for (int i = 0; i < 8; i++) c[i] = v3(i & 1 ? mx.x : mn.x, i & 2 ? mx.y : mn.y, i & 4 ? mx.z : mn.z);
+    mb_quad(m, c[1], c[3], c[7], c[5], wall, ref);   // +x
+    mb_quad(m, c[0], c[4], c[6], c[2], wall, ref);   // -x
+    mb_quad(m, c[4], c[5], c[7], c[6], wall, ref);   // +z
+    mb_quad(m, c[0], c[2], c[3], c[1], wall, ref);   // -z
+    mb_quad(m, c[2], c[6], c[7], c[3], top, ref);    // top
+}
+
+static void build_building(MeshB *m, const Building *B) {
+    bseed = B->seed;
+    int city = B->kind == BLD_APARTMENT || B->kind == BLD_TOWER;
+    Color wall = B->kind == BLD_HOUSE ? WALLS_HOUSE[(int)(brnd() * 6)] : WALLS_CITY[(int)(brnd() * 6)];
+    if (B->kind == BLD_WAREHOUSE) wall = (Color){160 + (int)(brnd() * 30), 162, 158, 255};
+    if (B->kind == BLD_TOWER) wall = (Color){110, 124, 140, 255};
+    Color roof = ROOFS[(int)(brnd() * 4)];
+    Color glass = {48, 62, 80, 255}, glassLit = {92, 118, 140, 255}, frame = {70, 70, 72, 255};
+    float H = B->mx.y - B->ground;                  // wall height above the street
+
+    box_shell(m, B->mn, B->mx, wall, city || B->kind == BLD_SHOP ? (Color){96, 96, 100, 255} : roof);
+
+    for (int s = 0; s < 4; s++) {
+        V3 o, a, n; float len;
+        facade(B, s, &o, &a, &n, &len);
+        int front = s == B->front;
+        switch (B->kind) {
+        case BLD_TOWER: {                           // curtain wall: tall glass bands between slab edges
+            int nc = (int)(len / 2.0f);
+            float sp = len / nc;
+            for (float y = 0.6f; y + 3.0f < H; y += 3.4f)
+                for (int i = 0; i < nc; i++)
+                    facade_rect(m, B, s, i * sp + 0.12f, y, sp - 0.24f, 2.6f, 0.04f, brnd() < 0.2f ? glassLit : glass);
+            if (front) facade_rect(m, B, s, len * 0.5f - 2.0f, 0.0f, 4.0f, 3.0f, 0.06f, frame);
+        } break;
+        case BLD_APARTMENT: case BLD_HOUSE: {
+            int floors = B->kind == BLD_HOUSE ? 2 : (int)((H - 0.8f) / 3.2f);
+            float fh = B->kind == BLD_HOUSE ? 2.8f : 3.2f;
+            float ww = B->kind == BLD_HOUSE ? 1.1f : 1.4f, wh = B->kind == BLD_HOUSE ? 1.3f : 1.6f;
+            int nc = (int)((len - 1.5f) / (B->kind == BLD_HOUSE ? 2.8f : 3.0f));
+            if (nc < 1) nc = 1;
+            float sp = len / nc;
+            for (int f = 0; f < floors; f++)
+                for (int i = 0; i < nc; i++) {
+                    if (front && f == 0 && i == nc / 2) continue;           // the door goes here
+                    float y = 0.9f + f * fh;
+                    facade_rect(m, B, s, i * sp + (sp - ww) * 0.5f, y, ww, wh, 0.04f, brnd() < 0.15f ? glassLit : glass);
+                }
+            if (front) {
+                float u = (nc / 2) * sp + sp * 0.5f;
+                facade_rect(m, B, s, u - 0.6f, 0.0f, 1.2f, 2.2f, 0.04f, (Color){90, 60, 40, 255});
+            }
+        } break;
+        case BLD_SHOP:
+            if (front) {                            // shopfront, sign band, door
+                facade_rect(m, B, s, 0.8f, 0.5f, len - 1.6f, 2.5f, 0.04f, glass);
+                facade_rect(m, B, s, 0.4f, H - 1.4f, len - 0.8f, 0.9f, 0.06f, SIGNS[(int)(brnd() * 5)]);
+                facade_rect(m, B, s, len * 0.5f - 0.8f, 0.0f, 1.6f, 2.4f, 0.07f, frame);
+            } else if (len > 6) {
+                for (float u = 2.0f; u + 1.2f < len - 1.0f; u += 4.0f) facade_rect(m, B, s, u, 2.0f, 1.2f, 1.0f, 0.04f, glass);
+            }
+            break;
+        case BLD_WAREHOUSE:
+            if (front)
+                for (float u = 2.0f; u + 4.0f < len - 1.0f; u += 6.0f) facade_rect(m, B, s, u, 0.0f, 4.0f, 4.5f, 0.04f, (Color){120, 124, 130, 255});
+            for (float u = 1.5f; u + 3.0f < len - 1.0f; u += 4.5f) facade_rect(m, B, s, u, H - 1.6f, 3.0f, 0.8f, 0.04f, glass);
+            break;
+        }
+    }
+
+    // Roofs.
+    V3 mn = B->mn, mx = B->mx;
+    if (B->roof > 0) {                              // gable, ridge along the long side, with eaves
+        float e = 0.45f, wt = mx.y - 0.15f, rt = mx.y + B->roof;
+        V3 ref = v3((mn.x + mx.x) * 0.5f, mx.y - 1.0f, (mn.z + mx.z) * 0.5f);
+        if (mx.x - mn.x >= mx.z - mn.z) {
+            float cz = (mn.z + mx.z) * 0.5f;
+            mb_quad(m, v3(mn.x - e, wt, mn.z - e), v3(mx.x + e, wt, mn.z - e), v3(mx.x + e, rt, cz), v3(mn.x - e, rt, cz), roof, ref);
+            mb_quad(m, v3(mn.x - e, wt, mx.z + e), v3(mx.x + e, wt, mx.z + e), v3(mx.x + e, rt, cz), v3(mn.x - e, rt, cz), roof, ref);
+            mb_tri(m, v3(mn.x, mx.y, mn.z), v3(mn.x, mx.y, mx.z), v3(mn.x, rt, cz), wall, ref);
+            mb_tri(m, v3(mx.x, mx.y, mn.z), v3(mx.x, mx.y, mx.z), v3(mx.x, rt, cz), wall, ref);
+        } else {
+            float cx = (mn.x + mx.x) * 0.5f;
+            mb_quad(m, v3(mn.x - e, wt, mn.z - e), v3(mn.x - e, wt, mx.z + e), v3(cx, rt, mx.z + e), v3(cx, rt, mn.z - e), roof, ref);
+            mb_quad(m, v3(mx.x + e, wt, mn.z - e), v3(mx.x + e, wt, mx.z + e), v3(cx, rt, mx.z + e), v3(cx, rt, mn.z - e), roof, ref);
+            mb_tri(m, v3(mn.x, mx.y, mn.z), v3(mx.x, mx.y, mn.z), v3(cx, rt, mn.z), wall, ref);
+            mb_tri(m, v3(mn.x, mx.y, mx.z), v3(mx.x, mx.y, mx.z), v3(cx, rt, mx.z), wall, ref);
+        }
+        if (B->kind == BLD_HOUSE && brnd() < 0.7f) {    // chimney
+            float x = lerpf(mn.x + 1.5f, mx.x - 1.5f, brnd()), z = lerpf(mn.z + 1.5f, mx.z - 1.5f, brnd());
+            box_shell(m, v3(x - 0.35f, mx.y, z - 0.35f), v3(x + 0.35f, rt + 0.6f, z + 0.35f), (Color){150, 80, 64, 255}, (Color){60, 50, 48, 255});
+        }
+    } else {                                        // flat: parapet and rooftop plant
+        Color pc = {(unsigned char)(wall.r * 0.85f), (unsigned char)(wall.g * 0.85f), (unsigned char)(wall.b * 0.85f), 255};
+        float t = 0.3f, py = mx.y + 0.6f;
+        box_shell(m, v3(mn.x, mx.y, mn.z), v3(mx.x, py, mn.z + t), pc, pc);
+        box_shell(m, v3(mn.x, mx.y, mx.z - t), v3(mx.x, py, mx.z), pc, pc);
+        box_shell(m, v3(mn.x, mx.y, mn.z), v3(mn.x + t, py, mx.z), pc, pc);
+        box_shell(m, v3(mx.x - t, mx.y, mn.z), v3(mx.x, py, mx.z), pc, pc);
+        if (city || B->kind == BLD_WAREHOUSE) {
+            int units = 1 + (int)(brnd() * 3);
+            for (int i = 0; i < units; i++) {
+                float x = lerpf(mn.x + 2.5f, mx.x - 4.5f, brnd()), z = lerpf(mn.z + 2.5f, mx.z - 4.5f, brnd());
+                box_shell(m, v3(x, mx.y, z), v3(x + 2.0f, mx.y + 1.3f, z + 1.6f), (Color){150, 152, 156, 255}, (Color){120, 122, 126, 255});
+            }
+        }
+    }
+}
+
+static Model build_city(const World *w) {
+    MeshB m = {0};
+    for (int i = 0; i < w->nbld; i++) build_building(&m, &w->bld[i]);
+    // Crash wall, pillars and barriers are boxes too (not buildings): plain concrete.
+    for (int b = 0; b < w->nbox; b++) {
+        int isB = 0;
+        for (int i = 0; i < w->nbld && !isB; i++) isB = w->bld[i].mn.x == w->box[b].mn.x && w->bld[i].mn.z == w->box[b].mn.z;
+        if (!isB) box_shell(&m, w->box[b].mn, w->box[b].mx, (Color){175, 172, 165, 255}, (Color){190, 188, 182, 255});
+    }
+    return mb_model(&m);
+}
+
+// ---------------------------------------------------------------- trees ----
+
+static Model treeModel[2], stumpModel;
+#define CONIFER_H 10.0f
+#define BROADLEAF_H 8.0f
+
+static void mb_cone(MeshB *m, float y0, float y1, float r0, float r1, int sides, Color col, float jitter) {
+    for (int i = 0; i < sides; i++) {
+        float a0 = 6.2831853f * i / sides, a1 = 6.2831853f * (i + 1) / sides;
+        V3 b0 = v3(cosf(a0) * r0, y0, sinf(a0) * r0), b1 = v3(cosf(a1) * r0, y0, sinf(a1) * r0);
+        V3 t0 = v3(cosf(a0) * r1, y1, sinf(a0) * r1), t1 = v3(cosf(a1) * r1, y1, sinf(a1) * r1);
+        Color c = col;
+        float j = 1.0f + jitter * ((i * 37 % 11) / 11.0f - 0.5f);
+        c.r = (unsigned char)fminf(255, c.r * j); c.g = (unsigned char)fminf(255, c.g * j);
+        V3 ref = v3(0, (y0 + y1) * 0.5f - 0.3f, 0);
+        if (r1 > 0.001f) mb_quad(m, b0, b1, t1, t0, c, ref);
+        else mb_tri(m, b0, b1, t0, c, ref);
+        mb_tri(m, b0, b1, v3(0, y0, 0), (Color){c.r * 6 / 10, c.g * 6 / 10, c.b * 6 / 10, 255}, v3(0, y0 + 1, 0));   // underside
+    }
+}
+
+// Faceted canopy: icosahedron, squashed and jittered.
+static void mb_blob(MeshB *m, V3 ctr, float rx, float ry, Color col, unsigned seed) {
+    const float t = 1.618034f;
+    V3 v[12] = {{-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0}, {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t}, {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}};
+    static const int f[20][3] = {{0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4}, {11, 10, 2}, {10, 7, 6}, {7, 1, 8},
+                                 {3, 9, 4}, {3, 4, 2}, {3, 2, 6}, {3, 6, 8}, {3, 8, 9}, {4, 9, 5}, {2, 4, 11}, {6, 2, 10}, {8, 6, 7}, {9, 8, 1}};
+    for (int i = 0; i < 12; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        float j = 0.85f + 0.3f * ((seed >> 8) / 16777216.0f);
+        V3 d = vnorm(v[i]);
+        v[i] = vadd(ctr, v3(d.x * rx * j, d.y * ry * j, d.z * rx * j));
+    }
+    for (int i = 0; i < 20; i++) mb_tri(m, v[f[i][0]], v[f[i][1]], v[f[i][2]], col, ctr);
+}
+
+static void build_trees(void) {
+    MeshB m = {0};
+    Color bark = {92, 66, 46, 255};
+    mb_cone(&m, 0, 3.0f, 0.25f, 0.18f, 6, bark, 0);                                   // conifer
+    mb_cone(&m, 1.6f, 6.0f, 2.6f, 0.0f, 9, (Color){46, 92, 52, 255}, 0.25f);
+    mb_cone(&m, 3.8f, 8.2f, 2.0f, 0.0f, 9, (Color){52, 102, 56, 255}, 0.25f);
+    mb_cone(&m, 6.0f, CONIFER_H, 1.3f, 0.0f, 8, (Color){60, 112, 60, 255}, 0.25f);
+    treeModel[TREE_CONIFER] = mb_model(&m);
+    mb_cone(&m, 0, 3.6f, 0.22f, 0.16f, 6, bark, 0);                                   // broadleaf
+    mb_blob(&m, v3(0, 5.2f, 0), 2.6f, 2.2f, (Color){84, 132, 58, 255}, 7);
+    mb_blob(&m, v3(0.9f, 6.3f, 0.5f), 1.6f, 1.4f, (Color){96, 146, 64, 255}, 11);
+    treeModel[TREE_BROADLEAF] = mb_model(&m);
+    mb_cone(&m, -0.3f, 0.5f, 1.0f, 0.85f, 7, bark, 0);                               // stump (scaled by trunk radius)
+    mb_cone(&m, 0.5f, 0.5f, 0.85f, 0.0f, 7, (Color){200, 170, 120, 255}, 0);
+    stumpModel = mb_model(&m);
+}
+
+static void draw_trees(const World *w, Vector3 eye) {
+    for (int i = 0; i < w->ntree; i++) {
+        const Tree *t = &w->tree[i];
+        float dx = t->x - eye.x, dz = t->z - eye.z;
+        if (dx * dx + dz * dz > 300.0f * 300.0f) continue;
+        float s = t->h / (t->kind == TREE_CONIFER ? CONIFER_H : BROADLEAF_H);
+        unsigned char tint = (unsigned char)(215 + (i * 97 % 40));
+        Color c = {tint, tint, (unsigned char)(tint - 10), 255};
+        Vector3 base = {t->x, t->y, t->z};
+        if (!t->broken) {
+            DrawModelEx(treeModel[t->kind], base, (Vector3){0, 1, 0}, (float)(i * 47 % 360), (Vector3){s, s, s}, c);
+        } else {
+            V3 axis = vcross(v3(0, 1, 0), t->fall);
+            Vector3 top = {t->x + t->fall.x * 0.5f * t->r, t->y + 0.5f * s, t->z + t->fall.z * 0.5f * t->r};
+            DrawModelEx(treeModel[t->kind], top, RV(axis), t->tilt * RAD2DEG, (Vector3){s, s, s}, c);
+            float sr = t->r / 0.25f * (t->kind == TREE_CONIFER ? 1.0f : 0.25f / 0.22f);
+            DrawModelEx(stumpModel, base, (Vector3){0, 1, 0}, 0, (Vector3){sr * 0.25f, 1, sr * 0.25f}, WHITE);
+        }
+    }
+}
+
+static void draw_tree_shadows(const World *w, Vector3 eye) {
+    Color sh = {0, 0, 0, 55};
+    for (int i = 0; i < w->ntree; i++) {
+        const Tree *t = &w->tree[i];
+        float dx = t->x - eye.x, dz = t->z - eye.z;
+        if (t->broken || dx * dx + dz * dz > 140.0f * 140.0f) continue;
+        float R = t->h * (t->kind == TREE_CONIFER ? 0.24f : 0.33f);
+        // Offset away from the sun, sitting on the local slope.
+        V3 c = v3(t->x - SUN.x * t->h * 0.25f, 0, t->z - SUN.z * t->h * 0.25f);
+        c.y = terrain_height(c.x, c.z) + 0.05f;
+        V3 n = terrain_normal(c.x, c.z);
+        Vector3 prev = {0};
+        for (int k = 0; k <= 8; k++) {
+            float a = 6.2831853f * k / 8;
+            float px = c.x + cosf(a) * R, pz = c.z + sinf(a) * R;
+            float py = c.y - (n.x * (px - c.x) + n.z * (pz - c.z)) / n.y;
+            Vector3 p = {px, py, pz};
+            if (k) { DrawTriangle3D(RV(c), p, prev, sh); DrawTriangle3D(RV(c), prev, p, sh); }
+            prev = p;
+        }
+    }
 }
 
 // ---------------------------------------------------------- skid marks ----
@@ -274,6 +571,8 @@ int main(void) {
 
     static World world;
     world_init(&world);
+    Model city = build_city(&world);
+    build_trees();
     world.ncars = 3;
     spawn_player(&world);
     car_build(&world.cars[1], v3(-2.2f, CAR_SPAWN_H, 26), PI / 2, PALETTE[1]);
@@ -303,13 +602,16 @@ int main(void) {
             V3 p = pc->pos;
             car_build(pc, v3(p.x, terrain_height(p.x, p.z) + CAR_SPAWN_H + 0.2f, p.z), -hdg, PALETTE[0]);
         }
-        if (IsKeyPressed(KEY_N)) {       // drop a parked car ahead, side-on
+        if (IsKeyPressed(KEY_N)) {       // drop a parked truck ahead, side-on (unless that's inside a building)
             float hdg = atan2f(pc->fwd.z, pc->fwd.x);
             V3 p = vadd(pc->pos, vscale(vnorm(v3(pc->fwd.x, 0, pc->fwd.z)), 20.0f));
-            int slot = world.ncars < MAX_CARS ? world.ncars++ : nextSlot;
-            if (slot == nextSlot) nextSlot = nextSlot + 1 >= MAX_CARS ? 1 : nextSlot + 1;
-            car_build(&world.cars[slot], v3(p.x, terrain_height(p.x, p.z) + CAR_SPAWN_H + 0.1f, p.z), -hdg + PI / 2, PALETTE[slot % 8]);
-            world.cars[slot].ctl = (Controls){0, 0.6f, 0, 1};
+            p.y = terrain_height(p.x, p.z);
+            if (!world_point_solid(&world, vadd(p, v3(0, 1.0f, 0)))) {
+                int slot = world.ncars < MAX_CARS ? world.ncars++ : nextSlot;
+                if (slot == nextSlot) nextSlot = nextSlot + 1 >= MAX_CARS ? 1 : nextSlot + 1;
+                car_build(&world.cars[slot], v3(p.x, p.y + CAR_SPAWN_H + 0.1f, p.z), -hdg + PI / 2, PALETTE[slot % 8]);
+                world.cars[slot].ctl = (Controls){0, 0.6f, 0, 1};
+            }
         }
         if (IsKeyPressed(KEY_X)) { world.ncars = 1; nextSlot = 1; }
         if (IsKeyPressed(KEY_B)) beamView = !beamView;
@@ -365,7 +667,15 @@ int main(void) {
             V3 want = vadd(tgt, v3(cosf(a) * cosf(camPitch) * camDist, sinf(camPitch) * camDist + 0.8f, sinf(a) * cosf(camPitch) * camDist));
             float gh = terrain_height(want.x, want.z) + 0.5f;
             if (want.y < gh) want.y = gh;
-            float k = fminf(1.0f, dt * 10.0f);
+            // Don't let buildings get between the camera and the truck.
+            V3 dir = vsub(want, tgt);
+            float L = vlen(dir), k = fminf(1.0f, dt * 10.0f);
+            for (float d = 0.8f; d < L; d += 0.4f)
+                if (world_point_solid(&world, vadd(tgt, vscale(dir, d / L)))) {
+                    want = vadd(tgt, vscale(dir, fmaxf(d - 0.7f, 1.5f) / L));
+                    k = fminf(1.0f, dt * 25.0f);
+                    break;
+                }
             camPos = (Vector3){camPos.x + (want.x - camPos.x) * k, camPos.y + (want.y - camPos.y) * k, camPos.z + (want.z - camPos.z) * k};
             cam.position = camPos;
             cam.target = RV(tgt);
@@ -385,13 +695,9 @@ int main(void) {
         for (int i = 0; i < CH_N * CH_N; i++) DrawModel(chunks[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
         rlDisableBackfaceCulling();
         draw_skids();
-        for (int b = 0; b < world.nbox; b++) {
-            Box *B = &world.box[b];
-            Vector3 ctr = {(B->mn.x + B->mx.x) / 2, (B->mn.y + B->mx.y) / 2, (B->mn.z + B->mx.z) / 2};
-            Vector3 sz = {B->mx.x - B->mn.x, B->mx.y - B->mn.y, B->mx.z - B->mn.z};
-            DrawCubeV(ctr, sz, (Color){175, 172, 165, 255});
-            DrawCubeWiresV(ctr, sz, (Color){95, 92, 88, 255});
-        }
+        DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        draw_tree_shadows(&world, cam.position);
+        draw_trees(&world, cam.position);
         for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z));
         draw_shards();
         rlEnableBackfaceCulling();
@@ -399,12 +705,12 @@ int main(void) {
 
         // ---- HUD
         int sw = GetScreenWidth(), shh = GetScreenHeight();
-        DrawRectangle(16, shh - 140, 330, 124, (Color){0, 0, 0, 120});
+        DrawRectangle(16, shh - 140, 440, 124, (Color){0, 0, 0, 120});
         DrawText(TextFormat("%3.0f km/h", fabsf(vF) * 3.6f), 30, shh - 132, 44, RAYWHITE);
         Color dc = pc->damage < 15 ? (Color){120, 230, 120, 255} : (pc->damage < 50 ? (Color){250, 210, 80, 255} : (Color){250, 90, 80, 255});
         DrawText(TextFormat("damage %3.0f%%   torn beams %d", pc->damage, pc->brokenBeams), 30, shh - 80, 18, dc);
         static const char *TG[] = {"latched", "open", "hanging", "gone"};
-        DrawText(TextFormat("glass %d/%d broken   tailgate %s", pc->glassBrokenCount, pc->npanels, TG[pc->tailgate]), 30, shh - 58, 16, RAYWHITE);
+        DrawText(TextFormat("glass %d/%d broken   tailgate %s   trees down %d", pc->glassBrokenCount, pc->npanels, TG[pc->tailgate], world.treesDown), 30, shh - 58, 16, RAYWHITE);
         DrawText(TextFormat("%s%s%s", slowmo ? "SLOW-MO  " : "", paused ? "PAUSED  " : "", ctl.handbrake ? "HANDBRAKE" : ""), 30, shh - 34, 16, (Color){255, 220, 120, 255});
         DrawFPS(sw - 90, 12);
         if (help) {
@@ -413,7 +719,8 @@ int main(void) {
                 "Mouse drag     orbit camera   wheel: zoom", "C  hood cam    B  beam view (stress)",
                 "N  spawn truck ahead   X  clear trucks", "Q  recover in place   R  reset to start",
                 "T  slow-mo   P  pause   K  clear skids", "G  drop the tailgate   H  hide this help",
-                "", "Ramp ahead, crash wall behind you,", "parked cars + dirt washboard to the left (+z)."};
+                "", "Ramp ahead, crash wall behind you.", "Towns up the cross road to the left (+z),",
+                "warehouses to the right, forest on the hills.", "Small trees snap; big ones don't."};
             int n = sizeof lines / sizeof lines[0];
             DrawRectangle(16, 16, 390, 22 + n * 20, (Color){0, 0, 0, 120});
             for (int i = 0; i < n; i++) DrawText(lines[i], 28, 26 + i * 20, 16, RAYWHITE);
@@ -422,6 +729,7 @@ int main(void) {
     }
 
     for (int i = 0; i < CH_N * CH_N; i++) UnloadModel(chunks[i]);
+    UnloadModel(city); UnloadModel(treeModel[0]); UnloadModel(treeModel[1]); UnloadModel(stumpModel);
     CloseWindow();
     return 0;
 }

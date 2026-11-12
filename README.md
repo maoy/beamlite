@@ -34,6 +34,10 @@ xcode-select --install        # once, if you don't have the command line tools
 
 The map has a launch ramp straight ahead, a crash-test wall behind you, concrete pillars,
 parked trucks and a dirt washboard section on the cross road, and rolling hills past ~100 m.
+Up the cross road to the left (+z) are two small towns with avenues, side streets and pavements:
+houses, shops, apartment blocks, a couple of towers and warehouses, with saplings along the kerbs.
+There's a warehouse district off a service road to the right, and forest covers the hills.
+Saplings and young trees snap and fall when you hit them; mature trunks stop you dead.
 
 ## How it works
 
@@ -60,11 +64,19 @@ parked trucks and a dirt washboard section on the cross road, and rolling hills 
   (up to ~10°, counter-steering at low speed) and a handbrake for drifting.
 - **Collisions**: nodes collide with the terrain (heightfield) and boxes with friction.
   Truck-to-truck contact uses node spheres, checking only nodes inside the overlapping bounding boxes.
+- **World**: the towns are generated from a fixed seed: lots are laid out along each block's
+  street edges, then yards and the forest are filled in. Areas the headless test drives
+  through are kept clear. Buildings collide as boxes; trees collide as trunk cylinders. A tree
+  snaps once the impulse it takes in a short window passes a limit set by its trunk radius, then
+  falls like a toppling rod in the direction it was hit. A uniform 6 m grid makes the collision
+  checks cheap (about 70 buildings, about 1000 trees). The renderer bakes the buildings into one
+  flat-shaded mesh, with windows, doors, shopfronts, gable roofs, chimneys and rooftop plant.
+  The chase camera pulls in so buildings never block the view.
 - **Integration**: semi-implicit Euler at 1200 Hz fixed substeps. Each beam's stiffness and
   damping is limited by the masses it connects, which keeps the explicit integrator stable.
 
 `tests/test_physics.c` is a headless test that runs acceleration, braking, cornering,
-a tailgate drop, a 60 km/h wall crash, a ramp jump and a T-bone, then writes wireframe snapshots:
+a tailgate drop, a 60 km/h wall crash, a ramp jump, a T-bone and hitting a sapling and a mature tree, then writes wireframe snapshots:
 `cc -O2 tests/test_physics.c src/physics.c -lm -o tp && ./tp`
 
 ## Ideas for next steps

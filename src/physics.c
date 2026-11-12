@@ -611,6 +611,23 @@ static void contact_resolve(Node *N, V3 n, float pen, float mu) {
     N->v = vtl <= dv ? vsub(N->v, vt) : vsub(N->v, vscale(vt, dv / vtl));
 }
 
+static int grid_cell(float x, float z) {
+    int gx = (int)floorf((x + GRID_N * GRID_CELL * 0.5f) / GRID_CELL);
+    int gz = (int)floorf((z + GRID_N * GRID_CELL * 0.5f) / GRID_CELL);
+    if (gx < 0 || gz < 0 || gx >= GRID_N || gz >= GRID_N) return -1;
+    return gz * GRID_N + gx;
+}
+
+static void break_tree(World *w, Tree *t, V3 v, V3 n) {
+    t->broken = 1;
+    w->treesDown++;
+    V3 dir = v3(v.x, 0, v.z);
+    if (vlen(dir) < 0.5f) dir = v3(-n.x, 0, -n.z);
+    t->fall = vnorm(dir);
+    t->tilt = 0.03f;
+    t->tiltVel = fminf(vlen(v3(v.x, 0, v.z)) / (0.5f * t->h), 2.5f);
+}
+
 static void collide_static(World *w, Car *c) {
     for (int i = 0; i < c->nn; i++) {
         Node *N = &c->n[i];
@@ -619,18 +636,35 @@ static void collide_static(World *w, Car *c) {
             V3 n = terrain_normal(N->p.x, N->p.z);
             contact_resolve(N, n, (gh - N->p.y) * n.y, MU_GROUND);
         }
-        for (int b = 0; b < w->nbox; b++) {
-            Box *B = &w->box[b];
+        int cell = grid_cell(N->p.x, N->p.z);
+        if (cell < 0) continue;
+        for (int k = w->gridStart[cell]; k < w->gridStart[cell + 1]; k++) {
+            int it = w->gridItem[k];
             V3 p = N->p;
-            if (p.x < B->mn.x || p.x > B->mx.x || p.y < B->mn.y || p.y > B->mx.y || p.z < B->mn.z || p.z > B->mx.z) continue;
-            float d[6] = {p.x - B->mn.x, B->mx.x - p.x, p.y - B->mn.y, B->mx.y - p.y, p.z - B->mn.z, B->mx.z - p.z};
-            int best = 0;
-            for (int k = 1; k < 6; k++) if (d[k] < d[best]) best = k;
-            V3 n = v3(0, 0, 0);
-            if (best == 0) n.x = -1; else if (best == 1) n.x = 1;
-            else if (best == 2) n.y = -1; else if (best == 3) n.y = 1;
-            else if (best == 4) n.z = -1; else n.z = 1;
-            contact_resolve(N, n, d[best], 0.4f);
+            if (it < MAX_BOXES) {
+                Box *B = &w->box[it];
+                if (p.x < B->mn.x || p.x > B->mx.x || p.y < B->mn.y || p.y > B->mx.y || p.z < B->mn.z || p.z > B->mx.z) continue;
+                float d[6] = {p.x - B->mn.x, B->mx.x - p.x, p.y - B->mn.y, B->mx.y - p.y, p.z - B->mn.z, B->mx.z - p.z};
+                int best = 0;
+                for (int q = 1; q < 6; q++) if (d[q] < d[best]) best = q;
+                V3 n = v3(0, 0, 0);
+                if (best == 0) n.x = -1; else if (best == 1) n.x = 1;
+                else if (best == 2) n.y = -1; else if (best == 3) n.y = 1;
+                else if (best == 4) n.z = -1; else n.z = 1;
+                contact_resolve(N, n, d[best], 0.4f);
+            } else {
+                Tree *t = &w->tree[it - MAX_BOXES];
+                if (t->broken || p.y < t->y - 0.5f || p.y > t->y + t->h) continue;
+                float dx = p.x - t->x, dz = p.z - t->z, d2 = dx * dx + dz * dz;
+                if (d2 >= t->r * t->r) continue;
+                float d = sqrtf(d2);
+                V3 n = d > 1e-4f ? v3(dx / d, 0, dz / d) : v3(1, 0, 0);
+                V3 vin = N->v;
+                float vn = vdot(vin, n);
+                contact_resolve(N, n, t->r - d, 0.3f);
+                if (vn < 0) t->imp += N->m * -vn;
+                if (t->breakImp > 0 && t->imp > t->breakImp) break_tree(w, t, vin, n);
+            }
         }
     }
 }
@@ -678,7 +712,19 @@ static void collide_cars(Car *A, Car *B) {
     }
 }
 
+static void update_trees(World *w, float h) {
+    for (int i = 0; i < w->ntree; i++) {
+        Tree *t = &w->tree[i];
+        if (t->imp > 0) t->imp = fmaxf(0.0f, t->imp - t->imp * 6.0f * h - 1.0f);   // forget old knocks
+        if (!t->broken || t->tilt >= 1.45f) continue;
+        t->tiltVel += 1.5f * GRAV / t->h * sinf(t->tilt) * h;                       // falling rod
+        t->tilt += t->tiltVel * h;
+        if (t->tilt >= 1.45f) { t->tilt = 1.45f; t->tiltVel = 0; }
+    }
+}
+
 void world_substep(World *w, float h) {
+    update_trees(w, h);
     for (int ci = 0; ci < w->ncars; ci++) {
         Car *c = &w->cars[ci];
         if (!c->active) continue;
@@ -708,12 +754,216 @@ void world_substep(World *w, float h) {
     }
 }
 
-static void add_box(World *w, V3 mn, V3 mx) {
-    if (w->nbox < MAX_BOXES) { w->box[w->nbox].mn = mn; w->box[w->nbox].mx = mx; w->nbox++; }
+// ------------------------------------------------------------- the map ----
+//
+// Highway along x, a cross road (dirt washboard section) along z, and two small
+// towns either side of the cross road on the north (+z) side, each with an avenue
+// and side streets. Forest on the hills. The south side and the test corridors
+// stay open.
+
+typedef struct { float x0, x1, z0, z1; } Rect;
+
+static const Rect ROADS[] = {
+    {-260, 260, -7, 7},          // highway
+    {-7, 7, -260, 260},          // cross road
+};
+static const Rect STREETS[] = {
+    {-112, 112, 44, 52},         // avenue
+    {-80, 80, 94, 100},          // upper avenue
+    {36, 44, 7, 136}, {76, 84, 7, 94}, {-44, -36, 7, 136}, {-84, -76, 7, 94},   // side streets
+    {30, 78, -13, -7},           // service road into the warehouse district
+};
+// No scenery here: ramp + landing run-out, crash wall, spawn, and the headless test routes.
+static const Rect KEEP_CLEAR[] = {
+    {30, 225, -12, 12}, {-82, -64, -18, 18}, {-16, 16, -16, 16},
+    {-82, 72, -72, -38}, {-82, -14, -72, 8},
+};
+#define NELEM(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+static int in_rect(const Rect *r, float x, float z, float m) {
+    return x > r->x0 - m && x < r->x1 + m && z > r->z0 - m && z < r->z1 + m;
+}
+static int rect_overlap(const Rect *a, const Rect *b, float m) {
+    return a->x0 < b->x1 + m && b->x0 < a->x1 + m && a->z0 < b->z1 + m && b->z0 < a->z1 + m;
+}
+
+int road_at(float x, float z) {
+    for (int i = 0; i < NELEM(ROADS); i++) if (in_rect(&ROADS[i], x, z, 0)) return 1;
+    for (int i = 0; i < NELEM(STREETS); i++) if (in_rect(&STREETS[i], x, z, 0)) return 2;
+    return 0;
+}
+
+static unsigned rng_state;
+static float frnd(void) { rng_state = rng_state * 1664525u + 1013904223u; return (rng_state >> 8) / 16777216.0f; }
+static float frange(float a, float b) { return a + (b - a) * frnd(); }
+
+static int add_box(World *w, V3 mn, V3 mx) {
+    if (w->nbox >= MAX_BOXES) return -1;
+    w->box[w->nbox].mn = mn; w->box[w->nbox].mx = mx;
+    return w->nbox++;
+}
+
+// Is this footprint free of roads, keep-clear zones, boxes and trees?
+static int area_free(const World *w, Rect r, float margin) {
+    float rm = fminf(margin, 1.0f);             // kerb clearance is smaller than the spacing between things
+    for (int i = 0; i < NELEM(ROADS); i++) if (rect_overlap(&r, &ROADS[i], rm)) return 0;
+    for (int i = 0; i < NELEM(STREETS); i++) if (rect_overlap(&r, &STREETS[i], rm)) return 0;
+    for (int i = 0; i < NELEM(KEEP_CLEAR); i++) if (rect_overlap(&r, &KEEP_CLEAR[i], 0)) return 0;
+    if (fabsf(r.x0) > 290 || fabsf(r.x1) > 290 || fabsf(r.z0) > 290 || fabsf(r.z1) > 290) return 0;
+    for (int i = 0; i < w->nbox; i++) {
+        Rect b = {w->box[i].mn.x, w->box[i].mx.x, w->box[i].mn.z, w->box[i].mx.z};
+        if (rect_overlap(&r, &b, margin)) return 0;
+    }
+    for (int i = 0; i < w->ntree; i++)
+        if (in_rect(&r, w->tree[i].x, w->tree[i].z, margin)) return 0;
+    return 1;
+}
+
+int world_add_tree(World *w, float x, float z, float h, int kind) {
+    if (w->ntree >= MAX_TREES) return -1;
+    Tree *t = &w->tree[w->ntree];
+    memset(t, 0, sizeof *t);
+    t->x = x; t->z = z; t->y = terrain_height(x, z);
+    t->h = h; t->kind = (unsigned char)kind;
+    t->r = (kind == TREE_CONIFER ? 0.025f : 0.0275f) * h;
+    // Saplings and young trees snap; mature trunks stop a truck dead.
+    if (t->r < 0.17f) t->breakImp = 3500.0f;
+    else if (t->r < 0.25f) t->breakImp = 14000.0f;
+    return w->ntree++;
+}
+
+static void try_tree(World *w, float x, float z, float h, int kind, float spacing) {
+    Rect r = {x, x, z, z};
+    if (area_free(w, r, spacing)) world_add_tree(w, x, z, h, kind);
+}
+
+static void add_building(World *w, Rect r, int kind, float height, int front) {
+    if (w->nbld >= MAX_BLD) return;
+    float lo = 1e9f, hi = -1e9f;
+    for (int i = 0; i <= 2; i++)
+        for (int j = 0; j <= 2; j++) {
+            float g = terrain_height(lerpf(r.x0, r.x1, i * 0.5f), lerpf(r.z0, r.z1, j * 0.5f));
+            lo = fminf(lo, g); hi = fmaxf(hi, g);
+        }
+    Building *B = &w->bld[w->nbld];
+    B->mn = v3(r.x0, lo - 0.6f, r.z0);
+    B->mx = v3(r.x1, hi + height, r.z1);
+    B->ground = hi;
+    B->kind = kind; B->front = front;
+    B->roof = kind == BLD_HOUSE ? frange(2.4f, 3.4f) : (kind == BLD_WAREHOUSE ? 1.4f : 0.0f);
+    B->seed = (unsigned)(frnd() * 4294967040.0f);
+    if (add_box(w, B->mn, B->mx) >= 0) w->nbld++;
+}
+
+typedef struct { Rect r; int zone; } Block;   // zone 0 downtown, 1 mixed, 2 suburb
+
+static int pick_kind(int zone, int first) {
+    float u = frnd();
+    if (zone == 0) return first ? BLD_TOWER : (u < 0.12f ? BLD_TOWER : u < 0.6f ? BLD_APARTMENT : BLD_SHOP);
+    if (zone == 1) return u < 0.3f ? BLD_APARTMENT : u < 0.65f ? BLD_SHOP : BLD_HOUSE;
+    if (zone == 2) return u < 0.75f ? BLD_HOUSE : u < 0.87f ? BLD_SHOP : BLD_WAREHOUSE;
+    return u < 0.75f ? BLD_WAREHOUSE : BLD_SHOP;                                  // industrial
+}
+
+// Frontage width, depth and wall height for a kind.
+static void pick_size(int k, float *wdt, float *dep, float *ht) {
+    switch (k) {
+        case BLD_TOWER: *wdt = frange(13, 17); *dep = frange(13, 17); *ht = frange(30, 52); break;
+        case BLD_APARTMENT: *wdt = frange(14, 22); *dep = frange(10, 13); *ht = 3.2f * (int)frange(4, 7) + 0.8f; break;
+        case BLD_SHOP: *wdt = frange(10, 16); *dep = frange(8, 11); *ht = frange(4.5f, 5.6f); break;
+        case BLD_WAREHOUSE: *wdt = frange(18, 26); *dep = frange(12, 16); *ht = frange(7, 9); break;
+        default: *wdt = frange(8.5f, 11); *dep = frange(7.5f, 9.5f); *ht = frange(5.6f, 6.4f); break;
+    }
+}
+
+static void fill_block(World *w, const Block *bk) {
+    const Rect *R = &bk->r;
+    const float SET = 1.5f;                     // setback from the kerb
+    int first = 1;
+    // Lots along each street edge: south, north, west, east.
+    for (int e = 0; e < 4; e++) {
+        int alongX = e < 2;
+        float len = alongX ? R->x1 - R->x0 : R->z1 - R->z0;
+        float cur = frange(0.5f, 2.5f);
+        while (cur < len - 6) {
+            int k = pick_kind(bk->zone, first);
+            float wdt, dep, ht;
+            pick_size(k, &wdt, &dep, &ht);
+            if (k == BLD_TOWER) { if (cur + wdt > len - 1) { cur += 2; continue; } }
+            if (cur + wdt > len - 1) wdt = len - 1 - cur;
+            if (wdt < 7.5f) break;
+            Rect fp; int front;
+            if (e == 0) { fp = (Rect){R->x0 + cur, R->x0 + cur + wdt, R->z0 + SET, R->z0 + SET + dep}; front = 3; }
+            else if (e == 1) { fp = (Rect){R->x0 + cur, R->x0 + cur + wdt, R->z1 - SET - dep, R->z1 - SET}; front = 2; }
+            else if (e == 2) { fp = (Rect){R->x0 + SET, R->x0 + SET + dep, R->z0 + cur, R->z0 + cur + wdt}; front = 1; }
+            else { fp = (Rect){R->x1 - SET - dep, R->x1 - SET, R->z0 + cur, R->z0 + cur + wdt}; front = 0; }
+            if (fp.x1 <= R->x1 && fp.z1 <= R->z1 && area_free(w, fp, k == BLD_HOUSE ? 2.2f : 1.6f)) {
+                add_building(w, fp, k, ht, front);
+                first = 0;
+                cur += wdt + (k == BLD_HOUSE ? frange(2.5f, 5.0f) : frange(1.8f, 3.5f));
+            } else cur += 2.0f;
+        }
+    }
+    // Yard and park trees in what's left.
+    for (int t = 0; t < 30; t++) {
+        float x = frange(R->x0 + 1, R->x1 - 1), z = frange(R->z0 + 1, R->z1 - 1);
+        try_tree(w, x, z, frange(5.0f, 8.5f), frnd() < 0.8f ? TREE_BROADLEAF : TREE_CONIFER, 2.5f);
+    }
+}
+
+void world_build_grid(World *w) {
+    static int count[GRID_N * GRID_N];
+    memset(count, 0, sizeof count);
+    const float M = 0.6f;                       // margin so nodes near a cell edge still see the obstacle
+    for (int pass = 0; pass < 2; pass++) {
+        int total = 0;
+        if (pass == 1) {
+            for (int c = 0; c < GRID_N * GRID_N; c++) { w->gridStart[c] = total; total += count[c]; count[c] = 0; }
+            w->gridStart[GRID_N * GRID_N] = total;
+        }
+        int nobj = w->nbox + w->ntree;
+        for (int o = 0; o < nobj; o++) {
+            float x0, x1, z0, z1; int item;
+            if (o < w->nbox) { x0 = w->box[o].mn.x; x1 = w->box[o].mx.x; z0 = w->box[o].mn.z; z1 = w->box[o].mx.z; item = o; }
+            else { Tree *t = &w->tree[o - w->nbox]; x0 = t->x - t->r; x1 = t->x + t->r; z0 = t->z - t->r; z1 = t->z + t->r; item = MAX_BOXES + o - w->nbox; }
+            const float half = GRID_N * GRID_CELL * 0.5f;
+            int gx0 = (int)floorf((x0 - M + half) / GRID_CELL), gx1 = (int)floorf((x1 + M + half) / GRID_CELL);
+            int gz0 = (int)floorf((z0 - M + half) / GRID_CELL), gz1 = (int)floorf((z1 + M + half) / GRID_CELL);
+            for (int gz = gz0 < 0 ? 0 : gz0; gz <= gz1 && gz < GRID_N; gz++)
+                for (int gx = gx0 < 0 ? 0 : gx0; gx <= gx1 && gx < GRID_N; gx++) {
+                    int c = gz * GRID_N + gx;
+                    if (pass == 1) {
+                        int at = w->gridStart[c] + count[c];
+                        if (at < MAX_GRID_ITEMS) w->gridItem[at] = item;
+                    }
+                    count[c]++;
+                }
+        }
+        if (pass == 1 && w->gridStart[GRID_N * GRID_N] > MAX_GRID_ITEMS)   // overflow: drop the tail safely
+            for (int c = 0; c <= GRID_N * GRID_N; c++) if (w->gridStart[c] > MAX_GRID_ITEMS) w->gridStart[c] = MAX_GRID_ITEMS;
+    }
+}
+
+int world_point_solid(const World *w, V3 p) {
+    int cell = grid_cell(p.x, p.z);
+    if (cell < 0) return 0;
+    for (int k = w->gridStart[cell]; k < w->gridStart[cell + 1]; k++) {
+        int it = w->gridItem[k];
+        if (it < MAX_BOXES) {
+            const Box *B = &w->box[it];
+            if (p.x > B->mn.x && p.x < B->mx.x && p.y > B->mn.y && p.y < B->mx.y && p.z > B->mn.z && p.z < B->mx.z) return 1;
+        } else {
+            const Tree *t = &w->tree[it - MAX_BOXES];
+            float dx = p.x - t->x, dz = p.z - t->z;
+            if (!t->broken && p.y < t->y + t->h && dx * dx + dz * dz < t->r * t->r) return 1;
+        }
+    }
+    return 0;
 }
 
 void world_init(World *w) {
     memset(w, 0, sizeof *w);
+    rng_state = 20240611u;
     // Crash-test wall behind the spawn point.
     add_box(w, v3(-74, -1, -14), v3(-71, 3.0f, 14));
     // A row of concrete pillars beside the main road.
@@ -725,5 +975,59 @@ void world_init(World *w) {
     // Low barrier blocks scattered on the plaza.
     add_box(w, v3(18, -1, -26), v3(30, 0.8f, -24.5f));
     add_box(w, v3(-30, -1, -30), v3(-28.5f, 1.2f, -18));
+
+    // Towns: blocks between the highway, the avenue and the side streets, mirrored across the cross road.
+    const Block east[] = {
+        {{9, 36, 15, 44}, 0}, {{44, 76, 15, 44}, 1}, {{84, 112, 15, 44}, 2},
+        {{9, 36, 52, 92}, 1}, {{44, 76, 52, 92}, 2}, {{84, 112, 52, 92}, 2},
+        {{9, 36, 100, 134}, 2}, {{44, 76, 100, 132}, 2},
+    };
+    for (int side = -1; side <= 1; side += 2)
+        for (int i = 0; i < NELEM(east); i++) {
+            Block b = east[i];
+            if (side < 0) { float t = b.r.x0; b.r.x0 = -b.r.x1; b.r.x1 = -t; }
+            fill_block(w, &b);
+        }
+    {   // Warehouse district south of the highway (east side only; the west is a test route).
+        Block ind = {{34, 74, -38, -14}, 3};
+        fill_block(w, &ind);
+    }
+    // Saplings along the avenue kerbs, in the setback strip in front of the buildings.
+    for (int side = -1; side <= 1; side += 2)
+        for (float x = 12; x < 110; x += 9) {
+            if (fabsf(x - 40) < 6 || fabsf(x - 80) < 6) continue;
+            for (int s = 0; s < 2; s++) {
+                float tx = side * x, tz = s ? 52.7f : 43.3f;
+                Rect r = {tx, tx, tz, tz};
+                int ok = 1;
+                for (int i = 0; i < w->nbox && ok; i++) {
+                    Rect b = {w->box[i].mn.x, w->box[i].mx.x, w->box[i].mn.z, w->box[i].mx.z};
+                    ok = !rect_overlap(&r, &b, 0.5f);
+                }
+                if (ok) world_add_tree(w, tx, tz, frange(4.2f, 5.4f), TREE_BROADLEAF);
+            }
+        }
+
+    // Roadside trees along the highway and the cross road, out in the country.
+    for (float x = 66; x < 250; x += 11) { try_tree(w, x, 14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); try_tree(w, x + 5, -14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); }
+    for (float x = -86; x > -250; x -= 11) { try_tree(w, x, 14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); try_tree(w, x - 5, -14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); }
+    for (float z = 100; z < 250; z += 12) { try_tree(w, 12, z, frange(6, 10), TREE_CONIFER, 2.0f); try_tree(w, -12, z + 6, frange(6, 10), TREE_CONIFER, 2.0f); }
+    for (float z = -80; z > -250; z -= 12) { try_tree(w, 12, z, frange(6, 10), TREE_CONIFER, 2.0f); try_tree(w, -12, z - 6, frange(6, 10), TREE_CONIFER, 2.0f); }
+
+    // Forest on the hills, thicker further out; a few loners on the flat.
+    for (int i = 0; i < 2600 && w->ntree < MAX_TREES - 40; i++) {
+        float r = frange(95, 290), a = frange(0, 6.2831853f);
+        float x = r * cosf(a), z = r * sinf(a);
+        if (frnd() > smooth01(90, 200, r) + 0.15f) continue;
+        int conifer = frnd() < 0.35f + 0.5f * smooth01(110, 220, r);
+        try_tree(w, x, z, conifer ? frange(8, 15) : frange(6, 10), conifer ? TREE_CONIFER : TREE_BROADLEAF, 3.2f);
+    }
+    for (int i = 0; i < 120; i++) {
+        float x = frange(-88, 88), z = frange(-88, 88);
+        if (x * x + z * z > 88 * 88) continue;
+        try_tree(w, x, z, frange(5, 9), frnd() < 0.7f ? TREE_BROADLEAF : TREE_CONIFER, 6.0f);
+    }
+
+    world_build_grid(w);
     w->ncars = 0;
 }

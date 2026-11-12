@@ -26,7 +26,12 @@ static inline V3 vrot(V3 v, V3 k, float a) {
 #define MAX_TRIS 512
 #define MAX_PANELS 8
 #define MAX_CARS 8
-#define MAX_BOXES 64
+#define MAX_BOXES 320
+#define MAX_BLD 256
+#define MAX_TREES 1024
+#define GRID_N 100               // collision grid over the 600 m world
+#define GRID_CELL 6.0f
+#define MAX_GRID_ITEMS 32000
 
 #define SIM_HZ 1200.0f          // physics substep rate
 #define WHEEL_R 0.44f           // 35" all-terrain tyre
@@ -95,15 +100,48 @@ typedef struct {
 
 typedef struct { V3 mn, mx; } Box;
 
+// Buildings collide as their box; the rest of this is for the renderer.
+enum { BLD_HOUSE, BLD_SHOP, BLD_APARTMENT, BLD_TOWER, BLD_WAREHOUSE };
+typedef struct {
+    V3 mn, mx;                  // walls (mn.y is below ground on slopes)
+    float ground;               // street level at the building
+    float roof;                 // gable height above the walls (houses, warehouses)
+    int kind, front;            // front face: 0 +x, 1 -x, 2 +z, 3 -z
+    unsigned seed;
+} Building;
+
+// Trees collide as a vertical trunk cylinder. Thin ones snap and fall when hit hard enough.
+enum { TREE_CONIFER, TREE_BROADLEAF };
+typedef struct {
+    float x, y, z;              // trunk base
+    float r, h;                 // trunk radius, overall height
+    float breakImp;             // impulse (N s) that snaps it; 0 = unbreakable
+    float imp;                  // recent impulse (decays)
+    float tilt, tiltVel;        // fall angle (rad) once broken
+    V3 fall;                    // horizontal fall direction
+    unsigned char kind, broken;
+} Tree;
+
 typedef struct {
     Car cars[MAX_CARS]; int ncars;
     Box box[MAX_BOXES]; int nbox;
+    Building bld[MAX_BLD]; int nbld;
+    Tree tree[MAX_TREES]; int ntree;
+    int treesDown;
+    // Uniform grid (CSR) of static obstacles: item < MAX_BOXES is a box, otherwise a tree.
+    int gridStart[GRID_N * GRID_N + 1];
+    int gridItem[MAX_GRID_ITEMS];
 } World;
 
 float terrain_height(float x, float z);
 V3 terrain_normal(float x, float z);
 
-void world_init(World *w);
+int road_at(float x, float z);          // 0 none, 1 highway, 2 town street
+
+void world_init(World *w);              // terrain features, town, forest
+int world_add_tree(World *w, float x, float z, float h, int kind);
+void world_build_grid(World *w);        // call after adding obstacles by hand
+int world_point_solid(const World *w, V3 p);
 void world_substep(World *w, float h);
 void car_build(Car *c, V3 pos, float yaw, V3 color);
 void car_update_frame(Car *c);

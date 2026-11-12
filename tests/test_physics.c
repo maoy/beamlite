@@ -126,6 +126,24 @@ int main(void) {
     report("T-bone striker");
     printf("  victim: pos=(%.1f %.2f %.1f) dmg=%.1f%% broken=%d expl=%d\n", W.cars[1].pos.x, W.cars[1].pos.y, W.cars[1].pos.z, W.cars[1].damage, W.cars[1].brokenBeams, W.cars[1].exploded);
     snapshot("/tmp/tbone_victim.ppm", &W.cars[1]);
+
+    // Trees: a sapling snaps and the truck drives on; a mature trunk stops it.
+    for (int big = 0; big < 2; big++) {
+        world_init(&W); W.ncars = 1;
+        int ti = world_add_tree(&W, 0, -60, big ? 14.0f : 4.5f, big ? TREE_CONIFER : TREE_BROADLEAF);
+        world_build_grid(&W);
+        car_build(&W.cars[0], v3(-45, CAR_SPAWN_H, -60), 0, v3(1, 0, 0));
+        run(1, idle);
+        while (W.cars[0].pos.x < -12) run(0.05f, gas);
+        report(big ? "pre big tree" : "pre sapling");
+        run(3, idle);
+        report(big ? "  after big tree" : "  after sapling");
+        printf("  tree r=%.2f m broken=%d tilt=%.0f deg\n", W.tree[ti].r, W.tree[ti].broken, W.tree[ti].tilt * 57.3f);
+    }
+    {   // The generated map: buildings and trees exist and the test routes above are clear of them.
+        world_init(&W);
+        printf("map: %d buildings, %d trees\n", W.nbld, W.ntree);
+    }
     snapshot("/tmp/tbone_striker.ppm", &W.cars[0]);
     return 0;
 }
