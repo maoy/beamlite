@@ -61,11 +61,15 @@ static Color terrain_color(float x, float z, float y, V3 n) {
     float r, g, b, cover = 1.0f;
     float noise = 0.5f + 0.25f * sinf(x * 0.37f + 1.7f) * sinf(z * 0.41f) + 0.25f * sinf(x * 0.13f - z * 0.17f);
     if (x > 40 && x < 58 && fabsf(z) < 6.5f) { r = 0.72f; g = 0.66f; b = 0.55f; cover = 0.7f; }  // ramp
-    else if (fabsf(x) < 8 && z > 40 && z < 140) { r = 0.55f; g = 0.42f; b = 0.28f; cover = 0.8f; } // dirt
+    else if (dirt_at(x, z)) { r = 0.55f; g = 0.42f; b = 0.28f; cover = 0.8f; }                  // dirt
+    else if (road_at(x, z) == 3) { r = 0.50f + 0.03f * noise; g = 0.47f; b = 0.44f; cover = 0.7f; }   // plaza paving
     else if (road_at(x, z) == 1) { r = g = b = 0.30f + 0.04f * noise; cover = 0.18f + 0.22f * noise; }   // highway (ploughed)
     else if (road_at(x, z) == 2) { r = g = b = 0.27f + 0.03f * noise; cover = 0.25f + 0.25f * noise; }   // town street
     else if (road_at(x + 2.2f, z) == 2 || road_at(x - 2.2f, z) == 2 || road_at(x, z + 2.2f) == 2 || road_at(x, z - 2.2f) == 2) {
         r = 0.50f; g = 0.49f; b = 0.47f; cover = 0.85f;                                          // pavement
+    }
+    else if (map_has_broadway() && fabsf(x) < CITY_X + 4 && z > CITY_Z0 + 1 && z < CITY_Z1 + 4) {
+        r = 0.46f + 0.03f * noise; g = 0.45f + 0.03f * noise; b = 0.43f; cover = 0.85f;           // Midtown: paved kerb to kerb
     }
     else {                                                                                       // grass / hills
         r = 0.26f + 0.10f * noise; g = 0.47f + 0.12f * noise; b = 0.20f;
@@ -296,6 +300,178 @@ static void place_street_lamps(MeshB *m, const World *w) {
         if (lamp_spot_ok(w, x, -13.6f)) street_lamp(m, x, -13.6f, 0, 1);
 }
 
+// ------------------------------------------------------------- New York ----
+
+// Lamps along every avenue and cross-street kerb.
+static void place_lamps_newyork(MeshB *m, const World *w) {
+    const float av[3][2] = {{-8, 8}, {48, 60}, {-60, -48}};
+    const float st[4][2] = {{44, 50}, {72, 78}, {100, 106}, {124, CITY_Z1}};
+    for (int i = 0; i < 3; i++)
+        for (float z = 16; z < CITY_Z1 - 4; z += 22) {
+            if (lamp_spot_ok(w, av[i][0] - 0.7f, z)) street_lamp(m, av[i][0] - 0.7f, z, 1, 0);
+            if (lamp_spot_ok(w, av[i][1] + 0.7f, z + 11)) street_lamp(m, av[i][1] + 0.7f, z + 11, -1, 0);
+        }
+    for (int j = 0; j < 4; j++)
+        for (float x = -CITY_X + 4; x < CITY_X - 4; x += 24) {
+            if (lamp_spot_ok(w, x, st[j][0] - 0.7f)) street_lamp(m, x, st[j][0] - 0.7f, 0, 1);
+            if (j < 3 && lamp_spot_ok(w, x + 12, st[j][1] + 0.7f)) street_lamp(m, x + 12, st[j][1] + 0.7f, 0, -1);
+        }
+}
+
+// The red grandstand: eight glowing steps rising to the north.
+static void build_steps(MeshB *m, const Building *B) {
+    Color red = {190, 26, 30, 255};
+    float g = B->ground, len = B->mx.z - B->mn.z;
+    for (int i = 0; i < 8; i++) {
+        float z0 = B->mn.z + len * i / 8.0f, y1 = g + 0.42f * (i + 1);
+        box_shell(m, v3(B->mn.x, B->mn.y, z0), v3(B->mx.x, y1, B->mx.z), red, (Color){150, 20, 24, 255});
+        V3 r0 = v3(B->mn.x + 0.1f, y1 - 0.38f, z0 - 0.02f), r1 = v3(B->mx.x - 0.1f, y1 - 0.38f, z0 - 0.02f);
+        V3 r2 = v3(B->mx.x - 0.1f, y1 - 0.04f, z0 - 0.02f), r3 = v3(B->mn.x + 0.1f, y1 - 0.04f, z0 - 0.02f);
+        mbFlat = 1; mb_quad(&GLOW, r0, r1, r2, r3, (Color){255, 50, 50, 255}, v3((B->mn.x + B->mx.x) * 0.5f, y1, z0 + 1)); mbFlat = 0;
+    }
+    ground_pool(v3((B->mn.x + B->mx.x) * 0.5f, 0, B->mn.z - 3.0f), 7.0f, (Color){120, 18, 20, 255});
+}
+
+// The screen-clad wedge: a dark tower (the screens are a separate, animated mesh) with a mast on top.
+static void build_wedge(MeshB *m, const Building *B) {
+    box_shell(m, B->mn, B->mx, (Color){42, 44, 50, 255}, (Color){36, 38, 42, 255});
+    V3 c = v3((B->mn.x + B->mx.x) * 0.5f, B->mx.y, (B->mn.z + B->mx.z) * 0.5f);
+    box_shell(m, v3(c.x - 0.25f, c.y, c.z - 0.25f), v3(c.x + 0.25f, c.y + 9.0f, c.z + 0.25f), (Color){120, 122, 128, 255}, (Color){120, 122, 128, 255});
+    box_shell(m, v3(c.x - 1.1f, c.y + 9.0f, c.z - 1.1f), v3(c.x + 1.1f, c.y + 11.2f, c.z + 1.1f), (Color){200, 205, 215, 255}, (Color){220, 225, 235, 255});
+    mbFlat = 1;
+    mb_quad(&GLOW, v3(c.x - 1.15f, c.y + 9.3f, c.z - 1.15f), v3(c.x + 1.15f, c.y + 9.3f, c.z - 1.15f),
+            v3(c.x + 1.15f, c.y + 10.9f, c.z - 1.15f), v3(c.x - 1.15f, c.y + 10.9f, c.z - 1.15f), (Color){230, 240, 255, 255}, c);
+    mbFlat = 0;
+}
+
+// Road paint: zebra crossings at every avenue/street junction and dashed lane lines.
+static Model markings; static int hasMarkings;
+static void paint_rect(MeshB *m, float x0, float x1, float z0, float z1) {
+    V3 a = v3(x0, 0, z0), b = v3(x1, 0, z0), c = v3(x1, 0, z1), d = v3(x0, 0, z1);
+    a.y = terrain_height(a.x, a.z) + 0.03f; b.y = terrain_height(b.x, b.z) + 0.03f;
+    c.y = terrain_height(c.x, c.z) + 0.03f; d.y = terrain_height(d.x, d.z) + 0.03f;
+    mb_quad(m, a, b, c, d, (Color){222, 222, 214, 255}, v3((x0 + x1) * 0.5f, -10, (z0 + z1) * 0.5f));
+}
+static void build_markings(const World *w) {
+    if (hasMarkings) { UnloadModel(markings); hasMarkings = 0; }
+    if (w->map != MAP_NEWYORK) return;
+    MeshB m = {0};
+    const float av[3][2] = {{-8, 8}, {48, 60}, {-60, -48}};
+    const float st[4][2] = {{44, 50}, {72, 78}, {100, 106}, {124, CITY_Z1}};
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++) {
+            for (int sd = 0; sd < 2; sd++) {
+                // Crossing the street, either side of the avenue: stripes run along x.
+                float bx0 = sd ? av[i][1] + 0.6f : av[i][0] - 3.6f;
+                for (float z = st[j][0] + 0.4f; z + 0.45f < st[j][1] - 0.3f; z += 0.9f) paint_rect(&m, bx0, bx0 + 3.0f, z, z + 0.45f);
+                // Crossing the avenue, either side of the street: stripes run along z.
+                float bz0 = sd ? st[j][1] + 0.6f : st[j][0] - 3.6f;
+                if (bz0 < CITY_Z0 + 1 || bz0 + 3 > CITY_Z1) continue;
+                for (float x = av[i][0] + 0.4f; x + 0.45f < av[i][1] - 0.3f; x += 0.9f) paint_rect(&m, x, x + 0.45f, bz0, bz0 + 3.0f);
+            }
+        }
+    for (int i = 0; i < 3; i++) {                       // lane lines along the avenues
+        float wdt = av[i][1] - av[i][0];
+        int lanes = (int)(wdt / 3.8f);
+        for (int l = 1; l < lanes; l++) {
+            float x = av[i][0] + wdt * l / lanes;
+            for (float z = CITY_Z0 + 2; z < CITY_Z1 - 3; z += 9) {
+                int junction = 0;
+                for (int j = 0; j < 4; j++) if (z + 3 > st[j][0] - 4 && z < st[j][1] + 4) junction = 1;
+                if (!junction && road_at(x, z) != 3) paint_rect(&m, x - 0.08f, x + 0.08f, z, z + 3.0f);
+            }
+        }
+    }
+    for (int j = 0; j < 4; j++)                          // centre lines along the streets
+        for (float x = -CITY_X + 2; x < CITY_X - 3; x += 9) {
+            float zc = (st[j][0] + st[j][1]) * 0.5f;
+            int junction = 0;
+            for (int i = 0; i < 3; i++) if (x + 3 > av[i][0] - 4 && x < av[i][1] + 4) junction = 1;
+            if (!junction && road_at(x, zc) == 2 && road_at(x + 3, zc) == 2) paint_rect(&m, x, x + 3.0f, zc - 0.08f, zc + 0.08f);
+        }
+    markings = mb_model(&m);
+    hasMarkings = 1;
+}
+
+// Animated LED screens on the facades around the bowtie (and all over the wedge tower).
+static Model screens; static int hasScreens;
+typedef struct { float *v, *t; unsigned char *c; int n, cap; } ScreenMesh;
+static void sm_push(ScreenMesh *s, V3 p, float u, float v, const unsigned char c[4]) {
+    if (s->n == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 1024;
+        s->v = MemRealloc(s->v, s->cap * 3 * sizeof(float));
+        s->t = MemRealloc(s->t, s->cap * 2 * sizeof(float));
+        s->c = MemRealloc(s->c, s->cap * 4);
+    }
+    s->v[s->n * 3] = p.x; s->v[s->n * 3 + 1] = p.y; s->v[s->n * 3 + 2] = p.z;
+    s->t[s->n * 2] = u; s->t[s->n * 2 + 1] = v;
+    memcpy(s->c + s->n * 4, c, 4);
+    s->n++;
+}
+// A screen centred at ctr on a wall with outward normal n.
+static void add_screen(ScreenMesh *s, V3 ctr, V3 n, float W, float H, int seed, int style) {
+    V3 up = v3(0, 1, 0), right = vnorm(vcross(up, n));    // the viewer's right, so content reads left to right
+    unsigned char c[4] = {(unsigned char)seed, (unsigned char)style, (unsigned char)fminf(255, W / 64 * 255), (unsigned char)fminf(255, H / 64 * 255)};
+    V3 o = vsub(vsub(ctr, vscale(right, W * 0.5f)), vscale(up, H * 0.5f));
+    V3 p1 = vadd(o, vscale(right, W)), p2 = vadd(p1, vscale(up, H)), p3 = vadd(o, vscale(up, H));
+    sm_push(s, o, 0, 0, c); sm_push(s, p1, W, 0, c); sm_push(s, p2, W, H, c);
+    sm_push(s, o, 0, 0, c); sm_push(s, p2, W, H, c); sm_push(s, p3, 0, H, c);
+}
+static void build_screens(const World *w) {
+    if (hasScreens) { UnloadModel(screens); hasScreens = 0; }
+    if (w->map != MAP_NEWYORK) return;
+    ScreenMesh sm = {0};
+    MeshB pools = {0};
+    for (int bi = 0; bi < w->nbld; bi++) {
+        const Building *B = &w->bld[bi];
+        if (B->kind == BLD_WAREHOUSE || B->kind == BLD_STEPS || B->kind == BLD_HOUSE) continue;
+        int wedge = B->kind == BLD_WEDGE;
+        float Hb = B->mx.y - B->ground;
+        for (int s = 0; s < 4; s++) {
+            V3 o, a, n; float len;
+            facade(B, s, &o, &a, &n, &len);
+            V3 fc = vadd(o, vscale(a, len * 0.5f));
+            V3 toC = v3(TS_X - fc.x, 0, TS_Z - fc.z);
+            float d = vlen(toC), facing = d > 1e-3f ? vdot(n, vscale(toC, 1.0f / d)) : 1;
+            if (!wedge && (d > 105 || (facing < 0.2f && d > 30))) continue;
+            bseed = B->seed * 7u + (unsigned)s * 131u;
+            int count = wedge ? 7 : (d < 50 ? 3 : d < 80 ? 2 : 1);
+            float y = wedge ? 4.0f : 3.5f + brnd() * 3.0f, top = wedge ? 78.0f : fminf(Hb - 2.0f, 50.0f);
+            for (int k = 0; k < count && y < top; k++) {
+                float W = wedge ? len - 0.6f : fminf(len * (0.45f + 0.5f * brnd()), 28.0f);
+                float H = wedge ? 7.0f + 4.0f * brnd() : 4.5f + 8.5f * brnd();
+                if (W < 3.0f || y + H > top) break;
+                float uc = len * 0.5f + (wedge ? 0.0f : (brnd() * 2 - 1) * (len - W) * 0.5f);
+                V3 ctr = vadd(vadd(o, vscale(a, uc)), vadd(vscale(n, 0.18f), v3(0, B->ground + y + H * 0.5f, 0)));
+                int seed = (int)(brnd() * 255), style = (int)(brnd() * 4) & 3;
+                add_screen(&sm, ctr, n, W, H, seed, style);
+                if (y < 16) {                              // the screen's glow spills onto the street
+                    float hue = seed / 255.0f;
+                    Color glow = {(unsigned char)(255 * (0.55f + 0.45f * cosf(6.2831f * hue))), (unsigned char)(255 * (0.55f + 0.45f * cosf(6.2831f * (hue - 0.33f)))),
+                                  (unsigned char)(255 * (0.55f + 0.45f * cosf(6.2831f * (hue - 0.67f)))), 255};
+                    V3 g = vadd(vadd(o, vscale(a, uc)), vscale(n, 5.0f));
+                    MeshB keep = POOL; POOL = pools;
+                    ground_pool(g, fmaxf(4.0f, W * 0.45f), scale_col(glow, 0.22f));
+                    pools = POOL; POOL = keep;
+                }
+                y += H + 1.0f + 3.0f * brnd();
+            }
+        }
+    }
+    if (!sm.n) return;
+    Mesh mesh = {0};
+    mesh.vertexCount = sm.n; mesh.triangleCount = sm.n / 3;
+    mesh.vertices = sm.v; mesh.texcoords = sm.t; mesh.colors = sm.c;
+    UploadMesh(&mesh, false);
+    screens = LoadModelFromMesh(mesh);
+    screens.materials[0].shader = post_billboard_shader();
+    hasScreens = 1;
+    // Fold the street glow into the city's light pools.
+    for (int i = 0; i < pools.n; i++) mb_push(&POOL, v3(pools.v[i * 3], pools.v[i * 3 + 1], pools.v[i * 3 + 2]),
+                                              (Color){pools.c[i * 4], pools.c[i * 4 + 1], pools.c[i * 4 + 2], 255});
+    if (pools.v) { MemFree(pools.v); MemFree(pools.c); }
+}
+
 // A window: glass, plus a warm glowing pane if someone is home.
 static float glowK = 1.0f;                  // brightness of lit panes (shopfronts are big, so dimmer)
 static void window(MeshB *m, const Building *B, int s, float u, float y, float w, float h, float litP, Color glass) {
@@ -304,6 +480,8 @@ static void window(MeshB *m, const Building *B, int s, float u, float y, float w
 }
 
 static void build_building(MeshB *m, const Building *B) {
+    if (B->kind == BLD_STEPS) { build_steps(m, B); return; }
+    if (B->kind == BLD_WEDGE) { build_wedge(m, B); return; }
     bseed = B->seed;
     int city = B->kind == BLD_APARTMENT || B->kind == BLD_TOWER;
     Color wall = B->kind == BLD_HOUSE ? WALLS_HOUSE[(int)(brnd() * 6)] : WALLS_CITY[(int)(brnd() * 6)];
@@ -411,7 +589,8 @@ static void build_building(MeshB *m, const Building *B) {
 static Model build_city(const World *w, Model *glow, Model *pool) {
     MeshB m = {0};
     for (int i = 0; i < w->nbld; i++) build_building(&m, &w->bld[i]);
-    place_street_lamps(&m, w);
+    if (w->map == MAP_NEWYORK) place_lamps_newyork(&m, w); else place_street_lamps(&m, w);
+    build_screens(w);                                   // also adds the screens' street glow to POOL
     *glow = mb_model(&GLOW);
     *pool = mb_model(&POOL);
     // Crash wall, pillars and barriers are boxes too (not buildings): plain concrete.
@@ -1168,6 +1347,7 @@ static void build_world_meshes(const World *w) {
     }
     for (int z = 0; z < CH_N; z++) for (int x = 0; x < CH_N; x++) chunks[z * CH_N + x] = build_chunk(x, z);
     city = build_city(w, &cityGlow, &cityPool);
+    build_markings(w);
     cityGlow.materials[0].shader = post_emissive_shader();
     cityPool.materials[0].shader = post_emissive_shader();
     build_trees();
@@ -1202,8 +1382,12 @@ static void hud_panel(float x, float y, float w, float h) {
     DrawRectangle((int)x, (int)y, (int)w, (int)h, HUD_BG);
     DrawRectangleLines((int)x, (int)y, (int)w, (int)h, HUD_LINE);
 }
-static const char *zone_name(V3 p) {
+static const char *zone_name(V3 p, int map) {
     if (p.x > 28 && p.x < 80 && p.z < -12 && p.z > -42) return "WAREHOUSE DISTRICT";
+    if (map == MAP_NEWYORK && p.z > CITY_Z0 && p.z < CITY_Z1 + 6 && fabsf(p.x) < CITY_X + 6) {
+        float dx = p.x - TS_X, dz = p.z - TS_Z;
+        return (dx * dx + dz * dz < 40 * 40 || road_at(p.x, p.z) == 3) ? "TIMES SQUARE" : "MIDTOWN";
+    }
     if (p.z > 12 && p.z < 140 && fabsf(p.x) < 116) return fabsf(p.x) < 9 ? "CROSS ROAD" : "TOWN";
     if (p.x * p.x + p.z * p.z > 100 * 100) return "HILLS";
     return "PROVING GROUND";
@@ -1211,11 +1395,11 @@ static const char *zone_name(V3 p) {
 
 static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int slowmo, int paused, int help) {
     float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
-    const char *zn = zone_name(pc->pos);
+    const char *zn = zone_name(pc->pos, w->map);
     hud_panel(16, 16, 74 + txtw(zn, 20), 40);
     slash(26, 26, 5, 20, HUD_ORANGE); slash(35, 26, 5, 20, HUD_ORANGE);
     txt(zn, 58, 26, 20, RAYWHITE);
-    const char *tr = TextFormat("%s [L]   %s [O]     %d FPS", ENV->name, WEATHER_NAME[weather], GetFPS());
+    const char *tr = TextFormat("%s [M]   %s [L]   %s [O]     %d FPS", map_name(w->map), ENV->name, WEATHER_NAME[weather], GetFPS());
     txt(tr, sw - 22 - txtw(tr, 15), 22, 15, HUD_DIM);
 
     float px = 16, py = sh - 116, pw = 470, ph = 100;
@@ -1256,11 +1440,12 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
             "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
-            "", "Ramp ahead, crash wall behind you. Town up the", "cross road to the left, warehouses to the right,",
-            "forest on the hills. Small trees snap; big ones don't."};
+            "M  map: Default / New York",
+            "", "Ramp ahead, crash wall behind you, warehouses to the", "right, forest on the hills. Default: towns to the left.",
+            "New York: Times Square up 7th Avenue, straight ahead."};
         int n = sizeof lines / sizeof lines[0];
         hud_panel(16, 66, 420, 20 + n * 21);
-        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 8 ? RAYWHITE : HUD_DIM);
+        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 9 ? RAYWHITE : HUD_DIM);
     }
 }
 
@@ -1335,9 +1520,41 @@ static const V3 PALETTE[] = {{0.71f, 0.72f, 0.74f},   // bare stainless for the 
 static int playerType = VEH_PICKUP;
 static V3 player_paint(void) { return vehicle_def(playerType)->paint; }
 
+// Start: facing the ramp on Default; facing up 7th Avenue toward Times Square on New York.
 static void spawn_player(World *w) {
     skids_forget(0);
-    car_build_vehicle(&w->cars[0], playerType, v3(0, terrain_height(0, 0) + vehicle_def(playerType)->spawnH, 0), 0, player_paint());
+    float x = w->map == MAP_NEWYORK ? 3.0f : 0.0f, z = w->map == MAP_NEWYORK ? 3.0f : 0.0f;
+    float yaw = w->map == MAP_NEWYORK ? -PI / 2 : 0.0f;
+    car_build_vehicle(&w->cars[0], playerType, v3(x, terrain_height(x, z) + vehicle_def(playerType)->spawnH, z), yaw, player_paint());
+}
+
+static const V3 TAXI = {0.96f, 0.74f, 0.08f};
+
+// Build a map: world, meshes, road data for the renderer, player and parked vehicles.
+static void load_map(World *w, int map, int *nextSlot) {
+    world_init(w, map);
+    build_world_meshes(w);
+    float rr[16][4]; int nh;
+    int n = road_rects(rr, 16, &nh);
+    post_set_roads((const float (*)[4])rr, n, nh);
+    if (map_has_broadway()) post_set_broadway(TS_X - BW_DX * TS_Z, BW_DX, BW_HALF * sqrtf(1 + BW_DX * BW_DX), 0, CITY_Z0, CITY_Z1);
+    else post_set_broadway(0, 0, 0, 0, 1, 0);
+    for (int i = 0; i < MAX_CARS; i++) skids_forget(i);
+    skidCount = skidHead = 0; shardCount = 0; dropsInit = 0;
+    for (int i = 0; i < MAX_SPRAY; i++) spray[i].life = 0;
+    spawn_player(w);
+    if (map == MAP_NEWYORK) {                           // yellow cabs parked along 7th Avenue, and a pickup
+        w->ncars = 4;
+        car_build_vehicle(&w->cars[1], VEH_HATCH, v3(-4.5f, vehicle_def(VEH_HATCH)->spawnH, 24), -PI / 2, TAXI);
+        car_build_vehicle(&w->cars[2], VEH_HATCH, v3(4.5f, vehicle_def(VEH_HATCH)->spawnH, 58), PI / 2, TAXI);
+        car_build_vehicle(&w->cars[3], VEH_PICKUP, v3(-4.5f, CAR_SPAWN_H, 114), -PI / 2, PALETTE[1]);
+    } else {
+        w->ncars = 3;
+        car_build_vehicle(&w->cars[1], VEH_HATCH, v3(-2.2f, vehicle_def(VEH_HATCH)->spawnH, 26), PI / 2, PALETTE[1]);
+        car_build_vehicle(&w->cars[2], VEH_PICKUP, v3(2.2f, CAR_SPAWN_H, 30), -PI / 2, PALETTE[2]);
+    }
+    for (int i = 1; i < w->ncars; i++) w->cars[i].ctl = (Controls){0, 0.6f, 0, 1};
+    *nextSlot = w->ncars;
 }
 
 static float wrap_pi(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a += 2 * PI; return a; }
@@ -1354,19 +1571,8 @@ int main(void) {
     init_spray();
 
     static World world;
-    world_init(&world);
-    build_world_meshes(&world);
-    {
-        float rr[16][4]; int nh;
-        int n = road_rects(rr, 16, &nh);
-        post_set_roads((const float (*)[4])rr, n, nh);
-    }
-    world.ncars = 3;
-    spawn_player(&world);
-    car_build_vehicle(&world.cars[1], VEH_HATCH, v3(-2.2f, vehicle_def(VEH_HATCH)->spawnH, 26), PI / 2, PALETTE[1]);
-    car_build_vehicle(&world.cars[2], VEH_PICKUP, v3(2.2f, CAR_SPAWN_H, 30), -PI / 2, PALETTE[2]);
-    for (int i = 1; i < world.ncars; i++) world.cars[i].ctl = (Controls){0, 0.6f, 0, 1};
     int nextSlot = 3;
+    load_map(&world, MAP_DEFAULT, &nextSlot);
 
     Camera3D cam = {0};
     cam.up = (Vector3){0, 1, 0};
@@ -1405,6 +1611,7 @@ int main(void) {
             }
         }
         if (IsKeyPressed(KEY_X)) { world.ncars = 1; nextSlot = 1; }
+        if (IsKeyPressed(KEY_M)) load_map(&world, (world.map + 1) % MAP_COUNT, &nextSlot);
         if (IsKeyPressed(KEY_B)) beamView = !beamView;
         if (IsKeyPressed(KEY_C)) camMode = !camMode;
         if (IsKeyPressed(KEY_P)) paused = !paused;
@@ -1517,9 +1724,11 @@ int main(void) {
         BeginMode3D(cam);
         post_capture_camera(cam);
         for (int i = 0; i < CH_N * CH_N; i++) DrawModel(chunks[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
+        if (hasMarkings) DrawModel(markings, (Vector3){0, 0, 0}, 1.0f, WHITE);
         rlDisableBackfaceCulling();
         post_begin_objects();
         DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        if (hasScreens) { post_set_billboards((float)GetTime(), 1.4f + 1.6f * ENV->lights); DrawModel(screens, (Vector3){0, 0, 0}, 1.0f, WHITE); }
         draw_trees(&world, cam.position);
         post_end_objects();
         rlDrawRenderBatchActive();

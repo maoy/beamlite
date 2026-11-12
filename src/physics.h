@@ -148,7 +148,7 @@ typedef struct {
 typedef struct { V3 mn, mx; } Box;
 
 // Buildings collide as their box; the rest of this is for the renderer.
-enum { BLD_HOUSE, BLD_SHOP, BLD_APARTMENT, BLD_TOWER, BLD_WAREHOUSE };
+enum { BLD_HOUSE, BLD_SHOP, BLD_APARTMENT, BLD_TOWER, BLD_WAREHOUSE, BLD_WEDGE, BLD_STEPS };   // wedge: the screen-clad tower in the bowtie; steps: the red grandstand
 typedef struct {
     V3 mn, mx;                  // walls (mn.y is below ground on slopes)
     float ground;               // street level at the building
@@ -169,7 +169,12 @@ typedef struct {
     unsigned char kind, broken;
 } Tree;
 
+// ---- maps
+enum { MAP_DEFAULT, MAP_NEWYORK, MAP_COUNT };
+const char *map_name(int map);
+
 typedef struct {
+    int map;                    // MAP_*
     Car cars[MAX_CARS]; int ncars;
     Box box[MAX_BOXES]; int nbox;
     Building bld[MAX_BLD]; int nbld;
@@ -183,10 +188,26 @@ typedef struct {
 float terrain_height(float x, float z);
 V3 terrain_normal(float x, float z);
 
-int road_at(float x, float z);          // 0 none, 1 highway, 2 town street
+// New York map: a Midtown street grid north of the highway with Broadway cutting across 7th Avenue on a
+// diagonal; the "bowtie" where they cross is centred on (TS_X, TS_Z). Broadway is pedestrian plaza
+// near the crossing.
+#define TS_X 0.0f
+#define TS_Z 70.0f
+#define BW_DX 0.9f                      // Broadway: x = TS_X + BW_DX * (z - TS_Z)
+#define BW_HALF 7.0f                    // Broadway half-width (perpendicular)
+#define CITY_X 104.0f                   // Midtown spans |x| < CITY_X ...
+#define CITY_Z0 7.0f                    // ... and CITY_Z0 < z < CITY_Z1
+#define CITY_Z1 132.0f
+#define PLAZA_HALF 30.0f                // Broadway is plaza within this distance (in z) of the bowtie
+float broadway_x(float z);              // centreline x at z
+float broadway_dist(float x, float z);  // perpendicular distance from the centreline
+
+int road_at(float x, float z);          // 0 none, 1 highway, 2 street/avenue, 3 pedestrian plaza (current map)
+int dirt_at(float x, float z);          // on the dirt washboard section (current map)
+int map_has_broadway(void);
 int road_rects(float (*out)[4], int max, int *nHighway);   // (x0, x1, z0, z1); highways first
 
-void world_init(World *w);              // terrain features, town, forest
+void world_init(World *w, int map);     // terrain features, the map's streets and buildings, forest
 int world_add_tree(World *w, float x, float z, float h, int kind);
 void world_build_grid(World *w);        // call after adding obstacles by hand
 int world_point_solid(const World *w, V3 p);

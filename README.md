@@ -30,6 +30,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | X | clear spawned trucks |
 | G | drop the tailgate |
 | V | choose vehicle (←/→, Enter) |
+| M | map: Default / New York |
 | L | lighting: dusk / day |
 | O | weather: dry / wet / rain / snow |
 | Q | recover (fresh car, upright, in place) |
@@ -37,12 +38,21 @@ xcode-select --install        # once, if you don't have the command line tools
 | T / P | slow-mo / pause |
 | K | clear skid marks |
 
-The map has a launch ramp straight ahead, a crash-test wall behind you, concrete pillars,
-parked trucks and a dirt washboard section on the cross road, and rolling hills past ~100 m.
-Up the cross road to the left (+z) are two small towns with avenues, side streets and pavements:
-houses, shops, apartment blocks, a couple of towers and warehouses, with saplings along the kerbs.
-There's a warehouse district off a service road to the right, and forest covers the hills.
-Saplings and young trees snap and fall when you hit them; mature trunks stop you dead.
+Two maps, switched with **M**. Both share the proving ground: a launch ramp straight ahead, a
+crash-test wall behind you, concrete pillars, a warehouse district off a service road to the right,
+and forest on the hills past ~100 m. Saplings and young trees snap when you hit them; mature
+trunks stop you dead.
+
+- **Default**: two small towns up the cross road to the left (+z), with avenues, side streets and
+  pavements: houses, shops, apartment blocks, a couple of towers and warehouses, with saplings
+  along the kerbs, and a dirt washboard section on the cross road.
+- **New York**: Midtown, with the Times Square "bowtie" where Broadway crosses 7th Avenue on a
+  diagonal (you start facing up 7th Avenue toward it). Towers of 55–140 m fill the blocks wall to
+  wall. A screen-clad wedge tower stands in the south gore and red grandstand steps on the
+  pedestrian plaza. Animated LED billboards cover the facades around the square: original abstract
+  content (tickers, video walls, colour-cycling spots), no real brands. They spill coloured light
+  onto the street and smear across the wet road. There are zebra crossings, lane lines, street
+  lamps and yellow cabs parked on 7th Avenue. The washboard moves south of the highway.
 
 ## How it works
 
@@ -83,6 +93,9 @@ Saplings and young trees snap and fall when you hit them; mature trunks stop you
   (up to ~10°, counter-steering at low speed) and a handbrake for drifting.
 - **Collisions**: nodes collide with the terrain (heightfield) and boxes with friction.
   Truck-to-truck contact uses node spheres, checking only nodes inside the overlapping bounding boxes.
+- **Maps**: `world_init(world, map)` builds the shared proving ground plus that map's own streets,
+  buildings and landmarks. Road tables, the dirt washboard's location, Broadway and the city's
+  extent all belong to the map, and the terrain asks the current map for them.
 - **World**: the towns are generated from a fixed seed: lots are laid out along each block's
   street edges, then yards and the forest are filled in. Areas the headless test drives
   through are kept clear. Buildings collide as boxes; trees collide as trunk cylinders. A tree

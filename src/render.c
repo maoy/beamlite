@@ -54,6 +54,66 @@ static const char *EMISSIVE_FS = GLSL
     "uniform float intensity;\n"
     "void main() { vec4 c = fragColor * colDiffuse; finalColor = vec4(c.rgb * intensity, c.a); }\n";
 
+// Animated LED billboards. Original abstract content only: no real brands. Per-vertex data:
+// texcoord = position on the screen in metres (x across, y up); colour r = seed, g = style,
+// b = width / 64, a = height / 64. Each screen cycles through "spots" every 6-9 seconds.
+static const char *BILLBOARD_FS = GLSL
+    "uniform float time, intensity;\n"
+    "float h1(float n) { return fract(sin(n * 12.9898) * 43758.5453); }\n"
+    "float h2(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }\n"
+    "vec3 pal(float t) { return 0.55 + 0.45 * cos(6.2831 * (t + vec3(0.0, 0.33, 0.67))); }\n"
+    // A blocky 3x5 glyph, so rows of them read as text from a distance.
+    "float glyph(vec2 c, float id) {\n"
+    "  if (c.x < 0.12 || c.x > 0.88 || c.y < 0.1 || c.y > 0.9) return 0.0;\n"
+    "  vec2 g = floor(vec2((c.x - 0.12) / 0.76 * 3.0, (c.y - 0.1) / 0.8 * 5.0));\n"
+    "  return step(0.45, h2(g + id * 7.13));\n"
+    "}\n"
+    "float textRow(vec2 m, float h, float speed, float seed, float t) {\n"   // a row of glyphs of height h
+    "  vec2 q = vec2(m.x + t * speed, m.y) / vec2(h * 0.62, h);\n"
+    "  float id = floor(q.x) + seed * 31.0;\n"
+    "  if (h2(vec2(id, seed)) < 0.18) return 0.0;\n"            // word gaps
+    "  return glyph(fract(q), id);\n"
+    "}\n"
+    "void main() {\n"
+    "  vec2 m = fragTexCoord;\n"
+    "  float seed = floor(fragColor.r * 255.0 + 0.5), style = floor(fragColor.g * 255.0 + 0.5);\n"
+    "  float W = fragColor.b * 64.0, H = fragColor.a * 64.0;\n"
+    "  vec2 uv = m / vec2(W, H);\n"
+    "  float t = time + seed * 3.7;\n"
+    "  float period = 6.0 + 3.0 * h1(seed);\n"
+    "  float spot = floor(t / period), ph = fract(t / period);\n"
+    "  float k = h1(seed * 1.7 + spot * 3.1);\n"
+    "  vec3 a = pal(k), b = pal(k + 0.3 + 0.2 * h1(spot)), col;\n"
+    "  if (style < 0.5) {\n"                                    // brand spot: gradient, big shape, slogan
+    "    col = mix(a * 0.35, b, uv.y);\n"
+    "    vec2 c = vec2(0.30 + 0.40 * h1(spot + seed), 0.62);\n"
+    "    vec2 d = (uv - c) * vec2(W / H, 1.0);\n"
+    "    float shape = h1(spot * 5.0 + seed) < 0.5 ? length(d) - 0.24 : max(abs(d.x), abs(d.y)) - 0.2;\n"
+    "    col = mix(col, vec3(1.0), smoothstep(0.02, -0.02, shape) * (0.75 + 0.25 * sin(t * 3.0)));\n"
+    "    if (uv.y < 0.26) col = mix(vec3(0.03), b * 1.2, textRow(m, H * 0.16, 0.0, seed + spot, 0.0));\n"
+    "  } else if (style < 1.5) {\n"                             // ticker: scrolling rows of text
+    "    float row = floor(uv.y * 3.0);\n"
+    "    vec3 inkc = row < 1.0 ? vec3(1.0, 0.75, 0.2) : row < 2.0 ? vec3(0.4, 1.0, 0.6) : vec3(0.9);\n"
+    "    float on = textRow(vec2(m.x, mod(m.y, H / 3.0)), H / 3.0 * 0.7, 6.0 + row * 2.0, seed + row, t);\n"
+    "    col = mix(vec3(0.02, 0.02, 0.05), inkc, on);\n"
+    "  } else if (style < 2.5) {\n"                             // video wall: tiles of colour cycling and wiping
+    "    vec2 tile = floor(m / 1.6);\n"
+    "    float n = h2(tile + spot);\n"
+    "    col = pal(n + t * 0.05) * (0.4 + 0.6 * step(0.5, fract(uv.x * 0.5 + uv.y * 0.3 - ph * 1.5)));\n"
+    "    col = mix(col, a, 0.4);\n"
+    "  } else {\n"                                               // product spot: sweeping diagonal bands and a flash
+    "    float band = sin((uv.x * W + uv.y * H) * 0.35 - t * 2.5);\n"
+    "    col = mix(a, b, 0.5 + 0.5 * band);\n"
+    "    col *= 0.6 + 0.4 * smoothstep(0.6, 0.9, abs(band));\n"
+    "    col += vec3(1.0) * smoothstep(0.96, 1.0, fract(t / period * 2.0)) * 0.8;\n"
+    "    if (uv.y > 0.78) col = mix(col * 0.2, vec3(1.0), textRow(m - vec2(0.0, H * 0.78), H * 0.14, 0.0, seed * 2.0 + spot, 0.0));\n"
+    "  }\n"
+    "  vec2 px = fract(m * 3.0);\n"                                // LED pixel grid, and a dark bezel
+    "  col *= 0.82 + 0.18 * step(0.25, px.x) * step(0.25, px.y);\n"
+    "  float bez = step(0.15, m.x) * step(0.15, m.y) * step(m.x, W - 0.15) * step(m.y, H - 0.15);\n"
+    "  finalColor = vec4(col * intensity * bez + vec3(0.02) * (1.0 - bez), 1.0);\n"
+    "}\n";
+
 static const char *ATMOS_FS = GLSL SKY_GLSL
     "void main() {\n"
     "  vec2 uv = fragTexCoord;\n"
@@ -76,9 +136,12 @@ static const char *SSR_FS = GLSL SKY_GLSL
     "uniform float wet, rain;\n"
     "uniform vec4 roads[16];\n"
     "uniform int nRoads, nHighway;\n"
+    "uniform vec4 broadway;\n"                                   // x0 at z0, dx/dz, horizontal half-width, z0 ...
+    "uniform vec2 broadwayZ;\n"                                  // ... and its z range (empty range = none)
     "float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * 0.1 * 1500.0 / (1500.1 - z * 1499.9); }\n"
     "float surface(vec2 p) {\n"      // 1 asphalt, 0.6 pavement, 0.22 anything else
     "  float s = 0.10;\n"
+    "  if (p.y > broadwayZ.x && p.y < broadwayZ.y && abs(p.x - broadway.x - broadway.y * (p.y - broadway.w)) < broadway.z) return 0.9;\n"
     "  for (int i = 0; i < 16; i++) {\n"
     "    if (i >= nRoads) break;\n"
     "    vec4 r = roads[i];\n"
@@ -203,6 +266,8 @@ enum { U_DEPTH, U_INVVP, U_VP, U_CAM, U_SUNDIR, U_SUNCOL, U_ZEN, U_HOR, U_HORAWA
 static const char *SKY_UNIFORMS[U_COUNT] = {"depthTex", "invVP", "VP", "camPos", "sunDir", "sunCol", "zenith", "horizon", "horizonAway",
                                             "fogCol", "fogDensity", "fogFalloff", "time"};
 
+static Shader shBillboard;
+static int locBbTime, locBbInt;
 static Shader shEmissive, shAtmos, shSSR, shComposite, shBright, shBlur, shFinal;
 static int locIntensity, locAtmos[U_COUNT], locSSR[U_COUNT], locWet, locRain, locRoads, locNRoads, locNHighway, locRefl;
 static int locBrightTexel, locBrightThr, locBlurStep, locFinal[6];
@@ -211,6 +276,7 @@ static int curW, curH;
 static Matrix invVP, VP;
 static Vector3 camPos;
 static float roadRects[16 * 4];
+static float bwParams[4], bwZ[2];
 static int nRoadRects, nHighwayRects;
 
 static RenderTexture2D make_rt(int w, int h, int depth) {
@@ -265,6 +331,9 @@ static void ensure_targets(void) {
 void post_init(void) {
     rlSetClipPlanes(NEAR_PLANE, FAR_PLANE);
     shEmissive = LoadShaderFromMemory(NULL, EMISSIVE_FS);
+    shBillboard = LoadShaderFromMemory(NULL, BILLBOARD_FS);
+    locBbTime = GetShaderLocation(shBillboard, "time");
+    locBbInt = GetShaderLocation(shBillboard, "intensity");
     shAtmos = LoadShaderFromMemory(NULL, ATMOS_FS);
     shSSR = LoadShaderFromMemory(NULL, SSR_FS);
     shComposite = LoadShaderFromMemory(NULL, COMPOSITE_FS);
@@ -288,6 +357,10 @@ void post_init(void) {
     const char *fn[6] = {"bloom1", "bloom2", "bloom3", "texel", "exposure", "bloomStrength"};
     for (int i = 0; i < 6; i++) locFinal[i] = GetShaderLocation(shFinal, fn[i]);
     ensure_targets();
+}
+
+void post_set_broadway(float x0, float dxdz, float halfX, float z0, float zmin, float zmax) {
+    bwParams[0] = x0; bwParams[1] = dxdz; bwParams[2] = halfX; bwParams[3] = z0; bwZ[0] = zmin; bwZ[1] = zmax;
 }
 
 void post_set_roads(const float (*rects)[4], int n, int nHighway) {
@@ -326,6 +399,11 @@ void post_emissive_begin(float intensity) {
 void post_emissive_end(void) { EndShaderMode(); }
 Shader post_emissive_shader(void) { return shEmissive; }
 void post_set_emissive(float intensity) { SetShaderValue(shEmissive, locIntensity, &intensity, SHADER_UNIFORM_FLOAT); }
+Shader post_billboard_shader(void) { return shBillboard; }
+void post_set_billboards(float time, float intensity) {
+    SetShaderValue(shBillboard, locBbTime, &time, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shBillboard, locBbInt, &intensity, SHADER_UNIFORM_FLOAT);
+}
 
 // Draw src through shader sh into dst (render textures are stored flipped, hence -height).
 static void blit(RenderTexture2D dst, Shader sh, Texture2D src) {
@@ -391,6 +469,8 @@ void post_present(const Env *e, float time, float wet, float rain) {
         SetShaderValueV(shSSR, locRoads, roadRects, SHADER_UNIFORM_VEC4, nRoadRects);
         SetShaderValue(shSSR, locNRoads, &nRoadRects, SHADER_UNIFORM_INT);
         SetShaderValue(shSSR, locNHighway, &nHighwayRects, SHADER_UNIFORM_INT);
+        SetShaderValue(shSSR, GetShaderLocation(shSSR, "broadway"), bwParams, SHADER_UNIFORM_VEC4);
+        SetShaderValue(shSSR, GetShaderLocation(shSSR, "broadwayZ"), bwZ, SHADER_UNIFORM_VEC2);
         rlSetBlendFactors(1, 0, 0x8006);               // write rgba as-is (alpha carries wetness): ONE, ZERO, ADD
         rlSetBlendMode(BLEND_CUSTOM);
         DrawTexturePro(hdr.texture, full, (Rectangle){0, 0, (float)refl[0].texture.width, (float)refl[0].texture.height}, (Vector2){0, 0}, 0, WHITE);
@@ -438,6 +518,6 @@ void post_present(const Env *e, float time, float wet, float rain) {
 
 void post_shutdown(void) {
     free_targets();
-    UnloadShader(shEmissive); UnloadShader(shAtmos); UnloadShader(shSSR); UnloadShader(shComposite);
+    UnloadShader(shEmissive); UnloadShader(shBillboard); UnloadShader(shAtmos); UnloadShader(shSSR); UnloadShader(shComposite);
     UnloadShader(shBright); UnloadShader(shBlur); UnloadShader(shFinal);
 }

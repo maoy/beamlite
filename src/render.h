@@ -24,6 +24,9 @@ void post_begin_objects(void);                  // draw non-ground geometry betw
 void post_end_objects(void);
 void post_present(const Env *e, float time, float wet, float rain);   // draws the graded image to the screen
 void post_set_roads(const float (*rects)[4], int n, int nHighway);    // road rectangles (x0, x1, z0, z1) for wetness
+void post_set_broadway(float x0, float dxdz, float halfX, float z0, float zmin, float zmax);   // a diagonal road (zmin >= zmax: none)
+Shader post_billboard_shader(void);             // animated LED screens (see render.c for the vertex data layout)
+void post_set_billboards(float time, float intensity);
 void post_emissive_begin(float intensity);      // draw glowing things (colour * intensity, can exceed 1)
 void post_emissive_end(void);
 Shader post_emissive_shader(void);              // for models: material shader...

@@ -38,6 +38,11 @@ static float smooth01(float e0, float e1, float x) {
 
 // ---------------------------------------------------------------- terrain --
 
+static int g_map;                                 // map the world was last built with (terrain depends on it)
+static float wash_z0(void) { return g_map == MAP_NEWYORK ? -150.0f : 40.0f; }
+static float wash_z1(void) { return g_map == MAP_NEWYORK ? -90.0f : 140.0f; }
+int dirt_at(float x, float z) { return fabsf(x) < 8.0f && z > wash_z0() && z < wash_z1(); }
+
 float terrain_height(float x, float z) {
     float r = sqrtf(x * x + z * z);
     float hills = smooth01(90.0f, 170.0f, r);
@@ -50,9 +55,10 @@ float terrain_height(float x, float z) {
         float t = (x - 40.0f) / 18.0f;
         h += wmask * 3.6f * (0.45f * t + 0.55f * t * t);
     }
-    // Washboard dirt section on the cross road.
-    if (fabsf(x) < 8.0f && z > 40.0f && z < 140.0f) {
-        float m = smooth01(8.0f, 6.0f, fabsf(x)) * smooth01(40.0f, 46.0f, z) * smooth01(140.0f, 134.0f, z);
+    // Washboard dirt section on the cross road (north of the highway on Default, south on New York).
+    if (dirt_at(x, z)) {
+        float z0 = wash_z0(), z1 = wash_z1();
+        float m = smooth01(8.0f, 6.0f, fabsf(x)) * smooth01(z0, z0 + 6.0f, z) * smooth01(z1, z1 - 6.0f, z);
         h += m * 0.28f * (0.5f + 0.5f * sinf(z * 0.66f));
     }
     return h;
@@ -868,24 +874,37 @@ void world_substep(World *w, float h) {
     }
 }
 
-// ------------------------------------------------------------- the map ----
+// ------------------------------------------------------------- the maps ---
 //
-// Highway along x, a cross road (dirt washboard section) along z, and two small
-// towns either side of the cross road on the north (+z) side, each with an avenue
-// and side streets. Forest on the hills. The south side and the test corridors
-// stay open.
+// Both maps share the proving ground: highway along x, cross road along z, launch ramp, crash wall,
+// pillars, plaza barriers, a warehouse district south of the highway, and forest on the hills. The
+// headless test routes stay open on both.
+//
+//  Default:  two small towns north of the highway, either side of the cross road (dirt washboard),
+//            with an avenue and side streets.
+//  New York: Midtown. Avenues along z (7th in the middle, 6th and 8th either side), cross streets
+//            along x, and Broadway on a diagonal through the "bowtie" where it crosses 7th Avenue.
+//            Tall towers fill the blocks; the facades around the bowtie carry LED billboards (drawn
+//            by the renderer). The washboard moves south of the highway.
 
 typedef struct { float x0, x1, z0, z1; } Rect;
 
 static const Rect ROADS[] = {
     {-260, 260, -7, 7},          // highway
-    {-7, 7, -260, 260},          // cross road
+    {-7, 7, -260, 260},          // cross road (7th Avenue through Midtown)
 };
-static const Rect STREETS[] = {
+static const Rect DEF_STREETS[] = {
     {-112, 112, 44, 52},         // avenue
     {-80, 80, 94, 100},          // upper avenue
     {36, 44, 7, 136}, {76, 84, 7, 94}, {-44, -36, 7, 136}, {-84, -76, 7, 94},   // side streets
     {30, 78, -13, -7},           // service road into the warehouse district
+};
+static const Rect NY_STREETS[] = {
+    {-8, 8, CITY_Z0, CITY_Z1},                                   // 7th Avenue, full width
+    {48, 60, CITY_Z0, CITY_Z1}, {-60, -48, CITY_Z0, CITY_Z1},    // 6th and 8th Avenues
+    {-CITY_X, CITY_X, 44, 50}, {-CITY_X, CITY_X, 72, 78},        // cross streets
+    {-CITY_X, CITY_X, 100, 106}, {-CITY_X, CITY_X, 124, CITY_Z1},
+    {30, 78, -13, -7},                                           // service road into the warehouse district
 };
 // No scenery here: ramp + landing run-out, crash wall, spawn, and the headless test routes.
 static const Rect KEEP_CLEAR[] = {
@@ -893,6 +912,17 @@ static const Rect KEEP_CLEAR[] = {
     {-82, 72, -72, -38}, {-82, -14, -72, 8},
 };
 #define NELEM(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+static const char *MAP_NAMES[MAP_COUNT] = {"DEFAULT", "NEW YORK"};
+const char *map_name(int map) { return MAP_NAMES[map < 0 || map >= MAP_COUNT ? 0 : map]; }
+int map_has_broadway(void) { return g_map == MAP_NEWYORK; }
+#define STREETS (g_map == MAP_NEWYORK ? NY_STREETS : DEF_STREETS)
+#define NSTREETS (g_map == MAP_NEWYORK ? NELEM(NY_STREETS) : NELEM(DEF_STREETS))
+
+float broadway_x(float z) { return TS_X + BW_DX * (z - TS_Z); }
+float broadway_dist(float x, float z) { return fabsf(x - broadway_x(z)) / sqrtf(1.0f + BW_DX * BW_DX); }
+static int on_broadway(float x, float z, float m) { return g_map == MAP_NEWYORK && z > CITY_Z0 && z < CITY_Z1 && broadway_dist(x, z) < BW_HALF + m; }
+static int in_city(float x, float z) { return g_map == MAP_NEWYORK && fabsf(x) < CITY_X + 6 && z > CITY_Z0 - 2 && z < CITY_Z1 + 6; }
 
 static int in_rect(const Rect *r, float x, float z, float m) {
     return x > r->x0 - m && x < r->x1 + m && z > r->z0 - m && z < r->z1 + m;
@@ -903,7 +933,8 @@ static int rect_overlap(const Rect *a, const Rect *b, float m) {
 
 int road_at(float x, float z) {
     for (int i = 0; i < NELEM(ROADS); i++) if (in_rect(&ROADS[i], x, z, 0)) return 1;
-    for (int i = 0; i < NELEM(STREETS); i++) if (in_rect(&STREETS[i], x, z, 0)) return 2;
+    for (int i = 0; i < NSTREETS; i++) if (in_rect(&STREETS[i], x, z, 0)) return 2;
+    if (on_broadway(x, z, 0)) return fabsf(z - TS_Z) < PLAZA_HALF ? 3 : 2;
     return 0;
 }
 
@@ -911,7 +942,7 @@ int road_rects(float (*out)[4], int max, int *nHighway) {
     int n = 0;
     for (int i = 0; i < NELEM(ROADS) && n < max; i++, n++) { out[n][0] = ROADS[i].x0; out[n][1] = ROADS[i].x1; out[n][2] = ROADS[i].z0; out[n][3] = ROADS[i].z1; }
     *nHighway = n;
-    for (int i = 0; i < NELEM(STREETS) && n < max; i++, n++) { out[n][0] = STREETS[i].x0; out[n][1] = STREETS[i].x1; out[n][2] = STREETS[i].z0; out[n][3] = STREETS[i].z1; }
+    for (int i = 0; i < NSTREETS && n < max; i++, n++) { out[n][0] = STREETS[i].x0; out[n][1] = STREETS[i].x1; out[n][2] = STREETS[i].z0; out[n][3] = STREETS[i].z1; }
     return n;
 }
 
@@ -929,8 +960,15 @@ static int add_box(World *w, V3 mn, V3 mx) {
 static int area_free(const World *w, Rect r, float margin) {
     float rm = fminf(margin, 1.0f);             // kerb clearance is smaller than the spacing between things
     for (int i = 0; i < NELEM(ROADS); i++) if (rect_overlap(&r, &ROADS[i], rm)) return 0;
-    for (int i = 0; i < NELEM(STREETS); i++) if (rect_overlap(&r, &STREETS[i], rm)) return 0;
+    for (int i = 0; i < NSTREETS; i++) if (rect_overlap(&r, &STREETS[i], rm)) return 0;
     for (int i = 0; i < NELEM(KEEP_CLEAR); i++) if (rect_overlap(&r, &KEEP_CLEAR[i], 0)) return 0;
+    if (g_map == MAP_NEWYORK && r.z1 > CITY_Z0 && r.z0 < CITY_Z1) {   // Broadway: corners on both sides, or any sample point too close
+        float s0 = r.x0 - broadway_x(r.z0), s1 = r.x1 - broadway_x(r.z0), s2 = r.x0 - broadway_x(r.z1), s3 = r.x1 - broadway_x(r.z1);
+        if (!((s0 > 0 && s1 > 0 && s2 > 0 && s3 > 0) || (s0 < 0 && s1 < 0 && s2 < 0 && s3 < 0))) return 0;
+        for (int i = 0; i <= 4; i++)
+            for (int j = 0; j <= 4; j++)
+                if (on_broadway(lerpf(r.x0, r.x1, i * 0.25f), lerpf(r.z0, r.z1, j * 0.25f), rm)) return 0;
+    }
     if (fabsf(r.x0) > 290 || fabsf(r.x1) > 290 || fabsf(r.z0) > 290 || fabsf(r.z1) > 290) return 0;
     for (int i = 0; i < w->nbox; i++) {
         Rect b = {w->box[i].mn.x, w->box[i].mx.x, w->box[i].mn.z, w->box[i].mx.z};
@@ -984,11 +1022,19 @@ static int pick_kind(int zone, int first) {
     if (zone == 0) return first ? BLD_TOWER : (u < 0.12f ? BLD_TOWER : u < 0.6f ? BLD_APARTMENT : BLD_SHOP);
     if (zone == 1) return u < 0.3f ? BLD_APARTMENT : u < 0.65f ? BLD_SHOP : BLD_HOUSE;
     if (zone == 2) return u < 0.75f ? BLD_HOUSE : u < 0.87f ? BLD_SHOP : BLD_WAREHOUSE;
+    if (zone == 4) return u < 0.62f ? BLD_TOWER : u < 0.92f ? BLD_APARTMENT : BLD_SHOP;          // Midtown
     return u < 0.75f ? BLD_WAREHOUSE : BLD_SHOP;                                  // industrial
 }
 
 // Frontage width, depth and wall height for a kind.
-static void pick_size(int k, float *wdt, float *dep, float *ht) {
+static void pick_size(int k, int zone, float *wdt, float *dep, float *ht) {
+    if (zone == 4) {                                // Midtown: big floor plates, tall
+        switch (k) {
+            case BLD_TOWER: *wdt = frange(11, 20); *dep = frange(12, 20); *ht = frange(55, 140); return;
+            case BLD_APARTMENT: *wdt = frange(12, 20); *dep = frange(12, 18); *ht = 3.2f * (int)frange(8, 15) + 0.8f; return;
+            default: *wdt = frange(10, 16); *dep = frange(10, 14); *ht = frange(9, 16); return;
+        }
+    }
     switch (k) {
         case BLD_TOWER: *wdt = frange(13, 17); *dep = frange(13, 17); *ht = frange(30, 52); break;
         case BLD_APARTMENT: *wdt = frange(14, 22); *dep = frange(10, 13); *ht = 3.2f * (int)frange(4, 7) + 0.8f; break;
@@ -1000,7 +1046,7 @@ static void pick_size(int k, float *wdt, float *dep, float *ht) {
 
 static void fill_block(World *w, const Block *bk) {
     const Rect *R = &bk->r;
-    const float SET = 1.5f;                     // setback from the kerb
+    const float SET = bk->zone == 4 ? 0.8f : 1.5f;     // setback from the kerb (Midtown builds right up to it)
     int first = 1;
     // Lots along each street edge: south, north, west, east.
     for (int e = 0; e < 4; e++) {
@@ -1010,7 +1056,13 @@ static void fill_block(World *w, const Block *bk) {
         while (cur < len - 6) {
             int k = pick_kind(bk->zone, first);
             float wdt, dep, ht;
-            pick_size(k, &wdt, &dep, &ht);
+            pick_size(k, bk->zone, &wdt, &dep, &ht);
+            if (bk->zone == 4) {                    // Midtown: lots on facing sides share the block depth
+                float across = e < 2 ? R->z1 - R->z0 : R->x1 - R->x0;
+                float half = across * 0.5f - SET - 0.3f;
+                dep = across < 24.0f ? across - 2.0f * SET : fminf(dep, half);
+                if (dep < 6.0f) break;
+            }
             if (k == BLD_TOWER) { if (cur + wdt > len - 1) { cur += 2; continue; } }
             if (cur + wdt > len - 1) wdt = len - 1 - cur;
             if (wdt < 7.5f) break;
@@ -1019,12 +1071,25 @@ static void fill_block(World *w, const Block *bk) {
             else if (e == 1) { fp = (Rect){R->x0 + cur, R->x0 + cur + wdt, R->z1 - SET - dep, R->z1 - SET}; front = 2; }
             else if (e == 2) { fp = (Rect){R->x0 + SET, R->x0 + SET + dep, R->z0 + cur, R->z0 + cur + wdt}; front = 1; }
             else { fp = (Rect){R->x1 - SET - dep, R->x1 - SET, R->z0 + cur, R->z0 + cur + wdt}; front = 0; }
-            if (fp.x1 <= R->x1 && fp.z1 <= R->z1 && area_free(w, fp, k == BLD_HOUSE ? 2.2f : 1.6f)) {
+            float gap = bk->zone == 4 ? 0.6f : (k == BLD_HOUSE ? 2.2f : 1.6f);
+            if (fp.x1 <= R->x1 && fp.z1 <= R->z1 && area_free(w, fp, gap)) {
                 add_building(w, fp, k, ht, front);
                 first = 0;
-                cur += wdt + (k == BLD_HOUSE ? frange(2.5f, 5.0f) : frange(1.8f, 3.5f));
+                cur += wdt + (bk->zone == 4 ? frange(0.6f, 1.4f) : k == BLD_HOUSE ? frange(2.5f, 5.0f) : frange(1.8f, 3.5f));
             } else cur += 2.0f;
         }
+    }
+    if (bk->zone == 4) {                                // Midtown: second row of towers behind the frontage
+        for (int t = 0; t < 40; t++) {
+            int k = frnd() < 0.7f ? BLD_TOWER : BLD_APARTMENT;
+            float wdt, dep, ht;
+            pick_size(k, 4, &wdt, &dep, &ht);
+            if (wdt > R->x1 - R->x0 - 2 || dep > R->z1 - R->z0 - 2) continue;
+            float x0 = frange(R->x0 + 1, R->x1 - 1 - wdt), z0 = frange(R->z0 + 1, R->z1 - 1 - dep);
+            Rect fp = {x0, x0 + wdt, z0, z0 + dep};
+            if (area_free(w, fp, 0.6f)) add_building(w, fp, k, ht, z0 - R->z0 < R->z1 - (z0 + dep) ? 3 : 2);
+        }
+        return;
     }
     // Yard and park trees in what's left.
     for (int t = 0; t < 30; t++) {
@@ -1083,22 +1148,8 @@ int world_point_solid(const World *w, V3 p) {
     return 0;
 }
 
-void world_init(World *w) {
-    memset(w, 0, sizeof *w);
-    rng_state = 20240611u;
-    // Crash-test wall behind the spawn point.
-    add_box(w, v3(-74, -1, -14), v3(-71, 3.0f, 14));
-    // A row of concrete pillars beside the main road.
-    const float px[6] = {-60, -46, -32, -18, 18, 32};
-    for (int i = 0; i < 6; i++) {
-        float x = px[i];
-        add_box(w, v3(x - 0.6f, -1, 11.0f), v3(x + 0.6f, 4.0f, 12.2f));
-    }
-    // Low barrier blocks scattered on the plaza.
-    add_box(w, v3(18, -1, -26), v3(30, 0.8f, -24.5f));
-    add_box(w, v3(-30, -1, -30), v3(-28.5f, 1.2f, -18));
-
-    // Towns: blocks between the highway, the avenue and the side streets, mirrored across the cross road.
+// Default map: two small towns, mirrored across the cross road, plus the warehouse district.
+static void build_default(World *w) {
     const Block east[] = {
         {{9, 36, 15, 44}, 0}, {{44, 76, 15, 44}, 1}, {{84, 112, 15, 44}, 2},
         {{9, 36, 52, 92}, 1}, {{44, 76, 52, 92}, 2}, {{84, 112, 52, 92}, 2},
@@ -1110,10 +1161,8 @@ void world_init(World *w) {
             if (side < 0) { float t = b.r.x0; b.r.x0 = -b.r.x1; b.r.x1 = -t; }
             fill_block(w, &b);
         }
-    {   // Warehouse district south of the highway (east side only; the west is a test route).
-        Block ind = {{34, 74, -38, -14}, 3};
-        fill_block(w, &ind);
-    }
+    Block ind = {{34, 74, -38, -14}, 3};          // warehouse district (east side only; the west is a test route)
+    fill_block(w, &ind);
     // Saplings along the avenue kerbs, in the setback strip in front of the buildings.
     for (int side = -1; side <= 1; side += 2)
         for (float x = 12; x < 110; x += 9) {
@@ -1129,24 +1178,65 @@ void world_init(World *w) {
                 if (ok) world_add_tree(w, tx, tz, frange(4.2f, 5.4f), TREE_BROADLEAF);
             }
         }
+}
+
+// New York map: Times Square landmarks, Midtown blocks, then the warehouse district.
+static void build_newyork(World *w) {
+    // Landmarks first, so the blocks pack around them: the screen-clad wedge tower in the south gore
+    // of the bowtie (between Broadway and 7th Avenue), and the red grandstand steps on the Broadway
+    // plaza north of the crossing.
+    add_building(w, (Rect){-18.0f, -9.6f, 24.0f, 38.0f}, BLD_WEDGE, 112.0f, 2);
+    float sx = broadway_x(92.0f);
+    add_building(w, (Rect){sx - 3.2f, sx + 3.2f, 86.0f, 97.0f}, BLD_STEPS, 3.4f, 3);
+    // Midtown blocks between the avenues and cross streets.
+    const float xs[4][2] = {{-CITY_X + 1, -60}, {-48, -8}, {8, 48}, {60, CITY_X - 1}};
+    const float zs[4][2] = {{14, 44}, {50, 72}, {78, 100}, {106, 124}};
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            Block b = {{xs[i][0], xs[i][1], zs[j][0], zs[j][1]}, 4};
+            fill_block(w, &b);
+        }
+    Block ind = {{34, 74, -38, -14}, 3};
+    fill_block(w, &ind);
+}
+
+void world_init(World *w, int map) {
+    memset(w, 0, sizeof *w);
+    w->map = g_map = (map < 0 || map >= MAP_COUNT) ? MAP_DEFAULT : map;
+    rng_state = 20240611u;
+    // Crash-test wall behind the spawn point.
+    add_box(w, v3(-74, -1, -14), v3(-71, 3.0f, 14));
+    // A row of concrete pillars beside the main road (on New York, moved clear of the avenue mouths).
+    const float pxD[6] = {-60, -46, -32, -18, 18, 32}, pxN[6] = {-66, -40, -30, -18, 18, 32};
+    for (int i = 0; i < 6; i++) {
+        float x = g_map == MAP_NEWYORK ? pxN[i] : pxD[i];
+        add_box(w, v3(x - 0.6f, -1, 11.0f), v3(x + 0.6f, 4.0f, 12.2f));
+    }
+    // Low barrier blocks scattered on the plaza.
+    add_box(w, v3(18, -1, -26), v3(30, 0.8f, -24.5f));
+    add_box(w, v3(-30, -1, -30), v3(-28.5f, 1.2f, -18));
+
+    if (g_map == MAP_NEWYORK) build_newyork(w); else build_default(w);
 
     // Roadside trees along the highway and the cross road, out in the country.
+    float crossNorth = g_map == MAP_NEWYORK ? 142.0f : 100.0f;
     for (float x = 66; x < 250; x += 11) { try_tree(w, x, 14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); try_tree(w, x + 5, -14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); }
     for (float x = -86; x > -250; x -= 11) { try_tree(w, x, 14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); try_tree(w, x - 5, -14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); }
-    for (float z = 100; z < 250; z += 12) { try_tree(w, 12, z, frange(6, 10), TREE_CONIFER, 2.0f); try_tree(w, -12, z + 6, frange(6, 10), TREE_CONIFER, 2.0f); }
+    for (float z = crossNorth; z < 250; z += 12) { try_tree(w, 12, z, frange(6, 10), TREE_CONIFER, 2.0f); try_tree(w, -12, z + 6, frange(6, 10), TREE_CONIFER, 2.0f); }
     for (float z = -80; z > -250; z -= 12) { try_tree(w, 12, z, frange(6, 10), TREE_CONIFER, 2.0f); try_tree(w, -12, z - 6, frange(6, 10), TREE_CONIFER, 2.0f); }
 
     // Forest on the hills, thicker further out; a few loners on the flat.
     for (int i = 0; i < 2600 && w->ntree < MAX_TREES - 40; i++) {
         float r = frange(95, 290), a = frange(0, 6.2831853f);
         float x = r * cosf(a), z = r * sinf(a);
+        if (in_city(x, z)) continue;
         if (frnd() > smooth01(90, 200, r) + 0.15f) continue;
         int conifer = frnd() < 0.35f + 0.5f * smooth01(110, 220, r);
         try_tree(w, x, z, conifer ? frange(8, 15) : frange(6, 10), conifer ? TREE_CONIFER : TREE_BROADLEAF, 3.2f);
     }
     for (int i = 0; i < 120; i++) {
         float x = frange(-88, 88), z = frange(-88, 88);
-        if (x * x + z * z > 88 * 88) continue;
+        if (x * x + z * z > 88 * 88 || in_city(x, z)) continue;
         try_tree(w, x, z, frange(5, 9), frnd() < 0.7f ? TREE_BROADLEAF : TREE_CONIFER, 6.0f);
     }
 
