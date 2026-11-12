@@ -21,7 +21,7 @@ static inline V3 vrot(V3 v, V3 k, float a) {
     return vadd(vadd(vscale(v, c), vscale(vcross(k, v), s)), vscale(k, vdot(k, v) * (1 - c)));
 }
 
-#define MAX_NODES 192
+#define MAX_NODES 256
 #define MAX_BEAMS 2048
 #define MAX_TRIS 512
 #define MAX_PANELS 12
@@ -35,7 +35,7 @@ static inline V3 vrot(V3 v, V3 k, float a) {
 
 #define SIM_HZ 1200.0f          // physics substep rate
 #define CAR_SPAWN_H 0.56f       // floor height above ground when the pickup is dropped in (tests)
-#define NR 18                   // body rings per vehicle
+#define NR_MAX 24               // body rings per vehicle (at most)
 
 typedef struct { V3 p, v, f; float m; } Node;
 
@@ -75,7 +75,7 @@ typedef struct { float throttle, brake, steer; int handbrake; } Controls;
 enum { TG_LATCHED, TG_OPEN, TG_HANGING, TG_GONE, TG_NONE };
 
 // ---- vehicle definitions
-// A body is NR cross-section rings from nose to tail. Each ring has floor-centre, floor-edge,
+// A body is nr (<= NR_MAX) cross-section rings from nose to tail. Each ring has floor-centre, floor-edge,
 // sill, beltline and roof-edge nodes on each side; the table below shapes them.
 typedef struct {
     float x, floorY, rkY, belt, top, tw;    // station x; heights (0 = floor underside); roof-edge half-width
@@ -91,7 +91,8 @@ enum { VEH_PICKUP, VEH_HATCH, VEH_COUNT };
 
 typedef struct {
     const char *name, *blurb;
-    Station st[NR];
+    int nr;
+    Station st[NR_MAX];
     float floorHalf, sillHalf, beltHalf;    // half-widths
     int axleF, axleR, doorR0, doorR1, dashRing, bRing;
     float mass;
@@ -104,6 +105,9 @@ typedef struct {
     float rearSteer, maxLock, cdA;
     float spawnH, eyeH;                     // drop-in floor height; hood-camera height above centre
     int npanels, hasTailgate, lightStyle;   // lightStyle: 0 full-width bars, 1 corner lamps
+    int smooth;                             // smooth-shaded paint without panel outlines
+    int wheelStyle;                         // 0 flat aero covers, 1 dark multi-spoke alloys
+    int mirrorRing, spoilerRing;            // ring for door mirrors / roof spoiler (-1 = none)
     V3 paint;
 } VehicleDef;
 
@@ -130,6 +134,8 @@ typedef struct {
     int tailgate;               // TG_*
     int tgNode[4];              // tailgate corners: top L, top R, bottom L, bottom R
     LightStrip lights[4]; int nlights;
+    int mirrorNode[4];          // belt nodes L, R at the mirror ring and the ring behind it (-1 = none)
+    int spoilerNode[4];         // roof-edge nodes L, R at the spoiler ring and the ring ahead of it
     float wetness;              // 0 dry .. 1 soaked road: less tyre grip
 } Car;
 

@@ -2,7 +2,8 @@
 
 A small soft-body driving sandbox in the spirit of BeamNG.drive, written from scratch in C.
 Two vehicles, picked with **V**: an angular stainless-steel electric pickup (a Cybertruck-style
-wedge) and the Sparrow, an original compact front-wheel-drive hatchback.
+wedge) and the Sparrow, a modern compact sport hatchback (unbadged, proportioned after a current
+C-segment five-door).
 Runs natively on macOS (Apple Silicon or Intel).
 
 ## Build & run (macOS)
@@ -46,15 +47,19 @@ Saplings and young trees snap and fall when you hit them; mature trunks stop you
 ## How it works
 
 - **Vehicles** are entries in a definition table (`VehicleDef` in `physics.h`). Each entry sets the
-  body's 18 stations (position, floor, sill, beltline and roof heights, roof width, wheel arches,
+  body's stations (up to 24) (position, floor, sill, beltline and roof heights, roof width, wheel arches,
   bulkheads, door seams, and which gaps are glass), plus widths, mass layout, structural zones and
   stiffness, wheels and suspension, engine, brakes, drive split, rear steer and lights. The same
   builder turns any entry into nodes, beams and skin.
   - *Stainless pickup*: 5.68 m, 3.1 t, ~600 hp dual-motor AWD, rear steer, detachable tailgate,
     0–100 km/h in 4.6 s.
-  - *Sparrow hatchback*: 3.95 m, 1.1 t, ~83 hp front-engine FWD, short hood, steep windshield,
-    long flat roof, near-vertical hatch, corner headlamps and tail lights, a softer and lighter
-    structure. 0–100 km/h in 9.6 s, 100–0 in 39 m.
+  - *Sparrow hatchback*: 4.37 m long, 1.79 m wide, 1.45 m tall, 2.64 m wheelbase, 1.35 t,
+    ~127 hp 2.0 L front-wheel drive, on 18" wheels. 21 stations: a sloping hood into a raked
+    windshield, a roof that peaks over the front seats and falls to a spoiler over a raked hatch,
+    a window line that kicks up into a pointed rear quarter window, round arches and flared rear
+    haunches. Drawn with smooth-shaded clear-coat paint (no panel outlines, just shut lines),
+    door mirrors, a roof spoiler, a black grille, intake and diffuser, and dark ten-spoke alloys.
+    0–100 km/h in 7.8 s, 100–0 in 37 m.
 - **Body**: 18 cross-section rings along a 5.68 m body, 9 nodes each (floor centre, floor
   edges, sills, beltline crease, roof/sail edge), shaped by the signature profile: one straight
   line from the nose up to the roof apex, another from the apex down to the tail. The rings form a

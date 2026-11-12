@@ -620,6 +620,37 @@ static void draw_lightbar(const Car *c, const LightStrip *L, Color col) {
     DrawTriangle3D(RV(a), RV(bl), RV(b), col);
 }
 
+// Paint shading for one point: baked-style sun/ambient, a sky reflection that grows toward
+// grazing angles (clear coat), and a sun highlight.
+static Color shade_paint(Color base, V3 n, V3 p, V3 eye, float gloss) {
+    Color col = lit(base, n, 1.0f);
+    V3 v = vnorm(vsub(eye, p));
+    float fres = 0.10f + 0.55f * powf(1.0f - fmaxf(vdot(n, v), 0.0f), 3.0f);
+    float up = fmaxf(n.y, 0.0f);
+    V3 sk = vlerp(v3(ENV->horizonAway.x, ENV->horizonAway.y, ENV->horizonAway.z), v3(ENV->zenith.x, ENV->zenith.y, ENV->zenith.z), up);
+    Color skc = {(unsigned char)fminf(255, 255 * powf(sk.x * 1.6f, 0.4545f)), (unsigned char)fminf(255, 255 * powf(sk.y * 1.6f, 0.4545f)), (unsigned char)fminf(255, 255 * powf(sk.z * 1.6f, 0.4545f)), 255};
+    float f = fres * gloss;
+    col = (Color){(unsigned char)(col.r + (skc.r - col.r) * f), (unsigned char)(col.g + (skc.g - col.g) * f), (unsigned char)(col.b + (skc.b - col.b) * f), 255};
+    V3 hv = vnorm(vadd(SUN, v));
+    float spec = powf(fmaxf(vdot(n, hv), 0.0f), 60.0f) * 0.6f * gloss + powf(fmaxf(vdot(n, hv), 0.0f), 8.0f) * 0.08f;
+    return brighten(col, spec);
+}
+
+// An oriented box (centre, three half-axis vectors), lit per face.
+static void draw_obox(V3 c, V3 ax, V3 ay, V3 az, Color col, V3 eye) {
+    V3 axes[3] = {ax, ay, az};
+    for (int a = 0; a < 3; a++)
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            V3 n = vscale(axes[a], (float)sgn), u = axes[(a + 1) % 3], w = axes[(a + 2) % 3];
+            V3 fc = vadd(c, n);
+            V3 q0 = vsub(vsub(fc, u), w), q1 = vsub(vadd(fc, u), w), q2 = vadd(vadd(fc, u), w), q3 = vadd(vsub(fc, u), w);
+            Color k = shade_paint(col, vnorm(n), fc, eye, 0.6f);
+            DrawTriangle3D(RV(q0), RV(q1), RV(q2), k); DrawTriangle3D(RV(q0), RV(q2), RV(q3), k);
+        }
+}
+
+static V3 nodeN[MAX_NODES];
+
 static void draw_car(const Car *c, int beamView, V3 eye) {
     Color body = {(unsigned char)(c->color.x * 255), (unsigned char)(c->color.y * 255), (unsigned char)(c->color.z * 255), 255};
     Color glass = {34, 46, 60, 255}, under = {35, 35, 38, 255}, tonneau = {52, 54, 58, 255}, trim = {30, 31, 33, 255};
@@ -638,10 +669,47 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
 
+    if (!beamView && c->def->smooth) {
+        // Smooth-shaded paint: average face normals at each node, light per vertex.
+        for (int i = 0; i < c->nn; i++) nodeN[i] = v3(0, 0, 0);
+        for (int i = 0; i < c->nt; i++) {
+            const Tri *t = &c->t[i];
+            if (t->kind != SURF_BODY && t->kind != SURF_TRIM) continue;
+            V3 a = c->n[t->v[0]].p, b = c->n[t->v[1]].p, d = c->n[t->v[2]].p;
+            V3 fn = vcross(vsub(b, a), vsub(d, a));
+            for (int k = 0; k < 3; k++) nodeN[t->v[k]] = vadd(nodeN[t->v[k]], fn);
+        }
+        for (int i = 0; i < c->nn; i++) nodeN[i] = vnorm(nodeN[i]);
+        rlBegin(RL_TRIANGLES);
+        for (int i = 0; i < c->nt; i++) {
+            const Tri *t = &c->t[i];
+            if (t->kind != SURF_BODY && t->kind != SURF_TRIM) continue;
+            Color base = t->kind == SURF_TRIM ? trim : body;
+            float gloss = t->kind == SURF_TRIM ? 0.25f : 1.0f;
+            for (int k = 0; k < 3; k++) {
+                V3 p = c->n[t->v[k]].p;
+                Color col = shade_paint(base, nodeN[t->v[k]], p, eye, gloss);
+                rlColor4ub(col.r, col.g, col.b, 255);
+                rlVertex3f(p.x, p.y, p.z);
+            }
+        }
+        rlEnd();
+    }
     if (!beamView) {
         for (int i = 0; i < c->nt; i++) {
             const Tri *t = &c->t[i];
             if (t->panel >= 0 && c->glassBroken[t->panel]) continue;
+            if (c->def->smooth && (t->kind == SURF_BODY || t->kind == SURF_TRIM)) {   // drawn above; keep shut lines
+                if (t->edges) {
+                    Color edge = {28, 26, 26, 255};
+                    for (int e = 0; e < 3; e++)
+                        if (t->edges >> e & 1) {
+                            int a = t->v[e], b = t->v[(e + 1) % 3];
+                            DrawLine3D(RV(vadd(c->n[a].p, vscale(nodeN[a], 0.006f))), RV(vadd(c->n[b].p, vscale(nodeN[b], 0.006f))), edge);
+                        }
+                }
+                continue;
+            }
             V3 p[3] = {c->n[t->v[0]].p, c->n[t->v[1]].p, c->n[t->v[2]].p};
             V3 nrm = vnorm(vcross(vsub(p[1], p[0]), vsub(p[2], p[0])));
             Color base = t->kind == SURF_GLASS ? glass : t->kind == SURF_UNDER ? under :
@@ -659,9 +727,10 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
             }
             DrawTriangle3D(RV(p[0]), RV(p[1]), RV(p[2]), col);
             if (t->edges) {
-                Color edge = lit(base, nrm, 0.45f);
+                Color edge = c->def->smooth ? (Color){20, 20, 22, 255} : lit(base, nrm, 0.45f);
+                V3 lift = vscale(nrm, c->def->smooth ? 0.006f : 0.0f);
                 for (int e = 0; e < 3; e++)
-                    if (t->edges >> e & 1) DrawLine3D(RV(p[e]), RV(p[(e + 1) % 3]), edge);
+                    if (t->edges >> e & 1) DrawLine3D(RV(vadd(p[e], lift)), RV(vadd(p[(e + 1) % 3], lift)), edge);
             }
         }
     } else {
@@ -682,7 +751,44 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
         for (int i = 0; i < c->nn; i++) DrawSphere(RV(c->n[i].p), 0.03f, (Color){255, 230, 120, 255});
     }
 
-    // Wheels: chunky all-terrain tyres with flat aero covers.
+    if (!beamView && c->def->smooth) {               // black grille + lower intake up front, diffuser at the back
+        // Corner-lamp cars: lights[0] / lights[2] span the nose / tail ring as {top L, top R, belt L, belt R}.
+        // Within a ring, floor-edge nodes are two places from the belt nodes (P_BLL - 2 = P_FL, P_BLR + 2 = P_FR).
+        int bL = c->lights[0].q[2], bR = c->lights[0].q[3];
+        LightStrip grille = {{bL, bR, bL - 2, bR + 2}, 0.45f, 0.30f, 0.70f, 1.0f, 0};
+        LightStrip intake = {{bL - 2, bR + 2, bL, bR}, 0.40f, 0.12f, 0.88f, 1.0f, 0};
+        int tL = c->lights[2].q[2], tR = c->lights[2].q[3];
+        LightStrip diffuser = {{tL - 2, tR + 2, tL, tR}, 0.45f, 0.08f, 0.92f, -1.0f, 0};
+        draw_lightbar(c, &grille, (Color){16, 16, 18, 255});
+        draw_lightbar(c, &intake, (Color){24, 24, 26, 255});
+        draw_lightbar(c, &diffuser, (Color){22, 22, 24, 255});
+    }
+    if (!beamView && c->mirrorNode[0] >= 0) {        // door mirrors on the A-pillar bases
+        for (int s = 0; s < 2; s++) {
+            V3 p = c->n[c->mirrorNode[s]].p, q = c->n[c->mirrorNode[s + 2]].p;
+            V3 f = vnorm(vsub(p, q)), out = vscale(c->right, s ? 1.0f : -1.0f), up = c->up;
+            V3 ctr = vadd(vadd(p, vscale(out, 0.12f)), vadd(vscale(up, 0.07f), vscale(f, -0.12f)));
+            draw_obox(vadd(p, vadd(vscale(out, 0.04f), vadd(vscale(up, 0.03f), vscale(f, -0.10f)))), vscale(f, 0.04f), vscale(up, 0.015f), vscale(out, 0.04f), trim, eye);
+            draw_obox(ctr, vscale(f, 0.045f), vscale(up, 0.048f), vscale(out, 0.08f), body, eye);
+            draw_obox(vadd(ctr, vscale(f, -0.047f)), vscale(f, 0.004f), vscale(up, 0.040f), vscale(out, 0.07f), (Color){150, 160, 170, 255}, eye);   // mirror glass
+        }
+    }
+    if (!beamView && c->spoilerNode[0] >= 0) {       // roof spoiler over the hatch
+        V3 a = c->n[c->spoilerNode[0]].p, b = c->n[c->spoilerNode[1]].p;
+        V3 back = vnorm(vsub(vscale(vadd(a, b), 0.5f), vscale(vadd(c->n[c->spoilerNode[2]].p, c->n[c->spoilerNode[3]].p), 0.5f)));
+        back = vnorm(vsub(back, vscale(c->up, vdot(back, c->up) + 0.15f)));      // nearly level, a touch down
+        V3 lift = vscale(c->up, 0.02f);
+        V3 a2 = vadd(vadd(a, vscale(back, 0.24f)), lift), b2 = vadd(vadd(b, vscale(back, 0.24f)), lift);
+        V3 a3 = vsub(a2, vscale(c->up, 0.05f)), b3 = vsub(b2, vscale(c->up, 0.05f));
+        V3 n = vnorm(vcross(vsub(b, a), vsub(a2, a)));
+        if (vdot(n, c->up) < 0) n = vscale(n, -1);
+        Color top = shade_paint(body, n, a2, eye, 1.0f), lip = shade_paint(trim, back, a3, eye, 0.3f);
+        DrawTriangle3D(RV(a), RV(b), RV(b2), top); DrawTriangle3D(RV(a), RV(b2), RV(a2), top);
+        DrawTriangle3D(RV(a2), RV(b2), RV(b3), lip); DrawTriangle3D(RV(a2), RV(b3), RV(a3), lip);
+        DrawTriangle3D(RV(a), RV(a2), RV(a3), lip); DrawTriangle3D(RV(b), RV(b2), RV(b3), lip);
+    }
+
+    // Wheels.
     for (int i = 0; i < 4; i++) {
         const Wheel *W = &c->w[i];
         V3 axis = vrot(c->right, c->up, W->steerAngle);
@@ -691,6 +797,24 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
         V3 a = vsub(ctr, vscale(axis, c->def->wheelW * 0.5f)), b = vadd(ctr, vscale(axis, c->def->wheelW * 0.5f));
         DrawCylinderEx(RV(a), RV(b), c->def->wheelR, c->def->wheelR, 24, (Color){26, 26, 28, 255});
         V3 face = vadd(ctr, vscale(axis, out * (c->def->wheelW * 0.5f + 0.004f)));
+        if (c->def->wheelStyle == 1) {                 // dark alloy laid over the tyre's outer face: barrel, ten spokes, lip, cap
+            float R = c->def->wheelR;
+            V3 fw = vcross(c->up, axis), n = vscale(axis, out);
+            V3 f1 = vadd(face, vscale(n, 0.002f)), f2 = vadd(face, vscale(n, 0.005f)), f3 = vadd(face, vscale(n, 0.008f));
+            DrawCylinderEx(RV(face), RV(f1), R * 0.74f, R * 0.74f, 28, (Color){70, 72, 78, 255});      // rim lip
+            DrawCylinderEx(RV(f1), RV(vadd(f1, vscale(n, 0.001f))), R * 0.69f, R * 0.69f, 28, (Color){12, 12, 14, 255});   // barrel shadow
+            Color sp = brighten(lit((Color){128, 130, 138, 255}, n, 1.0f), 0.06f);
+            for (int k = 0; k < 10; k++) {
+                float ang = W->spin + (k >> 1) * 1.25664f + (k & 1 ? 0.16f : -0.16f);
+                V3 d = vrot(fw, axis, ang), sd = vcross(axis, d);
+                float w0 = R * 0.055f, w1 = R * 0.030f;
+                V3 r0 = vadd(f2, vscale(d, R * 0.13f)), r1 = vadd(f2, vscale(d, R * 0.69f));
+                V3 q0 = vsub(r0, vscale(sd, w0)), q1 = vadd(r0, vscale(sd, w0)), q2 = vadd(r1, vscale(sd, w1)), q3 = vsub(r1, vscale(sd, w1));
+                DrawTriangle3D(RV(q0), RV(q1), RV(q2), sp); DrawTriangle3D(RV(q0), RV(q2), RV(q3), sp);
+            }
+            DrawCylinderEx(RV(f2), RV(f3), R * 0.17f, R * 0.14f, 14, (Color){40, 40, 46, 255});         // centre cap
+            continue;
+        }
         DrawCylinderEx(RV(vsub(face, vscale(axis, out * 0.01f))), RV(face), c->def->wheelR * 0.66f, c->def->wheelR * 0.66f, 6, (Color){150, 152, 156, 255});
         V3 fw = vcross(c->up, axis);
         for (int s = 0; s < 6; s++) {   // cover segments show rotation
@@ -1011,7 +1135,8 @@ static int pickerOpen, pickerSel;
 // Side silhouette straight from the body's station table, nose to the right.
 static void draw_profile(const VehicleDef *d, float cx, float cy, float scale, Color col) {
     float clear = d->spawnH - 0.06f;                      // floor height above the ground at rest (approx.)
-    Vector2 pts[2 * NR + 1];
+    Vector2 pts[2 * NR_MAX + 1];
+    const int NR = d->nr;
     int n = 0;
     for (int r = 0; r < NR; r++) pts[n++] = (Vector2){cx + d->st[r].x * scale, cy - (d->st[r].top + clear) * scale};
     for (int r = NR - 1; r >= 0; r--) pts[n++] = (Vector2){cx + d->st[r].x * scale, cy - (fmaxf(d->st[r].floorY, d->st[r].rkY * 0.4f) + clear) * scale};
@@ -1048,6 +1173,7 @@ static void draw_picker(void) {
         int sel = i == pickerSel;
         hud_panel(x, y0, cw, ch);
         if (sel) { DrawRectangleLinesEx((Rectangle){x - 1, y0 - 1, cw + 2, ch + 2}, 3, HUD_ORANGE); }
+        int NR = d->nr;
         float scale = fminf(64.0f, (cw - 60) / (d->st[0].x - d->st[NR - 1].x));
         draw_profile(d, x + cw * 0.5f - 0.5f * (d->st[0].x + d->st[NR - 1].x) * scale, y0 + 150, scale, sel ? RAYWHITE : HUD_DIM);
         txt(d->name, x + 22, y0 + 172, 26, sel ? RAYWHITE : HUD_DIM);
