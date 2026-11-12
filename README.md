@@ -31,6 +31,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | G | drop the tailgate |
 | V | choose vehicle (←/→, Enter) |
 | M | map: Default / New York |
+| J | traffic on / off |
 | L | lighting: dusk / day |
 | O | weather: dry / wet / rain / snow |
 | Q | recover (fresh car, upright, in place) |
@@ -69,7 +70,7 @@ trunks stop you dead.
     a window line that kicks up into a pointed rear quarter window, round arches and flared rear
     haunches. Drawn with smooth-shaded clear-coat paint (no panel outlines, just shut lines),
     door mirrors, a roof spoiler, a black grille, intake and diffuser, and dark ten-spoke alloys.
-    0–100 km/h in 7.8 s, 100–0 in 37 m.
+    0–100 km/h in 8.2 s, 100–0 in 36 m.
 - **Body**: 18 cross-section rings along a 5.68 m body, 9 nodes each (floor centre, floor
   edges, sills, beltline crease, roof/sail edge), shaped by the signature profile: one straight
   line from the nose up to the roof apex, another from the apex down to the tail. The rings form a
@@ -93,6 +94,14 @@ trunks stop you dead.
   (up to ~10°, counter-steering at low speed) and a handbrake for drifting.
 - **Collisions**: nodes collide with the terrain (heightfield) and boxes with friction.
   Truck-to-truck contact uses node spheres, checking only nodes inside the overlapping bounding boxes.
+- **Traffic** (`src/traffic.c`): each map's streets form a grid of junctions. Signals alternate
+  between the two axes, with 2.5 s of all-red clearance and offsets staggered between junctions.
+  About 8 AI cars drive the grid on the same soft-body physics as the player. They stay in the
+  right-hand lane, follow curved paths through junctions (swinging wide on right turns, and turning
+  left only where nothing else goes), and slow for corners. They stop for red, and for yellow when
+  they can stop comfortably, and keep a gap to whatever is ahead, the player included. Wrecked,
+  flipped, off-route or deadlocked cars respawn out of sight. The highway past the ramp and
+  through the crash wall is left out of the routes.
 - **Maps**: `world_init(world, map)` builds the shared proving ground plus that map's own streets,
   buildings and landmarks. Road tables, the dirt washboard's location, Broadway and the city's
   extent all belong to the map, and the terrain asks the current map for them.
@@ -124,7 +133,7 @@ trunks stop you dead.
 - **Snow**: snow cover is baked into the terrain, roofs and tree tops, wherever a surface faces
   up. Ploughed roads keep less of it and steep rock sheds it. Snowflakes drift as soft sprites
   around the camera. The sky turns overcast with thicker haze, every rolling wheel leaves a track,
-  and tyre grip halves (the Sparrow's 100–0 km/h stop goes from 37 m to 68 m).
+  and tyre grip halves (the Sparrow's 100–0 km/h stop goes from 36 m to 66 m).
 - **Integration**: semi-implicit Euler at 1200 Hz fixed substeps. Each beam's stiffness and
   damping is limited by the masses it connects, which keeps the explicit integrator stable.
 

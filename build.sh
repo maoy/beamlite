@@ -20,5 +20,5 @@ else
   LIBS="$RL/src/libraylib.a -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL"
 fi
 
-cc -O3 -std=c11 -Wall -DGL_SILENCE_DEPRECATION src/main.c src/physics.c src/render.c $CFLAGS $LIBS -lm -o beamlite
+cc -O3 -std=c11 -Wall -DGL_SILENCE_DEPRECATION src/main.c src/physics.c src/render.c src/traffic.c $CFLAGS $LIBS -lm -o beamlite
 echo ">> Built ./beamlite  — run:  ./beamlite"

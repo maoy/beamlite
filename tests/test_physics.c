@@ -1,5 +1,6 @@
 // Headless physics checks + wireframe snapshots (PPM) — not part of the game build.
 #include "../src/physics.h"
+#include "../src/traffic.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -186,6 +187,34 @@ int main(void) {
         while (W.cars[0].pos.x > -68.0f && W.cars[0].pos.x < 0) run(0.05f, (Controls){0.3f, 0, 0, 0});
         run(2.0f, idle); report("hatch after wall @50");
         snapshot("/tmp/hatch_wall.ppm", &W.cars[0]);
+    }
+    for (int m = 0; m < MAP_COUNT; m++) {   // Traffic: 8 AI cars drive the junction grid for 90 s.
+        world_init(&W, m); W.ncars = 1;
+        car_build(&W.cars[0], v3(-30, CAR_SPAWN_H, -60), 0, v3(1, 0, 0));    // player parked out of the way
+        W.cars[0].ctl = (Controls){0, 1, 0, 1};
+        traffic_init(&W, 8, W.cars[0].pos);
+        float dist[MAX_CARS] = {0}, stopped = 0, samples = 0;
+        V3 last[MAX_CARS];
+        for (int i = 0; i < W.ncars; i++) last[i] = W.cars[i].pos;
+        for (int step = 0; step < 900; step++) {             // 0.1 s steps
+            traffic_update(&W, 0.1f, W.cars[0].pos);
+            int n = (int)(0.1f * SIM_HZ);
+            for (int k = 0; k < n; k++) world_substep(&W, H);
+            for (int i = 1; i < W.ncars; i++) {
+                car_update_frame(&W.cars[i]); car_update_damage(&W.cars[i]);
+                float d = vlen(vsub(W.cars[i].pos, last[i]));
+                if (d < 20) dist[i] += d;                        // ignore respawn jumps
+                last[i] = W.cars[i].pos;
+                if (traffic_is_ai(i)) { samples++; if (vlen(W.cars[i].vel) < 0.5f) stopped++; }
+            }
+        }
+        float total = 0; int moving = 0, wrecked = 0;
+        for (int i = 1; i < W.ncars; i++) { total += dist[i]; if (dist[i] > 100) moving++; if (W.cars[i].damage > 20) wrecked++; }
+        printf("traffic %-9s cars %d  moving %d  avg %.0f m in 90 s (%.0f km/h)  stopped %.0f%% of the time  respawns %d  damaged now %d\n",
+               map_name(m), W.ncars - 1, moving, total / (W.ncars - 1), total / (W.ncars - 1) / 90 * 3.6f, 100 * stopped / samples, traffic_respawns(), wrecked);
+        int why[4]; traffic_debug(why);
+        printf("        respawn reasons: stuck %d, off route %d, flipped %d, damaged %d\n", why[0], why[1], why[2], why[3]);
+        traffic_clear(&W);
     }
     {   // The generated map: buildings and trees exist and the test routes above are clear of them.
         world_init(&W, MAP_DEFAULT);

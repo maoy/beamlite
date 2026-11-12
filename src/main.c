@@ -6,6 +6,7 @@
 #include "raymath.h"
 #include "physics.h"
 #include "render.h"
+#include "traffic.h"
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
@@ -590,6 +591,18 @@ static Model build_city(const World *w, Model *glow, Model *pool) {
     MeshB m = {0};
     for (int i = 0; i < w->nbld; i++) build_building(&m, &w->bld[i]);
     if (w->map == MAP_NEWYORK) place_lamps_newyork(&m, w); else place_street_lamps(&m, w);
+    for (int i = 0; i < traffic_signal_count(); i++) {   // traffic signals: pole, mast arm, housing
+        V3 head, face, pole; int st;
+        traffic_signal(i, &head, &face, &pole, &st);
+        Color metal = {48, 50, 54, 255}, housing = {30, 30, 32, 255};
+        float top = pole.y + 6.0f;
+        box_shell(&m, v3(pole.x - 0.1f, pole.y - 0.3f, pole.z - 0.1f), v3(pole.x + 0.1f, top, pole.z + 0.1f), metal, metal);
+        box_shell(&m, v3(fminf(pole.x, head.x) - 0.05f, top - 0.25f, fminf(pole.z, head.z) - 0.05f),
+                  v3(fmaxf(pole.x, head.x) + 0.05f, top - 0.15f, fmaxf(pole.z, head.z) + 0.05f), metal, metal);
+        V3 side = v3(-face.z, 0, face.x);
+        V3 c0 = vsub(vsub(head, vscale(side, 0.2f)), vscale(face, 0.14f)), c1 = vadd(vadd(head, vscale(side, 0.2f)), vscale(face, 0.14f));
+        box_shell(&m, v3(fminf(c0.x, c1.x), head.y - 0.55f, fminf(c0.z, c1.z)), v3(fmaxf(c0.x, c1.x), head.y + 0.55f, fmaxf(c0.z, c1.z)), housing, housing);
+    }
     build_screens(w);                                   // also adds the screens' street glow to POOL
     *glow = mb_model(&GLOW);
     *pool = mb_model(&POOL);
@@ -929,6 +942,21 @@ static void draw_cabin(const Car *c, V3 eye) {
     draw_seat(c, d->seat.x, -d->seat.z, 0.24f, eye);                  // front passenger
     draw_seat(c, d->rearSeatX + 0.24f, 0, d->beltHalf * 0.78f, eye);  // rear bench (headrest at the centre)
     oboxGloss = 0.6f;
+}
+
+// Signal lamps: the lit one bright (it blooms), the others dim.
+static void draw_signal_lamps(int lit) {
+    static const Color LAMP_COL[3] = {{255, 40, 30, 255}, {255, 170, 20, 255}, {40, 255, 120, 255}};
+    for (int i = 0; i < traffic_signal_count(); i++) {
+        V3 head, face, pole; int st;
+        traffic_signal(i, &head, &face, &pole, &st);
+        for (int k = 0; k < 3; k++) {                     // k: 0 red (top), 1 amber, 2 green
+            int state = k == 0 ? LIGHT_RED : k == 1 ? LIGHT_YELLOW : LIGHT_GREEN;
+            if ((state == st) != lit) continue;
+            V3 c = vadd(vadd(head, vscale(face, 0.145f)), v3(0, 0.33f - 0.33f * k, 0));
+            DrawCylinderEx(RV(c), RV(vadd(c, vscale(face, 0.01f))), 0.12f, 0.12f, 12, lit ? LAMP_COL[k] : (Color){LAMP_COL[k].r / 5, LAMP_COL[k].g / 5, LAMP_COL[k].b / 5, 255});
+        }
+    }
 }
 
 // Instrument dials glow in the dark (emissive pass).
@@ -1440,7 +1468,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
             "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
-            "M  map: Default / New York",
+            "M  map: Default / New York      J  traffic on / off",
             "", "Ramp ahead, crash wall behind you, warehouses to the", "right, forest on the hills. Default: towns to the left.",
             "New York: Times Square up 7th Avenue, straight ahead."};
         int n = sizeof lines / sizeof lines[0];
@@ -1523,7 +1551,8 @@ static V3 player_paint(void) { return vehicle_def(playerType)->paint; }
 // Start: facing the ramp on Default; facing up 7th Avenue toward Times Square on New York.
 static void spawn_player(World *w) {
     skids_forget(0);
-    float x = w->map == MAP_NEWYORK ? 3.0f : 0.0f, z = w->map == MAP_NEWYORK ? 3.0f : 0.0f;
+    // In the right-hand lane, clear of the junction (traffic turns through junctions).
+    float x = w->map == MAP_NEWYORK ? -4.0f : -20.0f, z = w->map == MAP_NEWYORK ? 15.0f : 3.5f;
     float yaw = w->map == MAP_NEWYORK ? -PI / 2 : 0.0f;
     car_build_vehicle(&w->cars[0], playerType, v3(x, terrain_height(x, z) + vehicle_def(playerType)->spawnH, z), yaw, player_paint());
 }
@@ -1531,7 +1560,12 @@ static void spawn_player(World *w) {
 static const V3 TAXI = {0.96f, 0.74f, 0.08f};
 
 // Build a map: world, meshes, road data for the renderer, player and parked vehicles.
+static int trafficOn = 1;
+#define TRAFFIC_CARS 8
+
 static void load_map(World *w, int map, int *nextSlot) {
+    traffic_clear(w);
+    traffic_set_map(map);
     world_init(w, map);
     build_world_meshes(w);
     float rr[16][4]; int nh;
@@ -1545,15 +1579,16 @@ static void load_map(World *w, int map, int *nextSlot) {
     spawn_player(w);
     if (map == MAP_NEWYORK) {                           // yellow cabs parked along 7th Avenue, and a pickup
         w->ncars = 4;
-        car_build_vehicle(&w->cars[1], VEH_HATCH, v3(-4.5f, vehicle_def(VEH_HATCH)->spawnH, 24), -PI / 2, TAXI);
-        car_build_vehicle(&w->cars[2], VEH_HATCH, v3(4.5f, vehicle_def(VEH_HATCH)->spawnH, 58), PI / 2, TAXI);
-        car_build_vehicle(&w->cars[3], VEH_PICKUP, v3(-4.5f, CAR_SPAWN_H, 114), -PI / 2, PALETTE[1]);
+        car_build_vehicle(&w->cars[1], VEH_HATCH, v3(-6.8f, vehicle_def(VEH_HATCH)->spawnH, 24), -PI / 2, TAXI);   // at the kerb,
+        car_build_vehicle(&w->cars[2], VEH_HATCH, v3(6.8f, vehicle_def(VEH_HATCH)->spawnH, 58), PI / 2, TAXI);     // clear of the lanes
+        car_build_vehicle(&w->cars[3], VEH_PICKUP, v3(-6.8f, CAR_SPAWN_H, 114), -PI / 2, PALETTE[1]);
     } else {
         w->ncars = 3;
-        car_build_vehicle(&w->cars[1], VEH_HATCH, v3(-2.2f, vehicle_def(VEH_HATCH)->spawnH, 26), PI / 2, PALETTE[1]);
-        car_build_vehicle(&w->cars[2], VEH_PICKUP, v3(2.2f, CAR_SPAWN_H, 30), -PI / 2, PALETTE[2]);
+        car_build_vehicle(&w->cars[1], VEH_HATCH, v3(-5.8f, vehicle_def(VEH_HATCH)->spawnH, 26), PI / 2, PALETTE[1]);
+        car_build_vehicle(&w->cars[2], VEH_PICKUP, v3(5.8f, CAR_SPAWN_H, 30), -PI / 2, PALETTE[2]);
     }
     for (int i = 1; i < w->ncars; i++) w->cars[i].ctl = (Controls){0, 0.6f, 0, 1};
+    if (trafficOn) traffic_init(w, TRAFFIC_CARS, w->cars[0].pos);
     *nextSlot = w->ncars;
 }
 
@@ -1605,12 +1640,18 @@ int main(void) {
                 int slot = world.ncars < MAX_CARS ? world.ncars++ : nextSlot;
                 if (slot == nextSlot) nextSlot = nextSlot + 1 >= MAX_CARS ? 1 : nextSlot + 1;
                 int ty = slot % VEH_COUNT;
+                traffic_forget_slot(slot);
                 skids_forget(slot);
                 car_build_vehicle(&world.cars[slot], ty, v3(p.x, p.y + vehicle_def(ty)->spawnH + 0.1f, p.z), -hdg + PI / 2, PALETTE[slot % 8]);
                 world.cars[slot].ctl = (Controls){0, 0.6f, 0, 1};
             }
         }
-        if (IsKeyPressed(KEY_X)) { world.ncars = 1; nextSlot = 1; }
+        if (IsKeyPressed(KEY_X)) { traffic_clear(&world); trafficOn = 0; world.ncars = 1; nextSlot = 1; }
+        if (IsKeyPressed(KEY_J)) {
+            trafficOn = !trafficOn;
+            if (trafficOn) traffic_init(&world, TRAFFIC_CARS, pc->pos); else traffic_clear(&world);
+            nextSlot = world.ncars;
+        }
         if (IsKeyPressed(KEY_M)) load_map(&world, (world.map + 1) % MAP_COUNT, &nextSlot);
         if (IsKeyPressed(KEY_B)) beamView = !beamView;
         if (IsKeyPressed(KEY_C)) camMode = !camMode;
@@ -1650,6 +1691,8 @@ int main(void) {
         if (down) { if (vF > 1.0f) ctl.brake = 1; else ctl.throttle = -1; }
         if (pickerOpen) ctl = (Controls){0, 0, 0, 1};
         pc->ctl = ctl;
+
+        traffic_update(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f), pc->pos);
 
         // ---- physics (fixed substeps)
         if (!paused) acc += dt * (slowmo ? 0.2f : 1.0f);
@@ -1751,8 +1794,10 @@ int main(void) {
         // Things that glow, then additive light pools (no depth writes so they don't occlude).
         int lightsOn = ENV->lights > 0.01f;
         if (lightsOn) { post_set_emissive(0.6f + 2.2f * ENV->lights); DrawModel(cityGlow, (Vector3){0, 0, 0}, 1.0f, WHITE); }
-        if (!beamView) for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car_lights(&world.cars[i], lightsOn && i == 0);
+        if (!beamView) for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car_lights(&world.cars[i], lightsOn && (i == 0 || traffic_is_ai(i)));
         if (camMode && !beamView) { post_emissive_begin(0.6f + 1.4f * ENV->lights); draw_gauges(pc); post_emissive_end(); }
+        post_emissive_begin(3.5f); draw_signal_lamps(1); post_emissive_end();
+        post_emissive_begin(0.5f); draw_signal_lamps(0); post_emissive_end();
         if (lightsOn) {
             rlDrawRenderBatchActive();
             rlDisableDepthMask();

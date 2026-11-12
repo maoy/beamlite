@@ -686,7 +686,9 @@ static void wheel_forces(Car *c, float h) {
 
         V3 n = terrain_normal(org.x, org.z);
         float N = Fs * fmaxf(vdot(up, n), 0.0f);
-        V3 fs = vscale(up, Fs * 0.5f);
+        // The ground pushes back along its own normal; any sideways part of the strut force is taken by
+        // the suspension links, not the road. (Pushing along the body's up made a pitched car creep.)
+        V3 fs = vscale(n, N * 0.5f);
         add_force(m, fs); add_force(u, fs);
 
         // Tyre forces in the contact plane.

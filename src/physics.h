@@ -25,7 +25,7 @@ static inline V3 vrot(V3 v, V3 k, float a) {
 #define MAX_BEAMS 2048
 #define MAX_TRIS 512
 #define MAX_PANELS 12
-#define MAX_CARS 8
+#define MAX_CARS 14
 #define MAX_BOXES 320
 #define MAX_BLD 256
 #define MAX_TREES 1024
