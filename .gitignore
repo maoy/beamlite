@@ -1,0 +1,10 @@
+# Build outputs
+/beamlite
+/tp
+*.o
+
+# raylib is fetched and built by build.sh
+/third_party/
+
+# macOS
+.DS_Store
