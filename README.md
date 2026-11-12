@@ -1,7 +1,8 @@
 # BeamLite
 
 A small soft-body driving sandbox in the spirit of BeamNG.drive, written from scratch in C.
-You drive an angular stainless-steel electric pickup (a Cybertruck-style wedge).
+Two vehicles, picked with **V**: an angular stainless-steel electric pickup (a Cybertruck-style
+wedge) and the Sparrow, an original compact front-wheel-drive hatchback.
 Runs natively on macOS (Apple Silicon or Intel).
 
 ## Build & run (macOS)
@@ -27,6 +28,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | N | spawn a parked truck 20 m ahead (side-on, to T-bone) |
 | X | clear spawned trucks |
 | G | drop the tailgate |
+| V | choose vehicle (←/→, Enter) |
 | L | lighting: dusk / day |
 | O | weather: dry / wet / rain |
 | Q | recover (fresh car, upright, in place) |
@@ -43,6 +45,16 @@ Saplings and young trees snap and fall when you hit them; mature trunks stop you
 
 ## How it works
 
+- **Vehicles** are entries in a definition table (`VehicleDef` in `physics.h`). Each entry sets the
+  body's 18 stations (position, floor, sill, beltline and roof heights, roof width, wheel arches,
+  bulkheads, door seams, and which gaps are glass), plus widths, mass layout, structural zones and
+  stiffness, wheels and suspension, engine, brakes, drive split, rear steer and lights. The same
+  builder turns any entry into nodes, beams and skin.
+  - *Stainless pickup*: 5.68 m, 3.1 t, ~600 hp dual-motor AWD, rear steer, detachable tailgate,
+    0–100 km/h in 4.6 s.
+  - *Sparrow hatchback*: 3.95 m, 1.1 t, ~83 hp front-engine FWD, short hood, steep windshield,
+    long flat roof, near-vertical hatch, corner headlamps and tail lights, a softer and lighter
+    structure. 0–100 km/h in 9.6 s, 100–0 in 39 m.
 - **Body**: 18 cross-section rings along a 5.68 m body, 9 nodes each (floor centre, floor
   edges, sills, beltline crease, roof/sail edge), shaped by the signature profile: one straight
   line from the nose up to the roof apex, another from the apex down to the tail. The rings form a

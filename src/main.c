@@ -609,10 +609,12 @@ static Color brighten(Color c, float s) {
 }
 
 // Emissive strip along an edge: top L/R nodes q[0..1], fading toward q[2..3] by `t`.
-static void draw_lightbar(const Car *c, const int q[4], float t, float outSign, Color col) {
-    V3 a = c->n[q[0]].p, b = c->n[q[1]].p;
-    V3 al = vlerp(a, c->n[q[2]].p, t), bl = vlerp(b, c->n[q[3]].p, t);
-    V3 off = vscale(vnorm(vcross(vsub(b, a), vsub(al, a))), outSign * 0.008f);
+// A light: the stretch [u0, u1] of the edge q0-q1, reaching fraction t of the way toward edge q2-q3.
+static void draw_lightbar(const Car *c, const LightStrip *L, Color col) {
+    V3 e0 = c->n[L->q[0]].p, e1 = c->n[L->q[1]].p, f0 = c->n[L->q[2]].p, f1 = c->n[L->q[3]].p;
+    V3 a = vlerp(e0, e1, L->u0), b = vlerp(e0, e1, L->u1);
+    V3 al = vlerp(a, vlerp(f0, f1, L->u0), L->t), bl = vlerp(b, vlerp(f0, f1, L->u1), L->t);
+    V3 off = vscale(vnorm(vcross(vsub(e1, e0), vsub(al, a))), L->out * 0.008f);
     a = vadd(a, off); b = vadd(b, off); al = vadd(al, off); bl = vadd(bl, off);
     DrawTriangle3D(RV(a), RV(al), RV(bl), col);
     DrawTriangle3D(RV(a), RV(bl), RV(b), col);
@@ -686,15 +688,15 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
         V3 axis = vrot(c->right, c->up, W->steerAngle);
         float out = (i % 2 == 0) ? -1.0f : 1.0f;              // left wheels sit at -right
         V3 ctr = W->hub;
-        V3 a = vsub(ctr, vscale(axis, WHEEL_W * 0.5f)), b = vadd(ctr, vscale(axis, WHEEL_W * 0.5f));
-        DrawCylinderEx(RV(a), RV(b), WHEEL_R, WHEEL_R, 24, (Color){26, 26, 28, 255});
-        V3 face = vadd(ctr, vscale(axis, out * (WHEEL_W * 0.5f + 0.004f)));
-        DrawCylinderEx(RV(vsub(face, vscale(axis, out * 0.01f))), RV(face), WHEEL_R * 0.66f, WHEEL_R * 0.66f, 6, (Color){150, 152, 156, 255});
+        V3 a = vsub(ctr, vscale(axis, c->def->wheelW * 0.5f)), b = vadd(ctr, vscale(axis, c->def->wheelW * 0.5f));
+        DrawCylinderEx(RV(a), RV(b), c->def->wheelR, c->def->wheelR, 24, (Color){26, 26, 28, 255});
+        V3 face = vadd(ctr, vscale(axis, out * (c->def->wheelW * 0.5f + 0.004f)));
+        DrawCylinderEx(RV(vsub(face, vscale(axis, out * 0.01f))), RV(face), c->def->wheelR * 0.66f, c->def->wheelR * 0.66f, 6, (Color){150, 152, 156, 255});
         V3 fw = vcross(c->up, axis);
         for (int s = 0; s < 6; s++) {   // cover segments show rotation
             V3 dir = vrot(fw, axis, W->spin + s * 1.0472f);
             V3 f0 = vadd(face, vscale(axis, out * 0.004f));
-            DrawLine3D(RV(f0), RV(vadd(f0, vscale(dir, WHEEL_R * 0.66f))), (Color){70, 72, 76, 255});
+            DrawLine3D(RV(f0), RV(vadd(f0, vscale(dir, c->def->wheelR * 0.66f))), (Color){70, 72, 76, 255});
         }
     }
 }
@@ -702,12 +704,13 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
 // Light bars, drawn in the emissive pass so they bloom.
 static void draw_car_lights(const Car *c, int on) {
     float front = on ? 3.2f : 0.9f, rear = (on ? 2.2f : 1.4f) * (c->ctl.brake > 0.1f ? 2.0f : 1.0f);
-    post_emissive_begin(front);
-    draw_lightbar(c, c->lightF, 0.45f, 1.0f, (Color){235, 242, 255, 255});
-    post_emissive_end();
-    post_emissive_begin(rear);
-    draw_lightbar(c, c->lightR, 0.09f, -1.0f, (Color){255, 26, 20, 255});
-    post_emissive_end();
+    for (int i = 0; i < c->nlights; i++) {
+        const LightStrip *L = &c->lights[i];
+        if (L->rear && c->tailgate == TG_GONE && c->def->hasTailgate) continue;   // went with the tailgate
+        post_emissive_begin(L->rear ? rear : front);
+        draw_lightbar(c, L, L->rear ? (Color){255, 26, 20, 255} : (Color){235, 242, 255, 255});
+        post_emissive_end();
+    }
 }
 
 // Headlight spill on the road ahead (additive), following the terrain.
@@ -856,7 +859,7 @@ static void emit_spray(const World *w, float dt) {
             for (int j = 0; j < k; j++) {
                 Spray *s = &spray[sprayHead];
                 sprayHead = (sprayHead + 1) % MAX_SPRAY;
-                V3 back = vscale(c->fwd, -WHEEL_R * 0.9f);
+                V3 back = vscale(c->fwd, -c->def->wheelR * 0.9f);
                 s->p = vadd(vadd(W->cp, back), v3(0, 0.12f, 0));
                 s->v = vadd(vscale(c->vel, 0.55f + 0.2f * frand()),
                             v3((frand() - 0.5f) * 2.5f, 1.0f + frand() * 2.2f, (frand() - 0.5f) * 2.5f));
@@ -956,6 +959,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     txt(tr, sw - 22 - txtw(tr, 15), 22, 15, HUD_DIM);
 
     float px = 16, py = sh - 116, pw = 470, ph = 100;
+    txt(TextFormat("%s   [V] change", pc->def->name), px + 2, py - 22, 15, HUD_DIM);
     hud_panel(px, py, pw, ph);
     slash(px + 12, py + 16, 4, 26, HUD_ORANGE);
     txt("DAMAGE", px + 30, py + 14, 28, RAYWHITE);
@@ -965,7 +969,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     DrawRectangle((int)px + 30, (int)py + 56, (int)(230 * pc->damage / 100.0f), 8, dc);
     txt(TextFormat("TORN BEAMS  %d", pc->brokenBeams), px + 30, py + 72, 14, HUD_DIM);
     DrawLine((int)px + 290, (int)py + 14, (int)px + 290, (int)(py + ph - 14), HUD_LINE);
-    static const char *TG[] = {"LATCHED", "OPEN", "HANGING", "GONE"};
+    static const char *TG[] = {"LATCHED", "OPEN", "HANGING", "GONE", "N/A"};
     const char *lab[3] = {"GLASS", "TAILGATE", "TREES"};
     char v0[16], v2[16];
     snprintf(v0, sizeof v0, "%d/%d", pc->glassBrokenCount, pc->npanels);
@@ -990,7 +994,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     if (help) {
         const char *lines[] = {
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
-            "C  hood cam      B  beam view (stress)", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
+            "C  hood cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
             "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
             "", "Ramp ahead, crash wall behind you. Town up the", "cross road to the left, warehouses to the right,",
             "forest on the hills. Small trees snap; big ones don't."};
@@ -1000,14 +1004,77 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     }
 }
 
+// -------------------------------------------------------- vehicle picker ----
+
+static int pickerOpen, pickerSel;
+
+// Side silhouette straight from the body's station table, nose to the right.
+static void draw_profile(const VehicleDef *d, float cx, float cy, float scale, Color col) {
+    float clear = d->spawnH - 0.06f;                      // floor height above the ground at rest (approx.)
+    Vector2 pts[2 * NR + 1];
+    int n = 0;
+    for (int r = 0; r < NR; r++) pts[n++] = (Vector2){cx + d->st[r].x * scale, cy - (d->st[r].top + clear) * scale};
+    for (int r = NR - 1; r >= 0; r--) pts[n++] = (Vector2){cx + d->st[r].x * scale, cy - (fmaxf(d->st[r].floorY, d->st[r].rkY * 0.4f) + clear) * scale};
+    pts[n++] = pts[0];
+    for (int i = 0; i + 1 < n; i++) DrawLineEx(pts[i], pts[i + 1], 2.5f, col);
+    // Glass: the top line across glazed gaps.
+    for (int r = 0; r + 1 < NR; r++)
+        if (d->st[r].topPanel >= 0 || d->st[r].sidePanel >= 0) {
+            Vector2 a = {cx + d->st[r].x * scale, cy - (d->st[r].top + clear - 0.04f) * scale};
+            Vector2 b = {cx + d->st[r + 1].x * scale, cy - (d->st[r + 1].top + clear - 0.04f) * scale};
+            Vector2 a2 = {a.x, cy - (d->st[r].belt + clear) * scale}, b2 = {b.x, cy - (d->st[r + 1].belt + clear) * scale};
+            DrawTriangle(a, a2, b2, (Color){120, 170, 220, 90}); DrawTriangle(a, b2, b, (Color){120, 170, 220, 90});
+        }
+    for (int w = 0; w < 2; w++) {
+        float x = d->st[w ? d->axleR : d->axleF].x;
+        Vector2 c = {cx + x * scale, cy - d->wheelR * scale};
+        DrawCircleV(c, d->wheelR * scale, (Color){20, 22, 26, 255});
+        DrawCircleLinesV(c, d->wheelR * scale, col);
+        DrawCircleLinesV(c, d->wheelR * scale * 0.6f, (Color){col.r, col.g, col.b, 140});
+    }
+    DrawLineEx((Vector2){cx - 3.2f * scale, cy}, (Vector2){cx + 3.2f * scale, cy}, 1.0f, HUD_LINE);
+}
+
+static void draw_picker(void) {
+    float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+    DrawRectangle(0, 0, (int)sw, (int)sh, (Color){0, 0, 0, 120});
+    const char *title = "CHOOSE YOUR VEHICLE";
+    slash(sw * 0.5f - txtw(title, 30) * 0.5f - 34, sh * 0.5f - 238, 6, 30, HUD_ORANGE);
+    txt(title, sw * 0.5f - txtw(title, 30) * 0.5f, sh * 0.5f - 238, 30, RAYWHITE);
+    float cw = 420, ch = 380, gap = 30, x0 = sw * 0.5f - (VEH_COUNT * cw + (VEH_COUNT - 1) * gap) * 0.5f, y0 = sh * 0.5f - 180;
+    for (int i = 0; i < VEH_COUNT; i++) {
+        const VehicleDef *d = vehicle_def(i);
+        float x = x0 + i * (cw + gap);
+        int sel = i == pickerSel;
+        hud_panel(x, y0, cw, ch);
+        if (sel) { DrawRectangleLinesEx((Rectangle){x - 1, y0 - 1, cw + 2, ch + 2}, 3, HUD_ORANGE); }
+        float scale = fminf(64.0f, (cw - 60) / (d->st[0].x - d->st[NR - 1].x));
+        draw_profile(d, x + cw * 0.5f - 0.5f * (d->st[0].x + d->st[NR - 1].x) * scale, y0 + 150, scale, sel ? RAYWHITE : HUD_DIM);
+        txt(d->name, x + 22, y0 + 172, 26, sel ? RAYWHITE : HUD_DIM);
+        txt(d->blurb, x + 22, y0 + 204, 15, sel ? HUD_ORANGE : HUD_DIM);
+        char line[5][64];
+        snprintf(line[0], 64, "LENGTH       %.2f m", d->st[0].x - d->st[NR - 1].x);
+        snprintf(line[1], 64, "WHEELBASE    %.2f m", d->st[d->axleF].x - d->st[d->axleR].x);
+        snprintf(line[2], 64, "MASS         %.0f kg", d->mass);
+        snprintf(line[3], 64, "POWER        %.0f hp", d->enginePower / 745.7f);
+        snprintf(line[4], 64, "DRIVE        %s", d->driveFront >= 0.99f ? "FRONT" : d->driveFront <= 0.01f ? "REAR" : "ALL WHEELS");
+        for (int k = 0; k < 5; k++) txt(line[k], x + 22, y0 + 236 + k * 26, 17, sel ? RAYWHITE : HUD_DIM);
+    }
+    const char *hint = "LEFT / RIGHT  choose      ENTER  drive it      ESC  cancel";
+    txt(hint, sw * 0.5f - txtw(hint, 16) * 0.5f, y0 + ch + 24, 16, HUD_DIM);
+}
+
 // ---------------------------------------------------------------- main ----
 
 static const V3 PALETTE[] = {{0.71f, 0.72f, 0.74f},   // bare stainless for the player
                              {0.10f, 0.35f, 0.85f}, {0.95f, 0.75f, 0.10f}, {0.15f, 0.65f, 0.30f},
                              {0.92f, 0.92f, 0.92f}, {0.55f, 0.20f, 0.75f}, {0.95f, 0.45f, 0.10f}, {0.20f, 0.20f, 0.22f}};
 
+static int playerType = VEH_PICKUP;
+static V3 player_paint(void) { return vehicle_def(playerType)->paint; }
+
 static void spawn_player(World *w) {
-    car_build(&w->cars[0], v3(0, terrain_height(0, 0) + CAR_SPAWN_H, 0), 0, PALETTE[0]);
+    car_build_vehicle(&w->cars[0], playerType, v3(0, terrain_height(0, 0) + vehicle_def(playerType)->spawnH, 0), 0, player_paint());
 }
 
 static float wrap_pi(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a += 2 * PI; return a; }
@@ -1033,8 +1100,8 @@ int main(void) {
     }
     world.ncars = 3;
     spawn_player(&world);
-    car_build(&world.cars[1], v3(-2.2f, CAR_SPAWN_H, 26), PI / 2, PALETTE[1]);
-    car_build(&world.cars[2], v3(2.2f, CAR_SPAWN_H, 30), -PI / 2, PALETTE[2]);
+    car_build_vehicle(&world.cars[1], VEH_HATCH, v3(-2.2f, vehicle_def(VEH_HATCH)->spawnH, 26), PI / 2, PALETTE[1]);
+    car_build_vehicle(&world.cars[2], VEH_PICKUP, v3(2.2f, CAR_SPAWN_H, 30), -PI / 2, PALETTE[2]);
     for (int i = 1; i < world.ncars; i++) world.cars[i].ctl = (Controls){0, 0.6f, 0, 1};
     int nextSlot = 3;
 
@@ -1058,7 +1125,7 @@ int main(void) {
         if (IsKeyPressed(KEY_Q)) {       // recover: upright where you are, keep heading, fresh car
             float hdg = atan2f(pc->fwd.z, pc->fwd.x);
             V3 p = pc->pos;
-            car_build(pc, v3(p.x, terrain_height(p.x, p.z) + CAR_SPAWN_H + 0.2f, p.z), -hdg, PALETTE[0]);
+            car_build_vehicle(pc, playerType, v3(p.x, terrain_height(p.x, p.z) + vehicle_def(playerType)->spawnH + 0.2f, p.z), -hdg, player_paint());
         }
         if (IsKeyPressed(KEY_N)) {       // drop a parked truck ahead, side-on (unless that's inside a building)
             float hdg = atan2f(pc->fwd.z, pc->fwd.x);
@@ -1067,7 +1134,8 @@ int main(void) {
             if (!world_point_solid(&world, vadd(p, v3(0, 1.0f, 0)))) {
                 int slot = world.ncars < MAX_CARS ? world.ncars++ : nextSlot;
                 if (slot == nextSlot) nextSlot = nextSlot + 1 >= MAX_CARS ? 1 : nextSlot + 1;
-                car_build(&world.cars[slot], v3(p.x, p.y + CAR_SPAWN_H + 0.1f, p.z), -hdg + PI / 2, PALETTE[slot % 8]);
+                int ty = slot % VEH_COUNT;
+                car_build_vehicle(&world.cars[slot], ty, v3(p.x, p.y + vehicle_def(ty)->spawnH + 0.1f, p.z), -hdg + PI / 2, PALETTE[slot % 8]);
                 world.cars[slot].ctl = (Controls){0, 0.6f, 0, 1};
             }
         }
@@ -1080,6 +1148,18 @@ int main(void) {
         if (IsKeyPressed(KEY_K)) { skidCount = 0; skidHead = 0; }
         if (IsKeyPressed(KEY_G)) car_pop_tailgate(pc);
         if (IsKeyPressed(KEY_O)) weather = (weather + 1) % 3;
+        if (IsKeyPressed(KEY_V)) { pickerOpen = !pickerOpen; pickerSel = playerType; }
+        else if (pickerOpen) {
+            if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) pickerSel = (pickerSel + VEH_COUNT - 1) % VEH_COUNT;
+            if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) pickerSel = (pickerSel + 1) % VEH_COUNT;
+            if (IsKeyPressed(KEY_ESCAPE)) pickerOpen = 0;
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {      // swap in place, keeping the heading
+                playerType = pickerSel; pickerOpen = 0;
+                float hdg = atan2f(pc->fwd.z, pc->fwd.x);
+                V3 p = pc->pos;
+                car_build_vehicle(pc, playerType, v3(p.x, terrain_height(p.x, p.z) + vehicle_def(playerType)->spawnH + 0.2f, p.z), -hdg, player_paint());
+            }
+        }
         if (IsKeyPressed(KEY_L)) { set_env((envIdx + 1) % (int)(sizeof ENVS / sizeof ENVS[0])); build_world_meshes(&world); }
 
         int up = IsKeyDown(KEY_W) || IsKeyDown(KEY_UP);
@@ -1090,6 +1170,7 @@ int main(void) {
         Controls ctl = {0, 0, (float)(left - right), IsKeyDown(KEY_SPACE)};
         if (up) { if (vF < -1.0f) ctl.brake = 1; else ctl.throttle = 1; }
         if (down) { if (vF > 1.0f) ctl.brake = 1; else ctl.throttle = -1; }
+        if (pickerOpen) ctl = (Controls){0, 0, 0, 1};
         pc->ctl = ctl;
 
         // ---- physics (fixed substeps)
@@ -1149,7 +1230,7 @@ int main(void) {
             cam.target = RV(tgt);
             cam.up = (Vector3){0, 1, 0};
         } else {
-            V3 eye = vadd(vadd(pc->pos, vscale(pc->up, 0.72f)), vscale(pc->fwd, 0.1f));
+            V3 eye = vadd(vadd(pc->pos, vscale(pc->up, pc->def->eyeH)), vscale(pc->fwd, 0.1f));
             cam.position = RV(eye);
             cam.target = RV(vadd(eye, vscale(pc->fwd, 10.0f)));
             cam.up = RV(pc->up);
@@ -1205,7 +1286,8 @@ int main(void) {
         // ---- grade it onto the screen, then the HUD
         BeginDrawing();
         post_present(ENV, (float)GetTime(), weather_wet(), weather_rain());
-        draw_hud(pc, &world, vF, ctl, slowmo, paused, help);
+        draw_hud(pc, &world, vF, pickerOpen ? (Controls){0} : ctl, slowmo, paused, help);
+        if (pickerOpen) draw_picker();
         EndDrawing();
     }
 

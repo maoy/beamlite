@@ -94,7 +94,7 @@ static const char *SSR_FS = GLSL SKY_GLSL
     "  if (Ng.y < 0.0) Ng = -Ng;\n"
     "  if (wet <= 0.0 || d >= 0.999999 || Ng.y < 0.85 || texture(texture0, uv).a < 0.5) { finalColor = vec4(0.0); return; }\n"
     "  float surf = surface(P.xz);\n"
-    "  float pud = smoothstep(0.55, 0.64, fbm(P.xz * 0.11 + vec2(3.1, 7.7))) * step(0.5, surf);\n"
+    "  float pud = smoothstep(0.60, 0.645, fbm(P.xz * 0.13 + vec2(3.1, 7.7))) * step(0.5, surf);\n"
     "  float w = wet * mix(surf, 1.0, pud);\n"
     "  vec3 N = vec3(0.0, 1.0, 0.0);\n"
     "  float rip = 0.010 + rain * 0.022 * (0.5 + pud);\n"   // fine rain ripples: roughen, don't warp
@@ -124,7 +124,7 @@ static const char *SSR_FS = GLSL SKY_GLSL
     "      }\n"
     "      vec4 cb = VP * vec4(O + R * b, 1.0); vec2 sb = cb.xy / cb.w * 0.5 + 0.5;\n"
     "      vec2 e = smoothstep(0.0, 0.07, sb) * (1.0 - smoothstep(0.93, 1.0, sb));\n"
-    "      float fade = e.x * e.y * (1.0 - smoothstep(70.0, 140.0, b));\n"
+    "      float fade = e.x * e.y * (1.0 - smoothstep(70.0, 140.0, b)) * (1.0 - smoothstep(0.15, 0.6, dot(R, -V)));\n"
     "      col = mix(sky(R, 0.0), texture(texture0, sb).rgb, fade);\n"
     "      break;\n"
     "    }\n"
@@ -399,8 +399,7 @@ void post_present(const Env *e, float time, float wet, float rain) {
         EndTextureMode();
         rlSetBlendFactors(1, 0, 0x8006);
         rlSetBlendMode(BLEND_CUSTOM);
-        blur_pass(refl[0], refl[1], 0.8f, 2.4f);       // wet asphalt stretches reflections vertically
-        blur_pass(refl[0], refl[1], 0.6f, 1.6f);
+        blur_pass(refl[0], refl[1], 0.5f, 1.8f);       // wet asphalt stretches reflections vertically
         rlSetBlendMode(BLEND_ALPHA);
 
         BeginTextureMode(hdr2);

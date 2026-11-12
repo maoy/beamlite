@@ -48,7 +48,7 @@ static void snapshot(const char *path, Car *c) {
 
 static void report(const char *tag) {
     Car *c = &W.cars[0];
-    static const char *TG[] = {"latched", "open", "hanging", "gone"};
+    static const char *TG[] = {"latched", "open", "hanging", "gone", "none"};
     printf("%-26s pos=(%7.1f %5.2f %6.1f) v=%6.1f km/h  up.y=%.2f  dmg=%5.1f%%  broken=%d  glass=%d  tg=%s  expl=%d\n",
            tag, c->pos.x, c->pos.y, c->pos.z, vdot(c->vel, c->fwd) * 3.6f, c->up.y, c->damage, c->brokenBeams,
            c->glassBrokenCount, TG[c->tailgate], c->exploded);
@@ -92,7 +92,7 @@ int main(void) {
     run(1, idle); car_pop_tailgate(&W.cars[0]); run(3, idle); report("tailgate dropped");
     {
         Car *c = &W.cars[0];
-        V3 tl = c->n[c->lightR[0]].p, bl = c->n[c->lightR[2]].p;
+        V3 tl = c->n[c->tgNode[0]].p, bl = c->n[c->tgNode[2]].p;
         printf("  tailgate top edge %.2f m behind / %.2f m above its hinge\n", -vdot(vsub(tl, bl), c->fwd), vdot(vsub(tl, bl), c->up));
     }
 
@@ -139,6 +139,43 @@ int main(void) {
         run(3, idle);
         report(big ? "  after big tree" : "  after sapling");
         printf("  tree r=%.2f m broken=%d tilt=%.0f deg\n", W.tree[ti].r, W.tree[ti].broken, W.tree[ti].tilt * 57.3f);
+    }
+    {   // The Sparrow hatchback: light, front-wheel drive, softer structure.
+        const VehicleDef *hd = vehicle_def(VEH_HATCH);
+        world_init(&W); W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(0, hd->spawnH, -60), 0, v3(1, 0, 0));
+        printf("hatch nodes / beams / tris: %d / %d / %d\n", W.cars[0].nn, W.cars[0].nb, W.cars[0].nt);
+        run(3, idle); report("hatch settle 3s");
+        float lo = 1e9f; for (int i = 0; i < W.cars[0].nn; i++) lo = fminf(lo, W.cars[0].n[i].p.y);
+        printf("  ride height (lowest node above ground) = %.3f m\n", lo);
+        world_init(&W); W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(60, hd->spawnH, -60), 3.14159f, v3(1, 0, 0));
+        run(1, idle);
+        float tt = 0;
+        for (int i = 0; i < 300; i++) { run(0.1f, gas); tt += 0.1f; if (vdot(W.cars[0].vel, W.cars[0].fwd) * 3.6f >= 100) break; }
+        printf("  hatch 0-100 km/h: %.1f s\n", tt);
+        // Braking from 100 km/h on the flat (the acceleration run ends up in the hills).
+        world_init(&W); W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(60, hd->spawnH, -60), 3.14159f, v3(1, 0, 0));
+        run(1, idle);
+        for (int i = 0; i < W.cars[0].nn; i++) W.cars[0].n[i].v = vadd(W.cars[0].n[i].v, vscale(W.cars[0].fwd, 100 / 3.6f));
+        car_update_frame(&W.cars[0]);
+        float x0 = W.cars[0].pos.x;
+        while (vdot(W.cars[0].vel, W.cars[0].fwd) > 0.3f) run(0.05f, brake);
+        printf("  hatch 100-0 braking distance: %.1f m\n", fabsf(W.cars[0].pos.x - x0));
+        report("  hatch stopped");
+        world_init(&W); W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(0, hd->spawnH, -60), 3.14159f, v3(1, 0, 0));
+        run(1, idle); run(4.0f, gas); report("hatch before turn");
+        for (int i = 0; i < 3; i++) { run(1.0f, (Controls){0.4f, 0, 1.0f, 0}); report("  hatch turning"); }
+        world_init(&W); W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(-30, hd->spawnH, 0), 3.14159f, v3(1, 0, 0));
+        run(1, idle);
+        while (vdot(W.cars[0].vel, W.cars[0].fwd) * 3.6f < 50 && W.cars[0].pos.x > -64) run(0.05f, gas);
+        report("hatch pre-impact");
+        while (W.cars[0].pos.x > -68.0f && W.cars[0].pos.x < 0) run(0.05f, (Controls){0.3f, 0, 0, 0});
+        run(2.0f, idle); report("hatch after wall @50");
+        snapshot("/tmp/hatch_wall.ppm", &W.cars[0]);
     }
     {   // The generated map: buildings and trees exist and the test routes above are clear of them.
         world_init(&W);

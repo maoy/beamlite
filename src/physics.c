@@ -21,27 +21,13 @@
 #include <string.h>
 
 #define GRAV 9.81f
-#define CAR_MASS 3100.0f          // kg, whole vehicle
-#define TG_MASS 45.0f             // kg, tailgate
-
-#define SUSP_REST 0.12f           // strut length at full extension (mount -> hub)
-#define SUSP_TRAVEL 0.24f         // compression before hitting the bump stop
-#define KS 70000.0f               // spring rate per corner (N/m)  ~1.5 Hz ride
-#define CS 6500.0f                // damper rate per corner (N s/m)
-#define KBUMP 600000.0f
 #define MU_TIRE 1.15f
 #define LAT_STIFF 3.0f            // lateral force per unit load per m/s of slip
-#define BRAKE_MAX 8000.0f         // per wheel (N)
-#define ENGINE_FMAX 20000.0f      // total, at the contact patches
-#define ENGINE_POWER 440000.0f    // W (~600 hp dual motor)
-#define REAR_STEER 0.30f          // rear lock as a fraction of front lock (~10 deg)
 #define MU_GROUND 0.55f           // body scraping on the ground
 #define NODE_R 0.28f              // node collision radius (car vs car)
 #define KC 600000.0f
 #define CC 5000.0f
-#define CD_A 0.62f                // 0.5 * rho * Cd * A
 #define GLASS_STRAIN 0.03f        // frame distortion that shatters a glass panel
-#define TRACK_HALF 0.86f          // half track width (contact patch lateral position)
 
 static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
@@ -82,68 +68,124 @@ V3 terrain_normal(float x, float z) {
 // -------------------------------------------------------------- truck build --
 //
 // Local frame: +x forward, +y up (0 = underside of the floor), +z right.
-// Overall 5.68 m long, 2.02 m wide, 1.79 m tall at the roof apex; wheelbase 3.81 m.
 
-#define NR 18                     // rings along the body
 #define NP 9                      // nodes per ring, in perimeter order:
 enum { P_C, P_FL, P_RKL, P_BLL, P_TPL, P_TPR, P_BLR, P_RKR, P_FR };
-#define ARCH_Y 0.54f              // sill height over the wheel arches
-#define X_NOSE 2.84f
-#define X_APEX 0.05f
-#define X_TAIL -2.84f
 
-typedef struct { float x, floorY, rkY; unsigned char arch, bulk; } Station;
-static const Station ST[NR] = {
-    { 2.84f, 0.14f, 0.24f, 0, 1},  //  0 nose (raised for approach angle)
-    { 2.62f, 0.06f, 0.16f, 0, 0},  //  1
-    { 2.40f, 0.00f, 0.14f, 0, 0},  //  2 front arch, lower corner
-    { 2.22f, 0.00f, ARCH_Y, 1, 0}, //  3 front arch, top
-    { 1.84f, 0.00f, ARCH_Y, 1, 1}, //  4 front axle
-    { 1.46f, 0.00f, ARCH_Y, 1, 0}, //  5
-    { 1.28f, 0.00f, 0.14f, 0, 0},  //  6
-    { 0.85f, 0.00f, 0.14f, 0, 1},  //  7 dash / A-pillar base
-    { 0.40f, 0.00f, 0.14f, 0, 0},  //  8
-    { 0.05f, 0.00f, 0.14f, 0, 0},  //  9 roof apex
-    {-0.45f, 0.00f, 0.14f, 0, 1},  // 10 B-pillar
-    {-0.95f, 0.00f, 0.14f, 0, 1},  // 11 cabin rear bulkhead / bed front
-    {-1.38f, 0.00f, 0.14f, 0, 0},  // 12 rear arch, lower corner
-    {-1.60f, 0.00f, ARCH_Y, 1, 0}, // 13
-    {-1.97f, 0.00f, ARCH_Y, 1, 1}, // 14 rear axle
-    {-2.34f, 0.00f, ARCH_Y, 1, 0}, // 15
-    {-2.56f, 0.00f, 0.14f, 0, 0},  // 16
-    {-2.84f, 0.10f, 0.20f, 0, 1},  // 17 tail
-};
+static VehicleDef DEFS[VEH_COUNT];
+static int defsReady;
 
-// The signature profile: one straight line from the nose up to the roof apex,
-// another straight line from the apex down to the tail.
-static float prof_top(float x) {
-    if (x >= X_APEX) return lerpf(1.32f, 0.58f, (x - X_APEX) / (X_NOSE - X_APEX));
-    return lerpf(1.32f, 0.78f, (X_APEX - x) / (X_APEX - X_TAIL));
+// ---- Stainless pickup: 5.68 m long, 2.02 m wide, 1.79 m tall at the roof apex, 3.81 m wheelbase.
+// The signature profile: one straight line from the nose up to the roof apex, another down to the tail.
+#define PU_ARCH 0.54f
+static float pu_top(float x) {
+    if (x >= 0.05f) return lerpf(1.32f, 0.58f, (x - 0.05f) / (2.84f - 0.05f));
+    return lerpf(1.32f, 0.78f, (0.05f - x) / (0.05f + 2.84f));
 }
-// Beltline crease: level along the flank, dropping under the hood line at the nose.
-static float prof_belt(float x) { return fminf(0.70f, prof_top(x) - 0.08f); }
-// Half-width of the top edge: full-width hood, greenhouse tumblehome, wide sails over the bed.
-static float prof_tw(float x) {
+static float pu_tw(float x) {
     if (x >= 1.28f) return 0.95f;
-    if (x >= X_APEX) return lerpf(0.74f, 0.95f, (x - X_APEX) / (1.28f - X_APEX));
-    if (x >= -0.95f) return lerpf(0.74f, 0.80f, (X_APEX - x) / 1.0f);
+    if (x >= 0.05f) return lerpf(0.74f, 0.95f, (x - 0.05f) / (1.28f - 0.05f));
+    if (x >= -0.95f) return lerpf(0.74f, 0.80f, (0.05f - x) / 1.0f);
     if (x >= -1.60f) return lerpf(0.80f, 0.97f, (-0.95f - x) / 0.65f);
     return 0.97f;
+}
+
+static void define_pickup(VehicleDef *d) {
+    static const float X[NR] = {2.84f, 2.62f, 2.40f, 2.22f, 1.84f, 1.46f, 1.28f, 0.85f, 0.40f, 0.05f, -0.45f, -0.95f, -1.38f, -1.60f, -1.97f, -2.34f, -2.56f, -2.84f};
+    static const float FY[NR] = {0.14f, 0.06f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.10f};
+    static const float RK[NR] = {0.24f, 0.16f, 0.14f, PU_ARCH, PU_ARCH, PU_ARCH, 0.14f, 0.14f, 0.14f, 0.14f, 0.14f, 0.14f, 0.14f, PU_ARCH, PU_ARCH, PU_ARCH, 0.14f, 0.20f};
+    static const unsigned char BULK[NR] = {1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1};
+    for (int r = 0; r < NR; r++) {
+        Station *s = &d->st[r];
+        float x = X[r], top = pu_top(x);
+        *s = (Station){x, FY[r], RK[r], fminf(0.70f, top - 0.08f), top, pu_tw(x), 1.0f, RK[r] > 0.3f, BULK[r], 0, -1, -1};
+        s->seam = (r == 7 || r == 10 || r == 11);
+        if (r == 7 || r == 8) { s->topPanel = 0; s->sidePanel = 3; }   // windshield, front side glass
+        else if (r == 9) { s->topPanel = 1; s->sidePanel = 5; }        // glass roof, rear side glass
+        else if (r == 10) s->topPanel = 2;                              // rear glass
+        else if (r >= 11) s->topPanel = -2;                             // tonneau over the bed
+    }
+    d->name = "STAINLESS PICKUP";
+    d->blurb = "3.1 t  |  dual-motor AWD  |  rear steer";
+    d->floorHalf = 0.62f; d->sillHalf = 0.97f; d->beltHalf = 1.01f;
+    d->axleF = 4; d->axleR = 14; d->doorR0 = 7; d->doorR1 = 10; d->dashRing = 7; d->bRing = 10;
+    d->mass = 3100.0f;
+    d->batW = 3.0f; d->batX0 = -1.00f; d->batX1 = 1.30f;      // structural battery pack
+    d->engW = 0.0f; d->engX0 = d->engX1 = 0;
+    d->crumpleF = 2.05f; d->crumpleR = -2.40f; d->cabinX0 = -1.00f; d->cabinX1 = 0.95f;
+    d->kScale = 1.0f; d->yScale = 1.0f;
+    d->wheelR = 0.44f; d->wheelW = 0.30f; d->trackHalf = 0.86f;
+    d->suspRest = 0.12f; d->suspTravel = 0.24f; d->ks = 70000.0f; d->cs = 6500.0f; d->kbump = 600000.0f;
+    d->brakeMax = 8000.0f; d->engineF = 20000.0f; d->enginePower = 440000.0f; d->reverseF = 9000.0f; d->driveFront = 0.45f;
+    d->rearSteer = 0.30f; d->maxLock = 0.58f; d->cdA = 0.62f;
+    d->spawnH = CAR_SPAWN_H; d->eyeH = 0.72f;
+    d->npanels = 7; d->hasTailgate = 1; d->lightStyle = 0;
+    d->paint = v3(0.71f, 0.72f, 0.74f);
+}
+
+// ---- Sparrow: an original compact five-door hatchback. 3.96 m long, 1.70 m wide, 1.52 m tall,
+// 2.45 m wheelbase, ~1.1 t, front-engined and front-wheel drive. Short hood, steep windshield,
+// long flat roof, near-vertical hatch.
+static void define_hatch(VehicleDef *d) {
+    // x, floor, sill, belt, top, roof-edge half-width, width scale, arch, bulkhead, seam, top glass, side glass
+    static const Station S[NR] = {
+        { 1.97f, 0.16f, 0.24f, 0.44f, 0.50f, 0.66f, 0.90f, 0, 1, 0, -1, -1},   //  0 nose
+        { 1.82f, 0.06f, 0.14f, 0.54f, 0.60f, 0.74f, 0.96f, 0, 0, 0, -1, -1},   //  1
+        { 1.58f, 0.00f, 0.12f, 0.60f, 0.66f, 0.76f, 1.00f, 0, 0, 0, -1, -1},   //  2 front arch, lower corner
+        { 1.44f, 0.00f, 0.50f, 0.62f, 0.69f, 0.77f, 1.00f, 1, 0, 0, -1, -1},   //  3
+        { 1.14f, 0.00f, 0.50f, 0.66f, 0.72f, 0.77f, 1.00f, 1, 1, 0, -1, -1},   //  4 front axle
+        { 0.86f, 0.00f, 0.50f, 0.68f, 0.75f, 0.76f, 1.00f, 1, 0, 0, -1, -1},   //  5
+        { 0.72f, 0.00f, 0.12f, 0.70f, 0.78f, 0.74f, 1.00f, 0, 0, 0, -1, -1},   //  6 cowl
+        { 0.52f, 0.00f, 0.12f, 0.72f, 0.86f, 0.70f, 1.00f, 0, 1, 1,  0,  2},   //  7 A-pillar base / dash
+        { 0.20f, 0.00f, 0.12f, 0.74f, 1.12f, 0.64f, 1.00f, 0, 0, 0,  0,  2},   //  8
+        {-0.10f, 0.00f, 0.12f, 0.76f, 1.32f, 0.60f, 1.00f, 0, 0, 0, -1,  2},   //  9 roof front
+        {-0.45f, 0.00f, 0.12f, 0.77f, 1.35f, 0.60f, 1.00f, 0, 1, 1, -1,  4},   // 10 B-pillar
+        {-0.80f, 0.00f, 0.12f, 0.79f, 1.35f, 0.60f, 1.00f, 0, 0, 0, -1,  4},   // 11
+        {-0.98f, 0.00f, 0.12f, 0.80f, 1.34f, 0.60f, 1.00f, 0, 0, 1, -1,  6},   // 12 rear door shut / arch corner
+        {-1.12f, 0.00f, 0.50f, 0.81f, 1.33f, 0.60f, 1.00f, 1, 0, 0, -1,  6},   // 13
+        {-1.31f, 0.00f, 0.50f, 0.82f, 1.31f, 0.60f, 1.00f, 1, 1, 0, -1,  6},   // 14 rear axle
+        {-1.50f, 0.00f, 0.50f, 0.82f, 1.27f, 0.59f, 1.00f, 1, 0, 0,  1, -1},   // 15 roof end; rear glass below
+        {-1.66f, 0.00f, 0.14f, 0.80f, 1.10f, 0.62f, 0.98f, 0, 0, 0, -1, -1},   // 16
+        {-1.98f, 0.14f, 0.22f, 0.74f, 0.86f, 0.66f, 0.94f, 0, 1, 0, -1, -1},   // 17 tail
+    };
+    for (int r = 0; r < NR; r++) d->st[r] = S[r];
+    d->name = "SPARROW HATCHBACK";
+    d->blurb = "1.1 t  |  front-engine FWD  |  light and nimble";
+    d->floorHalf = 0.52f; d->sillHalf = 0.81f; d->beltHalf = 0.85f;
+    d->axleF = 4; d->axleR = 14; d->doorR0 = 7; d->doorR1 = 11; d->dashRing = 7; d->bRing = 10;
+    d->mass = 1100.0f;
+    d->batW = 0.8f; d->batX0 = -1.20f; d->batX1 = -0.50f;     // fuel tank under the rear seat
+    d->engW = 2.2f; d->engX0 = 0.80f; d->engX1 = 2.00f;       // engine and gearbox up front
+    d->crumpleF = 1.45f; d->crumpleR = -1.55f; d->cabinX0 = -1.00f; d->cabinX1 = 0.75f;
+    d->kScale = 0.42f; d->yScale = 0.85f;
+    d->wheelR = 0.30f; d->wheelW = 0.19f; d->trackHalf = 0.73f;
+    d->suspRest = -0.046f; d->suspTravel = 0.17f; d->ks = 26000.0f; d->cs = 2200.0f; d->kbump = 250000.0f;
+    d->brakeMax = 3300.0f; d->engineF = 5600.0f; d->enginePower = 62000.0f; d->reverseF = 3000.0f; d->driveFront = 1.0f;
+    d->rearSteer = 0.0f; d->maxLock = 0.62f; d->cdA = 0.42f;
+    d->spawnH = 0.24f; d->eyeH = 0.62f;
+    d->npanels = 8; d->hasTailgate = 0; d->lightStyle = 1;
+    d->paint = v3(0.72f, 0.12f, 0.10f);
+}
+
+const VehicleDef *vehicle_def(int type) {
+    if (!defsReady) { define_pickup(&DEFS[VEH_PICKUP]); define_hatch(&DEFS[VEH_HATCH]); defsReady = 1; }
+    return &DEFS[type < 0 || type >= VEH_COUNT ? 0 : type];
 }
 
 static int is_floor(int p) { return p == P_C || p == P_FL || p == P_FR; }
 static int is_door(int p) { return p == P_RKL || p == P_BLL || p == P_RKR || p == P_BLR; }
 
-// Structural zones, by position along the body.
-static void material(float x, int floorBeam, float *K, float *Y) {
-    int crumple = x > 2.05f || x < -2.40f;
-    int cabin = x < 0.95f && x > -1.00f;
+// Structural zones, by position along the body. kind: 0 shell, 1 floor/frame, 2 door skin.
+static void material(const VehicleDef *d, float x, int kind, float *K, float *Y) {
+    int crumple = x > d->crumpleF || x < d->crumpleR;
+    int cabin = x < d->cabinX1 && x > d->cabinX0;
     // Yield force of a beam is ~0.7 * K * Y, independent of its length.
-    if (floorBeam == 2) { *K = 300000.0f; *Y = 0.020f; }                                       // door skins
-    else if (floorBeam) { *K = crumple ? 520000.0f : 900000.0f; *Y = crumple ? 0.030f : 0.050f; }   // frame / battery floor
-    else if (crumple) { *K = 300000.0f; *Y = 0.025f; }                                          // crush cans, bumpers
-    else if (cabin) { *K = 650000.0f; *Y = 0.045f; }                                            // stainless safety cell
+    if (kind == 2) { *K = 300000.0f; *Y = 0.020f; }                                            // door skins
+    else if (kind) { *K = crumple ? 520000.0f : 900000.0f; *Y = crumple ? 0.030f : 0.050f; }   // frame / floor
+    else if (crumple) { *K = 300000.0f; *Y = 0.025f; }                                          // crush zones, bumpers
+    else if (cabin) { *K = 650000.0f; *Y = 0.045f; }                                            // safety cell
     else { *K = 420000.0f; *Y = 0.035f; }                                                       // fenders, bed sides
+    *K *= d->kScale; *Y *= d->yScale;
 }
 
 // Builder scratch (single-threaded).
@@ -197,30 +239,46 @@ static void add_quad(Car *c, int a, int b, int cc, int d, int kind, int panel, i
     add_tri(c, a, cc, d, kind, panel, ((e4 >> 2) & 1) << 1 | ((e4 >> 3) & 1) << 2, ref);
 }
 
-void car_build(Car *c, V3 pos, float yaw, V3 color) {
+static void add_light(Car *c, int q0, int q1, int q2, int q3, float t, float u0, float u1, float out, int rear) {
+    if (c->nlights >= 4) return;
+    c->lights[c->nlights++] = (LightStrip){{q0, q1, q2, q3}, t, u0, u1, out, (unsigned char)rear};
+}
+
+void car_build(Car *c, V3 pos, float yaw, V3 color) { car_build_vehicle(c, VEH_PICKUP, pos, yaw, color); }
+
+void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
+    const VehicleDef *D = vehicle_def(type);
+    const Station *ST = D->st;
     memset(c, 0, sizeof *c);
     memset(ADJ, 0, sizeof ADJ);
+    c->def = D; c->type = type;
     c->color = color;
     c->active = 1;
+    for (int i = 0; i < 6; i++) c->tgLatch[i] = -1;
+    for (int i = 0; i < 3; i++) c->tgHingeL[i] = c->tgHingeR[i] = -1;
+    c->tgStrap[0] = c->tgStrap[1] = -1;
+    const float TG_MASS = D->hasTailgate ? 45.0f : 0.0f;
 
-    // ---- nodes, with mass concentrated low: battery pack in the floor, drive units at the axles
+    // ---- nodes, with mass concentrated low: battery/tank and engine on the floor, drive units at the axles
     float wt[NR][NP], wsum = 0;
     for (int r = 0; r < NR; r++)
     for (int p = 0; p < NP; p++) {
         float w = is_floor(p) ? 1.6f : ((p == P_TPL || p == P_TPR) ? 1.0f : 1.2f);
-        if (p == P_C && ST[r].x < 1.30f && ST[r].x > -1.00f) w += 3.0f;
-        if ((p == P_FL || p == P_FR) && (r == 4 || r == 14)) w += 1.0f;
+        float x = ST[r].x;
+        if (p == P_C && x < D->batX1 && x > D->batX0) w += D->batW;
+        if (is_floor(p) && x < D->engX1 && x > D->engX0) w += D->engW;
+        if ((p == P_FL || p == P_FR) && (r == D->axleF || r == D->axleR)) w += 1.0f;
         wt[r][p] = w; wsum += w;
     }
-    float unit = (CAR_MASS - TG_MASS) / wsum;
+    float unit = (D->mass - TG_MASS) / wsum;
 
     int R[NR][NP];
     for (int r = 0; r < NR; r++) {
-        float x = ST[r].x, fy = ST[r].floorY, rk = ST[r].rkY;
-        float top = prof_top(x), belt = prof_belt(x), tw = prof_tw(x);
+        const Station *s = &ST[r];
+        float x = s->x, fy = s->floorY, rk = s->rkY, sw = D->sillHalf * s->ws, bw = D->beltHalf * s->ws, fw = D->floorHalf;
         V3 l[NP] = {
-            {x, fy, 0}, {x, fy, -0.62f}, {x, rk, -0.97f}, {x, belt, -1.01f}, {x, top, -tw},
-            {x, top, tw}, {x, belt, 1.01f}, {x, rk, 0.97f}, {x, fy, 0.62f},
+            {x, fy, 0}, {x, fy, -fw}, {x, rk, -sw}, {x, s->belt, -bw}, {x, s->top, -s->tw},
+            {x, s->top, s->tw}, {x, s->belt, bw}, {x, rk, sw}, {x, fy, fw},
         };
         for (int p = 0; p < NP; p++) R[r][p] = add_node(c, l[p], wt[r][p] * unit);
     }
@@ -232,10 +290,10 @@ void car_build(Car *c, V3 pos, float yaw, V3 color) {
     for (int b = a + 1; b < NP; b++) {
         int perim = (b - a == 1) || (a == 0 && b == NP - 1);
         float K, Y;
-        material(ST[r].x, is_floor(a) && is_floor(b), &K, &Y);
+        material(D, ST[r].x, is_floor(a) && is_floor(b), &K, &Y);
         // Cross-bracing: full bulkheads at the ends, axles and cabin rear; the dash and B-pillar
         // rings are open across the cabin (people sit there), so their webs are lighter.
-        if (!perim) K *= !ST[r].bulk ? 0.35f : (r == 7 || r == 10) ? 0.25f : 1.0f;
+        if (!perim) K *= !ST[r].bulk ? 0.35f : (r == D->dashRing || r == D->bRing) ? 0.25f : 1.0f;
         add_beam(c, R[r][a], R[r][b], K, Y, 0, BEAM_NORMAL);
     }
     for (int r = 0; r + 1 < NR; r++) {                // shell between rings
@@ -243,10 +301,10 @@ void car_build(Car *c, V3 pos, float yaw, V3 color) {
         for (int p = 0; p < NP; p++) {
             int q = (p + 1) % NP;
             float K, Y;
-            int cab = r >= 7 && r <= 10, door = cab && is_door(p) && is_door(q);
-            material(xm, cab && is_door(p) ? 2 : is_floor(p), &K, &Y);
+            int cab = r >= D->doorR0 && r <= D->doorR1, door = cab && is_door(p) && is_door(q);
+            material(D, xm, cab && is_door(p) ? 2 : is_floor(p), &K, &Y);
             add_beam(c, R[r][p], R[r + 1][p], K, Y, 0, BEAM_NORMAL);             // longitudinal
-            material(xm, door ? 2 : is_floor(p) && is_floor(q), &K, &Y);
+            material(D, xm, door ? 2 : is_floor(p) && is_floor(q), &K, &Y);
             add_beam(c, R[r][p], R[r + 1][q], 0.8f * K, Y, 0, BEAM_NORMAL);      // shear panel
             add_beam(c, R[r][q], R[r + 1][p], 0.8f * K, Y, 0, BEAM_NORMAL);
         }
@@ -256,7 +314,7 @@ void car_build(Car *c, V3 pos, float yaw, V3 color) {
     for (int i = 0; i < 7; i++) {
         int p = rails[i];
         float K, Y;
-        material(ST[r + 1].x, is_floor(p), &K, &Y);
+        material(D, ST[r + 1].x, is_floor(p), &K, &Y);
         add_beam(c, R[r][p], R[r + 2][p], 0.6f * K, Y, 0, BEAM_NORMAL);
     }
 
@@ -265,7 +323,7 @@ void car_build(Car *c, V3 pos, float yaw, V3 color) {
         static unsigned char strut[MAX_NODES];
         memset(strut, 0, sizeof strut);
         const int sp[4] = {P_FL, P_FR, P_RKL, P_RKR};
-        for (int i = 0; i < 4; i++) { strut[R[4][sp[i]]] = 1; strut[R[14][sp[i]]] = 1; }
+        for (int i = 0; i < 4; i++) { strut[R[D->axleF][sp[i]]] = 1; strut[R[D->axleR][sp[i]]] = 1; }
         const float h = 1.0f / SIM_HZ;
         for (int i = 0; i < c->nb; i++) {
             Beam *B = &c->b[i];
@@ -278,60 +336,60 @@ void car_build(Car *c, V3 pos, float yaw, V3 color) {
     }
 
     // ---- skin
+    float xN = ST[0].x, xT = ST[NR - 1].x;
     for (int r = 0; r + 1 < NR; r++) {
         float xm = 0.5f * (ST[r].x + ST[r + 1].x);
-        int arch = ST[r].arch || ST[r + 1].arch;
-        int seam = (r == 7 || r == 10 || r == 11);    // door shut lines
-        V3 ref = v3(clampf(xm, -2.4f, 2.4f), 0.40f, 0);
+        V3 ref = v3(clampf(xm, xT + 0.45f, xN - 0.45f), 0.40f, 0);
         for (int s = 0; s < NP; s++) {
             int p = s, q = (s + 1) % NP;
             int kind = SURF_BODY, panel = -1, e = 1 | 4;   // longitudinal edges are the creases
             if (s == 0 || s == 8) kind = SURF_UNDER;
             else if (s == 1 || s == 7) kind = SURF_TRIM;   // sill chamfer / wheel-well liner
-            else if (s == 3 || s == 5) {                   // greenhouse side / sails
-                if (r == 7 || r == 8) panel = s == 3 ? 3 : 4;
-                else if (r == 9) panel = s == 3 ? 5 : 6;
+            else if (s == 3 || s == 5) {                   // greenhouse side
+                if (ST[r].sidePanel >= 0) panel = ST[r].sidePanel + (s == 5);
             } else if (s == 4) {                           // hood, windshield, roof, tonneau
-                if (r == 7 || r == 8) panel = 0;
-                else if (r == 9) panel = 1;
-                else if (r == 10) panel = 2;
-                else if (r >= 11) kind = SURF_TONNEAU;
+                if (ST[r].topPanel >= 0) panel = ST[r].topPanel;
+                else if (ST[r].topPanel == -2) kind = SURF_TONNEAU;
             }
             if (panel >= 0) { kind = SURF_GLASS; e = 15; }
-            if (seam && s >= 2 && s <= 6) e |= 8;
-            (void)arch;
+            if (ST[r].seam && s >= 2 && s <= 6) e |= 8;
             add_quad(c, R[r][p], R[r + 1][p], R[r + 1][q], R[r][q], kind, panel, e, ref);
         }
     }
-    c->npanels = 7;
-    {   // nose: flat front face, fan from the floor centre
-        V3 ref = v3(2.0f, 0.4f, 0);
+    c->npanels = D->npanels;
+    {   // nose: front face, fan from the floor centre
+        V3 ref = v3(xN - 0.8f, 0.4f, 0);
         for (int i = 1; i < NP - 1; i++) {
             int kind = (i == 1 || i == NP - 2) ? SURF_TRIM : SURF_BODY;
             int e = 2 | (i == 1 ? 1 : 0) | (i == NP - 2 ? 4 : 0);
             add_tri(c, R[0][P_C], R[0][i], R[0][i + 1], kind, -1, e, ref);
         }
     }
-    {   // tail: bumper below the tailgate opening, sail ends above it
-        int *T = R[NR - 1];
-        V3 ref = v3(-2.0f, 0.4f, 0);
-        add_tri(c, T[P_C], T[P_FL], T[P_RKL], SURF_TRIM, -1, 3, ref);
-        add_tri(c, T[P_C], T[P_RKL], T[P_RKR], SURF_TRIM, -1, 2, ref);
-        add_tri(c, T[P_C], T[P_RKR], T[P_FR], SURF_TRIM, -1, 6, ref);
-        add_tri(c, T[P_BLL], T[P_TPL], T[P_TPR], SURF_BODY, -1, 3, ref);
-        add_tri(c, T[P_BLL], T[P_TPR], T[P_BLR], SURF_BODY, -1, 6, ref);
+    int *T = R[NR - 1], *U = R[NR - 2];
+    V3 tref = v3(xT + 0.8f, 0.4f, 0);
+    if (D->hasTailgate) {   // tail: bumper below the tailgate opening, sail ends above it
+        add_tri(c, T[P_C], T[P_FL], T[P_RKL], SURF_TRIM, -1, 3, tref);
+        add_tri(c, T[P_C], T[P_RKL], T[P_RKR], SURF_TRIM, -1, 2, tref);
+        add_tri(c, T[P_C], T[P_RKR], T[P_FR], SURF_TRIM, -1, 6, tref);
+        add_tri(c, T[P_BLL], T[P_TPL], T[P_TPR], SURF_BODY, -1, 3, tref);
+        add_tri(c, T[P_BLL], T[P_TPR], T[P_BLR], SURF_BODY, -1, 6, tref);
+    } else {                // closed tail, like the nose
+        for (int i = 1; i < NP - 1; i++) {
+            int kind = (i == 1 || i == NP - 2) ? SURF_TRIM : SURF_BODY;
+            int e = 2 | (i == 1 ? 1 : 0) | (i == NP - 2 ? 4 : 0);
+            add_tri(c, T[P_C], T[i], T[i + 1], kind, -1, e, tref);
+        }
     }
 
-    // ---- tailgate: a separate rigid part (6 nodes, 15 beams)
-    {
-        const float tx = -2.86f, tz = 0.93f, m = TG_MASS / 6.0f;
+    // ---- tailgate (pickup): a separate rigid part (6 nodes, 15 beams)
+    if (D->hasTailgate) {
+        const float tx = xT - 0.02f, tz = 0.93f, m = TG_MASS / 6.0f;
         int BL = add_node(c, v3(tx, 0.24f, -tz), m), BR = add_node(c, v3(tx, 0.24f, tz), m);
         int TL = add_node(c, v3(tx - 0.06f, 0.66f, -tz), m), TR = add_node(c, v3(tx - 0.06f, 0.66f, tz), m);  // raked out
-        int ML = add_node(c, v3(-2.80f, 0.45f, -0.90f), m), MR = add_node(c, v3(-2.80f, 0.45f, 0.90f), m);
+        int ML = add_node(c, v3(tx + 0.06f, 0.45f, -0.90f), m), MR = add_node(c, v3(tx + 0.06f, 0.45f, 0.90f), m);
         int tg[6] = {BL, BR, TL, TR, ML, MR};
         for (int i = 0; i < 6; i++)
             for (int j = i + 1; j < 6; j++) add_beam(c, tg[i], tg[j], 420000.0f, 0.02f, 0, BEAM_NORMAL);
-        int *T = R[NR - 1], *U = R[NR - 2];
         // Hinges: each bottom corner pinned by three joints.
         c->tgHingeL[0] = add_beam(c, BL, T[P_RKL], 500000.0f, 1e9f, 0.35f, BEAM_JOINT);
         c->tgHingeL[1] = add_beam(c, BL, T[P_FL], 500000.0f, 1e9f, 0.35f, BEAM_JOINT);
@@ -358,15 +416,26 @@ void car_build(Car *c, V3 pos, float yaw, V3 color) {
             if (bi >= 0) c->b[bi].rest = c->b[bi].rest0 = vlen(vsub(open, L[anchor]));
             c->tgStrap[s] = bi;
         }
-        V3 ref = v3(-2.84f, 0.45f, 0);
+        V3 ref = v3(xT, 0.45f, 0);
         add_quad(c, BL, BR, TR, TL, SURF_BODY, -1, 15, ref);
         add_quad(c, TL, TR, MR, ML, SURF_TRIM, -1, 0, ref);
         add_quad(c, BL, ML, MR, BR, SURF_TRIM, -1, 0, ref);
         add_tri(c, BL, TL, ML, SURF_TRIM, -1, 0, ref);
         add_tri(c, BR, MR, TR, SURF_TRIM, -1, 0, ref);
-        c->lightR[0] = TL; c->lightR[1] = TR; c->lightR[2] = BL; c->lightR[3] = BR;
+        c->tgNode[0] = TL; c->tgNode[1] = TR; c->tgNode[2] = BL; c->tgNode[3] = BR;
+        c->tailgate = TG_LATCHED;
+    } else c->tailgate = TG_NONE;
+
+    // ---- lights
+    if (D->lightStyle == 0) {                                   // full-width bars
+        add_light(c, R[0][P_TPL], R[0][P_TPR], R[0][P_BLL], R[0][P_BLR], 0.45f, 0, 1, 1.0f, 0);
+        add_light(c, c->tgNode[0], c->tgNode[1], c->tgNode[2], c->tgNode[3], 0.09f, 0, 1, -1.0f, 1);
+    } else {                                                    // headlamps and tail-light clusters at the corners
+        add_light(c, R[0][P_BLL], R[0][P_BLR], R[0][P_RKL], R[0][P_RKR], 0.42f, 0.04f, 0.30f, 1.0f, 0);
+        add_light(c, R[0][P_BLL], R[0][P_BLR], R[0][P_RKL], R[0][P_RKR], 0.42f, 0.70f, 0.96f, 1.0f, 0);
+        add_light(c, T[P_BLL], T[P_BLR], T[P_RKL], T[P_RKR], 0.26f, 0.03f, 0.24f, -1.0f, 1);
+        add_light(c, T[P_BLL], T[P_BLR], T[P_RKL], T[P_RKR], 0.26f, 0.76f, 0.97f, -1.0f, 1);
     }
-    c->lightF[0] = R[0][P_TPL]; c->lightF[1] = R[0][P_TPR]; c->lightF[2] = R[0][P_BLL]; c->lightF[3] = R[0][P_BLR];
 
     // ---- place in the world
     float cy = cosf(yaw), sy = sinf(yaw);
@@ -376,22 +445,20 @@ void car_build(Car *c, V3 pos, float yaw, V3 color) {
         c->n[n].v = v3(0, 0, 0);
     }
 
-    // ---- wheels: FL, FR, RL, RR on the floor-edge nodes at the axle bulkheads. Dual-motor AWD.
-    const int wr[4] = {4, 4, 14, 14};
+    // ---- wheels: FL, FR, RL, RR on the floor-edge nodes at the axle bulkheads
     for (int w = 0; w < 4; w++) {
-        int left = (w % 2 == 0);
+        int left = (w % 2 == 0), ring = w < 2 ? D->axleF : D->axleR;
         Wheel *W = &c->w[w];
-        W->mount = R[wr[w]][left ? P_FL : P_FR];
-        W->upper = R[wr[w]][left ? P_RKL : P_RKR];
-        W->off = (left ? -1.0f : 1.0f) * (TRACK_HALF - 0.62f);
+        W->mount = R[ring][left ? P_FL : P_FR];
+        W->upper = R[ring][left ? P_RKL : P_RKR];
+        W->off = (left ? -1.0f : 1.0f) * (D->trackHalf - D->floorHalf);
         W->front = w < 2;
-        W->driveShare = W->front ? 0.225f : 0.275f;
+        W->driveShare = 0.5f * (W->front ? D->driveFront : 1.0f - D->driveFront);
     }
-    c->tailgate = TG_LATCHED;
     car_update_frame(c);
     for (int w = 0; w < 4; w++) {
         Wheel *W = &c->w[w];
-        W->hub = vsub(vadd(c->n[W->mount].p, vscale(c->right, W->off)), vscale(c->up, SUSP_REST));
+        W->hub = vsub(vadd(c->n[W->mount].p, vscale(c->right, W->off)), vscale(c->up, D->suspRest));
     }
 }
 
@@ -454,7 +521,8 @@ void car_update_damage(Car *c) {
     int latched = 0, hl = 0, hr = 0;
     for (int i = 0; i < 6; i++) latched |= intact(c, c->tgLatch[i]);
     for (int i = 0; i < 3; i++) { hl |= intact(c, c->tgHingeL[i]); hr |= intact(c, c->tgHingeR[i]); }
-    c->tailgate = (hl || hr) ? (latched ? TG_LATCHED : (hl && hr ? TG_OPEN : TG_HANGING)) : TG_GONE;
+    if (c->def && c->def->hasTailgate)
+        c->tailgate = (hl || hr) ? (latched ? TG_LATCHED : (hl && hr ? TG_OPEN : TG_HANGING)) : TG_GONE;
 }
 
 void car_pop_tailgate(Car *c) {
@@ -462,7 +530,7 @@ void car_pop_tailgate(Car *c) {
     for (int i = 0; i < 6; i++) if (c->tgLatch[i] >= 0) c->b[c->tgLatch[i]].broken = 1;
     // A small shove outward, like the latch spring.
     for (int i = 0; i < 2; i++) {
-        Node *n = &c->n[c->lightR[i]];
+        Node *n = &c->n[c->tgNode[i]];
         n->v = vsub(n->v, vscale(c->fwd, 0.6f));
     }
 }
@@ -522,17 +590,18 @@ static void beam_forces(Car *c) {
 
 static void wheel_forces(Car *c, float h) {
     const Controls *ctl = &c->ctl;
+    const VehicleDef *D = c->def;
     float vF = vdot(c->vel, c->fwd);
 
     // Steering: speed-sensitive lock, rate-limited. Rear wheels counter-steer at low speed.
-    float maxLock = 0.58f / (1.0f + fabsf(vF) / 22.0f);
+    float maxLock = D->maxLock / (1.0f + fabsf(vF) / 22.0f);
     float target = clampf(ctl->steer, -1, 1) * maxLock;
     c->steer += clampf(target - c->steer, -2.2f * h, 2.2f * h);
-    float rearSteer = -c->steer * REAR_STEER * clampf(1.0f - fabsf(vF) / 18.0f, 0.0f, 1.0f);
+    float rearSteer = -c->steer * D->rearSteer * clampf(1.0f - fabsf(vF) / 18.0f, 0.0f, 1.0f);
 
     float drive = 0;
-    if (ctl->throttle > 0) drive = ctl->throttle * fminf(ENGINE_FMAX, ENGINE_POWER / fmaxf(fabsf(vF), 2.0f));
-    else if (ctl->throttle < 0 && vF > -12.0f) drive = ctl->throttle * 9000.0f;
+    if (ctl->throttle > 0) drive = ctl->throttle * fminf(D->engineF, D->enginePower / fmaxf(fabsf(vF), 2.0f));
+    else if (ctl->throttle < 0 && vF > -12.0f) drive = ctl->throttle * D->reverseF;
 
     for (int i = 0; i < 4; i++) {
         Wheel *W = &c->w[i];
@@ -544,14 +613,14 @@ static void wheel_forces(Car *c, float h) {
 
         float gh = terrain_height(org.x, org.z);
         float dist = up.y > 0.25f ? (org.y - gh) / up.y : 1e9f;   // along -up to ground
-        float comp = SUSP_REST + WHEEL_R - dist;
+        float comp = D->suspRest + D->wheelR - dist;
         V3 vel = vscale(vadd(m->v, u->v), 0.5f);
 
         V3 wf = vrot(c->fwd, up, W->steerAngle);
 
         if (comp <= 0) {
             W->compress = 0;
-            W->hub = vsub(org, vscale(up, SUSP_REST));
+            W->hub = vsub(org, vscale(up, D->suspRest));
             W->side = vnorm(vcross(wf, up));
             W->spin += (ctl->throttle > 0.1f ? 30.0f : 0.0f) * h;
             continue;
@@ -560,8 +629,8 @@ static void wheel_forces(Car *c, float h) {
         W->contact = 1;
         W->compress = comp;
         float vcomp = -vdot(vel, up);
-        float Fs = KS * comp + CS * vcomp;
-        if (comp > SUSP_TRAVEL) Fs += KBUMP * (comp - SUSP_TRAVEL);
+        float Fs = D->ks * comp + D->cs * vcomp;
+        if (comp > D->suspTravel) Fs += D->kbump * (comp - D->suspTravel);
         if (Fs < 0) Fs = 0;
 
         V3 n = terrain_normal(org.x, org.z);
@@ -578,9 +647,9 @@ static void wheel_forces(Car *c, float h) {
 
         float Fy = -vs * N * LAT_STIFF;
         float Fx = drive * W->driveShare;
-        float bf = BRAKE_MAX * clampf(ctl->brake, 0, 1);
+        float bf = D->brakeMax * clampf(ctl->brake, 0, 1);
         if (hb) { bf = fmaxf(bf, mu * N); Fx = 0; }
-        Fx -= clampf(vl * 9000.0f, -bf, bf);
+        Fx -= clampf(vl * D->mass * 3.0f, -bf, bf);
         Fx -= vl * 8.0f;                              // rolling resistance
 
         float lim = mu * N, mag = sqrtf(Fx * Fx + Fy * Fy);
@@ -594,9 +663,9 @@ static void wheel_forces(Car *c, float h) {
 
         W->load = N;
         W->side = ws;
-        W->hub = vsub(org, vscale(up, dist - WHEEL_R));
-        W->cp = vsub(W->hub, vscale(n, WHEEL_R));
-        if (!hb) W->spin += (vl / WHEEL_R) * h;
+        W->hub = vsub(org, vscale(up, dist - D->wheelR));
+        W->cp = vsub(W->hub, vscale(n, D->wheelR));
+        if (!hb) W->spin += (vl / D->wheelR) * h;
         if (W->slip > 0.05f && ctl->throttle > 0.5f) W->spin += 25.0f * h;
     }
 }
@@ -733,7 +802,7 @@ void world_substep(World *w, float h) {
         for (int i = 0; i < c->nn; i++) {
             Node *N = &c->n[i];
             N->f = v3(0, -GRAV * N->m, 0);
-            N->f = vadd(N->f, vscale(N->v, -CD_A * sp * N->m / CAR_MASS));   // aero drag, spread by mass
+            N->f = vadd(N->f, vscale(N->v, -c->def->cdA * sp * N->m / c->def->mass));   // aero drag, spread by mass
         }
         beam_forces(c);
         wheel_forces(c, h);

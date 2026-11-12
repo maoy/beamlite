@@ -24,7 +24,7 @@ static inline V3 vrot(V3 v, V3 k, float a) {
 #define MAX_NODES 192
 #define MAX_BEAMS 2048
 #define MAX_TRIS 512
-#define MAX_PANELS 8
+#define MAX_PANELS 12
 #define MAX_CARS 8
 #define MAX_BOXES 320
 #define MAX_BLD 256
@@ -34,9 +34,8 @@ static inline V3 vrot(V3 v, V3 k, float a) {
 #define MAX_GRID_ITEMS 32000
 
 #define SIM_HZ 1200.0f          // physics substep rate
-#define WHEEL_R 0.44f           // 35" all-terrain tyre
-#define WHEEL_W 0.30f
-#define CAR_SPAWN_H 0.56f       // floor height above ground when a truck is dropped in
+#define CAR_SPAWN_H 0.56f       // floor height above ground when the pickup is dropped in (tests)
+#define NR 18                   // body rings per vehicle
 
 typedef struct { V3 p, v, f; float m; } Node;
 
@@ -73,9 +72,43 @@ typedef struct {
 
 typedef struct { float throttle, brake, steer; int handbrake; } Controls;
 
-enum { TG_LATCHED, TG_OPEN, TG_HANGING, TG_GONE };
+enum { TG_LATCHED, TG_OPEN, TG_HANGING, TG_GONE, TG_NONE };
+
+// ---- vehicle definitions
+// A body is NR cross-section rings from nose to tail. Each ring has floor-centre, floor-edge,
+// sill, beltline and roof-edge nodes on each side; the table below shapes them.
+typedef struct {
+    float x, floorY, rkY, belt, top, tw;    // station x; heights (0 = floor underside); roof-edge half-width
+    float ws;                               // width scale for sill/beltline here (1 = full width)
+    unsigned char arch, bulk, seam;         // over a wheel arch; full bulkhead; door shut line
+    signed char topPanel, sidePanel;        // for the gap to the next ring: -1 body, -2 tonneau, >=0 glass id
+                                            // (side: left id, right = left + 1)
+} Station;
+
+typedef struct { int q[4]; float t, u0, u1, out; unsigned char rear; } LightStrip;
+
+enum { VEH_PICKUP, VEH_HATCH, VEH_COUNT };
 
 typedef struct {
+    const char *name, *blurb;
+    Station st[NR];
+    float floorHalf, sillHalf, beltHalf;    // half-widths
+    int axleF, axleR, doorR0, doorR1, dashRing, bRing;
+    float mass;
+    float batW, batX0, batX1, engW, engX0, engX1;   // extra mass (weight units) on floor nodes in [x0, x1]
+    float crumpleF, crumpleR, cabinX0, cabinX1;     // structural zones (x)
+    float kScale, yScale;                           // structure stiffness / yield multipliers
+    float wheelR, wheelW, trackHalf;
+    float suspRest, suspTravel, ks, cs, kbump;
+    float brakeMax, engineF, enginePower, reverseF, driveFront;
+    float rearSteer, maxLock, cdA;
+    float spawnH, eyeH;                     // drop-in floor height; hood-camera height above centre
+    int npanels, hasTailgate, lightStyle;   // lightStyle: 0 full-width bars, 1 corner lamps
+    V3 paint;
+} VehicleDef;
+
+typedef struct {
+    const VehicleDef *def; int type;
     Node n[MAX_NODES]; int nn, nBody;   // nodes [0, nBody) are the body; the rest is the tailgate
     Beam b[MAX_BEAMS]; int nb;
     Tri t[MAX_TRIS]; int nt;
@@ -95,7 +128,8 @@ typedef struct {
     // Tailgate: hinged at the bottom, latched at the top, check straps hold it level when open.
     int tgLatch[6], tgHingeL[3], tgHingeR[3], tgStrap[2];
     int tailgate;               // TG_*
-    int lightF[4], lightR[4];   // light-bar strip nodes (top L, top R, lower L, lower R)
+    int tgNode[4];              // tailgate corners: top L, top R, bottom L, bottom R
+    LightStrip lights[4]; int nlights;
     float wetness;              // 0 dry .. 1 soaked road: less tyre grip
 } Car;
 
@@ -145,7 +179,9 @@ int world_add_tree(World *w, float x, float z, float h, int kind);
 void world_build_grid(World *w);        // call after adding obstacles by hand
 int world_point_solid(const World *w, V3 p);
 void world_substep(World *w, float h);
-void car_build(Car *c, V3 pos, float yaw, V3 color);
+const VehicleDef *vehicle_def(int type);
+void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color);
+void car_build(Car *c, V3 pos, float yaw, V3 color);       // the pickup
 void car_update_frame(Car *c);
 void car_update_damage(Car *c);
 void car_pop_tailgate(Car *c);
