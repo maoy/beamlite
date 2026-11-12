@@ -101,6 +101,7 @@ static void define_pickup(VehicleDef *d) {
         float x = X[r], top = pu_top(x);
         *s = (Station){x, FY[r], RK[r], fminf(0.70f, top - 0.08f), top, pu_tw(x), 1.0f, RK[r] > 0.3f, BULK[r], 0, -1, -1};
         s->seam = (r == 7 || r == 10 || r == 11);
+        if (r == 6) s->topPanel = 0;                                    // long windshield runs down the hood line
         if (r == 7 || r == 8) { s->topPanel = 0; s->sidePanel = 3; }   // windshield, front side glass
         else if (r == 9) { s->topPanel = 1; s->sidePanel = 5; }        // glass roof, rear side glass
         else if (r == 10) s->topPanel = 2;                              // rear glass
@@ -119,7 +120,8 @@ static void define_pickup(VehicleDef *d) {
     d->suspRest = 0.12f; d->suspTravel = 0.24f; d->ks = 70000.0f; d->cs = 6500.0f; d->kbump = 600000.0f;
     d->brakeMax = 8000.0f; d->engineF = 20000.0f; d->enginePower = 440000.0f; d->reverseF = 9000.0f; d->driveFront = 0.45f;
     d->rearSteer = 0.30f; d->maxLock = 0.58f; d->cdA = 0.62f;
-    d->spawnH = CAR_SPAWN_H; d->eyeH = 0.72f;
+    d->spawnH = CAR_SPAWN_H;
+    d->seat = v3(-0.35f, 1.12f, -0.42f); d->dashX = 1.05f; d->dashY = 0.88f;
     d->npanels = 7; d->hasTailgate = 1; d->lightStyle = 0;
     d->smooth = 0; d->wheelStyle = 0; d->mirrorRing = -1; d->spoilerRing = -1;
     d->paint = v3(0.71f, 0.72f, 0.74f);
@@ -171,7 +173,8 @@ static void define_hatch(VehicleDef *d) {
     d->suspRest = -0.06f; d->suspTravel = 0.16f; d->ks = 30000.0f; d->cs = 2400.0f; d->kbump = 300000.0f;
     d->brakeMax = 3900.0f; d->engineF = 6800.0f; d->enginePower = 95000.0f; d->reverseF = 3500.0f; d->driveFront = 1.0f;
     d->rearSteer = 0.0f; d->maxLock = 0.62f; d->cdA = 0.41f;
-    d->spawnH = 0.22f; d->eyeH = 0.55f;
+    d->spawnH = 0.22f;
+    d->seat = v3(-0.52f, 1.00f, -0.38f); d->dashX = 0.52f; d->dashY = 0.80f;
     d->npanels = 8; d->hasTailgate = 0; d->lightStyle = 1;
     d->smooth = 1; d->wheelStyle = 1; d->mirrorRing = 8; d->spoilerRing = 16;
     d->paint = v3(0.93f, 0.33f, 0.09f);                       // bright orange
@@ -295,6 +298,11 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
         for (int p = 0; p < NP; p++) R[r][p] = add_node(c, l[p], wt[r][p] * unit);
     }
     c->nBody = c->nn;
+    {   // body centre of mass, for car_local_to_world()
+        V3 m = v3(0, 0, 0); float M = 0;
+        for (int i = 0; i < c->nBody; i++) { m = vadd(m, vscale(L[i], c->n[i].m)); M += c->n[i].m; }
+        c->comLocal = vscale(m, 1.0f / M);
+    }
 
     // ---- body structure
     for (int r = 0; r < nr; r++)                      // ring frames / bulkheads

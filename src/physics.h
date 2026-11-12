@@ -103,7 +103,9 @@ typedef struct {
     float suspRest, suspTravel, ks, cs, kbump;
     float brakeMax, engineF, enginePower, reverseF, driveFront;
     float rearSteer, maxLock, cdA;
-    float spawnH, eyeH;                     // drop-in floor height; hood-camera height above centre
+    float spawnH;                           // drop-in floor height
+    V3 seat;                                // driver's eye point (car-local; left-hand drive, so z < 0)
+    float dashX, dashY;                     // dashboard top: x of its leading edge, height
     int npanels, hasTailgate, lightStyle;   // lightStyle: 0 full-width bars, 1 corner lamps
     int smooth;                             // smooth-shaded paint without panel outlines
     int wheelStyle;                         // 0 flat aero covers, 1 dark multi-spoke alloys
@@ -120,6 +122,7 @@ typedef struct {
     Controls ctl;
     float steer;                // actual front-wheel angle (rad)
     V3 pos, vel, fwd, right, up, bmin, bmax;
+    V3 comLocal;                // body centre of mass in car-local coordinates (at build)
     V3 color;
     float damage;               // 0..100
     int brokenBeams;
@@ -185,6 +188,12 @@ int world_add_tree(World *w, float x, float z, float h, int kind);
 void world_build_grid(World *w);        // call after adding obstacles by hand
 int world_point_solid(const World *w, V3 p);
 void world_substep(World *w, float h);
+// A car-local point (as in the vehicle definition) in the world, following the moving body frame.
+static inline V3 car_local_to_world(const Car *c, V3 l) {
+    V3 d = vsub(l, c->comLocal);
+    return vadd(c->pos, vadd(vadd(vscale(c->fwd, d.x), vscale(c->up, d.y)), vscale(c->right, d.z)));
+}
+
 const VehicleDef *vehicle_def(int type);
 void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color);
 void car_build(Car *c, V3 pos, float yaw, V3 color);       // the pickup

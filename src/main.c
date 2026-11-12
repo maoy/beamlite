@@ -658,6 +658,7 @@ static Color shade_paint(Color base, V3 n, V3 p, V3 eye, float gloss) {
 }
 
 // An oriented box (centre, three half-axis vectors), lit per face.
+static float oboxGloss = 0.6f;                  // set to 0 for matte cabin trim
 static void draw_obox(V3 c, V3 ax, V3 ay, V3 az, Color col, V3 eye) {
     V3 axes[3] = {ax, ay, az};
     for (int a = 0; a < 3; a++)
@@ -665,14 +666,65 @@ static void draw_obox(V3 c, V3 ax, V3 ay, V3 az, Color col, V3 eye) {
             V3 n = vscale(axes[a], (float)sgn), u = axes[(a + 1) % 3], w = axes[(a + 2) % 3];
             V3 fc = vadd(c, n);
             V3 q0 = vsub(vsub(fc, u), w), q1 = vsub(vadd(fc, u), w), q2 = vadd(vadd(fc, u), w), q3 = vadd(vsub(fc, u), w);
-            Color k = shade_paint(col, vnorm(n), fc, eye, 0.6f);
+            Color k = oboxGloss > 0 ? shade_paint(col, vnorm(n), fc, eye, oboxGloss) : lit(col, vnorm(n), 0.8f);
             DrawTriangle3D(RV(q0), RV(q1), RV(q2), k); DrawTriangle3D(RV(q0), RV(q2), RV(q3), k);
         }
 }
 
 static V3 nodeN[MAX_NODES];
 
-static void draw_car(const Car *c, int beamView, V3 eye) {
+static const Color INTERIOR = {38, 39, 42, 255};
+
+// From inside the cabin: dashboard, instrument binnacle, steering wheel (turned with the front wheels)
+// and rear-view mirror, all placed in car-local coordinates so they move with the body.
+static void draw_interior(const Car *c, V3 eye) {
+    const VehicleDef *d = c->def;
+    V3 F = c->fwd, U = c->up, Rt = c->right, S = d->seat;
+    Color dash = {30, 31, 34, 255}, dark = {20, 20, 22, 255};
+    oboxGloss = 0.0f;
+    V3 dc = car_local_to_world(c, v3(d->dashX - 0.28f, d->dashY - 0.10f, 0));
+    draw_obox(dc, vscale(F, 0.28f), vscale(U, 0.10f), vscale(Rt, d->beltHalf * 0.92f), dash, eye);
+    V3 bz = car_local_to_world(c, v3(S.x + 0.66f, d->dashY + 0.035f, S.z));
+    draw_obox(bz, vscale(F, 0.09f), vscale(U, 0.045f), vscale(Rt, 0.19f), dark, eye);
+    // Steering wheel on a column tilted up toward the driver.
+    V3 hub = car_local_to_world(c, v3(S.x + 0.44f, S.y - 0.33f, S.z));
+    V3 ax = vnorm(vadd(vscale(F, -0.94f), vscale(U, 0.34f)));
+    float turn = c->steer * 14.0f;                       // ~14:1 steering ratio
+    V3 u = vrot(Rt, ax, turn), v = vcross(ax, u);
+    const float R = 0.19f;
+    Color rim = {26, 26, 28, 255};
+    for (int i = 0; i < 24; i++) {
+        float a0 = 6.2831853f * i / 24, a1 = 6.2831853f * (i + 1) / 24;
+        V3 p0 = vadd(hub, vadd(vscale(u, cosf(a0) * R), vscale(v, sinf(a0) * R)));
+        V3 p1 = vadd(hub, vadd(vscale(u, cosf(a1) * R), vscale(v, sinf(a1) * R)));
+        DrawCylinderEx(RV(p0), RV(p1), 0.017f, 0.017f, 6, rim);
+    }
+    const float spokes[3] = {0.0f, 3.14159f, -1.5708f};
+    for (int i = 0; i < 3; i++) {
+        V3 e = vadd(hub, vadd(vscale(u, cosf(spokes[i]) * R), vscale(v, sinf(spokes[i]) * R)));
+        DrawCylinderEx(RV(hub), RV(e), 0.022f, 0.014f, 6, (Color){34, 34, 37, 255});
+    }
+    DrawCylinderEx(RV(vsub(hub, vscale(ax, 0.02f))), RV(vadd(hub, vscale(ax, 0.03f))), 0.055f, 0.05f, 12, (Color){40, 40, 44, 255});
+    DrawCylinderEx(RV(vsub(hub, vscale(ax, 0.02f))), RV(vsub(hub, vscale(ax, 0.30f))), 0.03f, 0.03f, 8, dark);   // column
+    // Rear-view mirror at the top of the windshield.
+    V3 rm = car_local_to_world(c, v3(S.x + 0.62f, S.y + 0.14f, 0));
+    draw_obox(rm, vscale(F, 0.012f), vscale(U, 0.026f), vscale(Rt, 0.085f), dark, eye);
+    draw_obox(vsub(rm, vscale(F, 0.014f)), vscale(F, 0.002f), vscale(U, 0.020f), vscale(Rt, 0.078f), (Color){90, 100, 112, 255}, eye);
+    DrawCylinderEx(RV(rm), RV(vadd(rm, vadd(vscale(U, 0.07f), vscale(F, 0.03f)))), 0.008f, 0.008f, 6, dark);
+    oboxGloss = 0.6f;
+}
+
+// Instrument dials glow in the dark (emissive pass).
+static void draw_gauges(const Car *c) {
+    const VehicleDef *d = c->def;
+    for (int k = -1; k <= 1; k += 2) {
+        V3 g = car_local_to_world(c, v3(d->seat.x + 0.565f, d->dashY + 0.03f, d->seat.z + k * 0.08f));
+        DrawCylinderEx(RV(g), RV(vsub(g, vscale(c->fwd, 0.004f))), 0.045f, 0.045f, 16, (Color){255, 150, 60, 255});
+        DrawCylinderEx(RV(vsub(g, vscale(c->fwd, 0.005f))), RV(vsub(g, vscale(c->fwd, 0.006f))), 0.036f, 0.036f, 16, (Color){20, 14, 10, 255});
+    }
+}
+
+static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
     Color body = {(unsigned char)(c->color.x * 255), (unsigned char)(c->color.y * 255), (unsigned char)(c->color.z * 255), 255};
     Color glass = {34, 46, 60, 255}, under = {35, 35, 38, 255}, tonneau = {52, 54, 58, 255}, trim = {30, 31, 33, 255};
 
@@ -707,9 +759,14 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
             if (t->kind != SURF_BODY && t->kind != SURF_TRIM) continue;
             Color base = t->kind == SURF_TRIM ? trim : body;
             float gloss = t->kind == SURF_TRIM ? 0.25f : 1.0f;
+            int inside = 0;
+            if (interior) {
+                V3 a = c->n[t->v[0]].p, fn = vcross(vsub(c->n[t->v[1]].p, a), vsub(c->n[t->v[2]].p, a));
+                inside = vdot(fn, vsub(eye, a)) < 0;
+            }
             for (int k = 0; k < 3; k++) {
                 V3 p = c->n[t->v[k]].p;
-                Color col = shade_paint(base, nodeN[t->v[k]], p, eye, gloss);
+                Color col = inside ? INTERIOR : shade_paint(base, nodeN[t->v[k]], p, eye, gloss);
                 rlColor4ub(col.r, col.g, col.b, 255);
                 rlVertex3f(p.x, p.y, p.z);
             }
@@ -720,6 +777,7 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
         for (int i = 0; i < c->nt; i++) {
             const Tri *t = &c->t[i];
             if (t->panel >= 0 && c->glassBroken[t->panel]) continue;
+            if (interior && t->kind == SURF_GLASS) continue;          // looking out through our own windows
             if (c->def->smooth && (t->kind == SURF_BODY || t->kind == SURF_TRIM)) {   // drawn above; keep shut lines
                 if (t->edges) {
                     Color edge = {28, 26, 26, 255};
@@ -736,6 +794,7 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
             Color base = t->kind == SURF_GLASS ? glass : t->kind == SURF_UNDER ? under :
                          t->kind == SURF_TONNEAU ? tonneau : t->kind == SURF_TRIM ? trim : body;
             Color col = lit(base, nrm, 1.0f);
+            if (interior && vdot(nrm, vsub(eye, p[0])) < 0) { DrawTriangle3D(RV(p[0]), RV(p[1]), RV(p[2]), INTERIOR); continue; }
             if (t->kind == SURF_BODY) {                            // brushed steel picks up the sky
                 float f = 0.18f + 0.22f * fmaxf(nrm.y, 0.0f);
                 Color sk = {(unsigned char)(255 * powf(ENV->horizonAway.x, 0.4545f)), (unsigned char)(255 * powf(ENV->horizonAway.y, 0.4545f)), (unsigned char)(255 * powf(ENV->horizonAway.z, 0.4545f)), 255};
@@ -772,6 +831,7 @@ static void draw_car(const Car *c, int beamView, V3 eye) {
         for (int i = 0; i < c->nn; i++) DrawSphere(RV(c->n[i].p), 0.03f, (Color){255, 230, 120, 255});
     }
 
+    if (interior && !beamView) draw_interior(c, eye);
     if (!beamView && c->def->smooth) {               // black grille + lower intake up front, diffuser at the back
         // Corner-lamp cars: lights[0] / lights[2] span the nose / tail ring as {top L, top R, belt L, belt R}.
         // Within a ring, floor-edge nodes are two places from the belt nodes (P_BLL - 2 = P_FL, P_BLR + 2 = P_FR).
@@ -1155,7 +1215,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     if (help) {
         const char *lines[] = {
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
-            "C  hood cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
+            "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
             "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
             "", "Ramp ahead, crash wall behind you. Town up the", "cross road to the left, warehouses to the right,",
             "forest on the hills. Small trees snap; big ones don't."};
@@ -1402,13 +1462,16 @@ int main(void) {
             cam.position = camPos;
             cam.target = RV(tgt);
             cam.up = (Vector3){0, 1, 0};
-        } else {
-            V3 eye = vadd(vadd(pc->pos, vscale(pc->up, pc->def->eyeH)), vscale(pc->fwd, 0.1f));
+        } else {                                         // dash cam: the driver's eye point, fixed to the body
+            V3 eye = car_local_to_world(pc, pc->def->seat);
+            V3 look = vrot(pc->fwd, pc->up, camYawOff);       // mouse drag looks around the cabin
+            look = vrot(look, vnorm(vcross(look, pc->up)), -(camPitch - 0.28f) * 0.8f - 0.05f);
             cam.position = RV(eye);
-            cam.target = RV(vadd(eye, vscale(pc->fwd, 10.0f)));
+            cam.target = RV(vadd(eye, vscale(look, 10.0f)));
             cam.up = RV(pc->up);
             camPos = cam.position;
         }
+        cam.fovy = camMode ? 72.0f : 62.0f;
 
         // ---- draw the world into the HDR buffer
         post_begin_scene();
@@ -1427,7 +1490,7 @@ int main(void) {
         rlDrawRenderBatchActive();
         rlEnableDepthMask();
         post_begin_objects();
-        for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z));
+        for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z), camMode && i == 0);
         post_end_objects();
         draw_shards();
         rlDrawRenderBatchActive();
@@ -1441,6 +1504,7 @@ int main(void) {
         int lightsOn = ENV->lights > 0.01f;
         if (lightsOn) { post_set_emissive(0.6f + 2.2f * ENV->lights); DrawModel(cityGlow, (Vector3){0, 0, 0}, 1.0f, WHITE); }
         if (!beamView) for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car_lights(&world.cars[i], lightsOn && i == 0);
+        if (camMode && !beamView) { post_emissive_begin(0.6f + 1.4f * ENV->lights); draw_gauges(pc); post_emissive_end(); }
         if (lightsOn) {
             rlDrawRenderBatchActive();
             rlDisableDepthMask();
