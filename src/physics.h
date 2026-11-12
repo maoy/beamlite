@@ -96,6 +96,7 @@ typedef struct {
     int tgLatch[6], tgHingeL[3], tgHingeR[3], tgStrap[2];
     int tailgate;               // TG_*
     int lightF[4], lightR[4];   // light-bar strip nodes (top L, top R, lower L, lower R)
+    float wetness;              // 0 dry .. 1 soaked road: less tyre grip
 } Car;
 
 typedef struct { V3 mn, mx; } Box;
@@ -137,6 +138,7 @@ float terrain_height(float x, float z);
 V3 terrain_normal(float x, float z);
 
 int road_at(float x, float z);          // 0 none, 1 highway, 2 town street
+int road_rects(float (*out)[4], int max, int *nHighway);   // (x0, x1, z0, z1); highways first
 
 void world_init(World *w);              // terrain features, town, forest
 int world_add_tree(World *w, float x, float z, float h, int kind);

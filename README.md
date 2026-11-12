@@ -28,6 +28,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | X | clear spawned trucks |
 | G | drop the tailgate |
 | L | lighting: dusk / day |
+| O | weather: dry / wet / rain |
 | Q | recover (fresh car, upright, in place) |
 | R | reset to start |
 | T / P | slow-mo / pause |
@@ -70,7 +71,8 @@ Saplings and young trees snap and fall when you hit them; mature trunks stop you
   through are kept clear. Buildings collide as boxes; trees collide as trunk cylinders. A tree
   snaps once the impulse it takes in a short window passes a limit set by its trunk radius, then
   falls like a toppling rod in the direction it was hit. A uniform 6 m grid makes the collision
-  checks cheap (about 70 buildings, about 1000 trees). The renderer bakes the buildings into one
+  checks cheap (about 70 buildings, about 1000 trees). Standing trees are baked into one mesh per
+  50 m patch, which is rebuilt when a tree in it falls. The renderer bakes the buildings into one
   flat-shaded mesh, with windows, doors, shopfronts, gable roofs, chimneys and rooftop plant.
   The chase camera pulls in so buildings never block the view.
 - **Rendering** (`src/render.c`): the world is drawn into a half-float HDR buffer with a depth
@@ -82,6 +84,13 @@ Saplings and young trees snap and fall when you hit them; mature trunks stop you
   colours, so switching presets rebuilds those meshes. Lit windows, lamp lenses and the
   truck's light bars draw brighter than white, so they bloom. Street lamps, wall lamps over doors
   and the headlights add additive pools of light on walls and the road.
+- **Wet roads**: the ground writes 1 into the scene buffer's alpha and everything else writes 0,
+  so only real ground can be wet. Up-facing ground is classed as asphalt, pavement or other from
+  the road layout, with procedural puddles. A screen-space reflection ray is marched through the
+  depth buffer at 1/3 resolution, falling back to the sky on a miss. The result is blurred mostly
+  vertically, the way wet asphalt streaks lights, and composited after darkening the wet surface.
+  Damp asphalt gets a sheen; puddles are nearly mirrors. Rain adds falling streaks and fine
+  ripples. Any wet road throws spray off the tyres, and costs about 15–20% of tyre grip.
 - **Integration**: semi-implicit Euler at 1200 Hz fixed substeps. Each beam's stiffness and
   damping is limited by the masses it connects, which keeps the explicit integrator stable.
 
@@ -91,6 +100,6 @@ a tailgate drop, a 60 km/h wall crash, a ramp jump, a T-bone and hitting a sapli
 
 ## Ideas for next steps
 
-Wet roads with reflections and rain; real-time shadow maps; per-pixel lighting from nearby
+Real-time shadow maps; per-pixel lighting from nearby
 lamps; node-beam wheels and tyres; opening doors and frunk; self-collision so crushed panels
 stack up instead of passing through each other; slip-angle tyre model; Metal renderer; sound.

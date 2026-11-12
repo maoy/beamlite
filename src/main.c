@@ -445,65 +445,123 @@ static void mb_blob(MeshB *m, V3 ctr, float rx, float ry, Color col, unsigned se
     for (int i = 0; i < 20; i++) mb_tri(m, v[f[i][0]], v[f[i][1]], v[f[i][2]], col, ctr);
 }
 
+// Prototype meshes are kept on the CPU so standing trees can be baked into one mesh per
+// 50 m patch (one draw call each instead of one per tree). Fallen trees draw individually.
+static MeshB treeProto[2];
+
+static void mb_copy(MeshB *dst, const MeshB *src) {
+    memset(dst, 0, sizeof *dst);
+    dst->n = dst->cap = src->n;
+    dst->v = MemAlloc(src->n * 3 * sizeof(float));
+    dst->c = MemAlloc(src->n * 4);
+    memcpy(dst->v, src->v, src->n * 3 * sizeof(float));
+    memcpy(dst->c, src->c, src->n * 4);
+}
+
 static void build_trees(void) {
     MeshB m = {0};
     Color bark = {92, 66, 46, 255};
+    if (treeProto[0].v) { MemFree(treeProto[0].v); MemFree(treeProto[0].c); MemFree(treeProto[1].v); MemFree(treeProto[1].c); }
     mb_cone(&m, 0, 3.0f, 0.25f, 0.18f, 6, bark, 0);                                   // conifer
     mb_cone(&m, 1.6f, 6.0f, 2.6f, 0.0f, 9, (Color){46, 92, 52, 255}, 0.25f);
     mb_cone(&m, 3.8f, 8.2f, 2.0f, 0.0f, 9, (Color){52, 102, 56, 255}, 0.25f);
     mb_cone(&m, 6.0f, CONIFER_H, 1.3f, 0.0f, 8, (Color){60, 112, 60, 255}, 0.25f);
+    mb_copy(&treeProto[TREE_CONIFER], &m);
     treeModel[TREE_CONIFER] = mb_model(&m);
     mb_cone(&m, 0, 3.6f, 0.22f, 0.16f, 6, bark, 0);                                   // broadleaf
     mb_blob(&m, v3(0, 5.2f, 0), 2.6f, 2.2f, (Color){84, 132, 58, 255}, 7);
     mb_blob(&m, v3(0.9f, 6.3f, 0.5f), 1.6f, 1.4f, (Color){96, 146, 64, 255}, 11);
+    mb_copy(&treeProto[TREE_BROADLEAF], &m);
     treeModel[TREE_BROADLEAF] = mb_model(&m);
     mb_cone(&m, -0.3f, 0.5f, 1.0f, 0.85f, 7, bark, 0);                               // stump (scaled by trunk radius)
     mb_cone(&m, 0.5f, 0.5f, 0.85f, 0.0f, 7, (Color){200, 170, 120, 255}, 0);
     stumpModel = mb_model(&m);
 }
 
-static void draw_trees(const World *w, Vector3 eye) {
-    for (int i = 0; i < w->ntree; i++) {
-        const Tree *t = &w->tree[i];
-        float dx = t->x - eye.x, dz = t->z - eye.z;
-        if (dx * dx + dz * dz > 300.0f * 300.0f) continue;
-        float s = t->h / (t->kind == TREE_CONIFER ? CONIFER_H : BROADLEAF_H);
-        unsigned char tint = (unsigned char)(215 + (i * 97 % 40));
-        Color c = {tint, tint, (unsigned char)(tint - 10), 255};
-        Vector3 base = {t->x, t->y, t->z};
-        if (!t->broken) {
-            DrawModelEx(treeModel[t->kind], base, (Vector3){0, 1, 0}, (float)(i * 47 % 360), (Vector3){s, s, s}, c);
-        } else {
-            V3 axis = vcross(v3(0, 1, 0), t->fall);
-            Vector3 top = {t->x + t->fall.x * 0.5f * t->r, t->y + 0.5f * s, t->z + t->fall.z * 0.5f * t->r};
-            DrawModelEx(treeModel[t->kind], top, RV(axis), t->tilt * RAD2DEG, (Vector3){s, s, s}, c);
-            float sr = t->r / 0.25f * (t->kind == TREE_CONIFER ? 1.0f : 0.25f / 0.22f);
-            DrawModelEx(stumpModel, base, (Vector3){0, 1, 0}, 0, (Vector3){sr * 0.25f, 1, sr * 0.25f}, WHITE);
-        }
-    }
+#define TCH 12                                  // tree patches per side (50 m each)
+#define TCH_SIZE 50.0f
+static Model treePatch[TCH * TCH], shadowPatch[TCH * TCH];
+static unsigned char patchHas[TCH * TCH], treeBaked[MAX_TREES];
+
+static int tree_patch(const Tree *t) {
+    int gx = (int)((t->x + TCH * TCH_SIZE * 0.5f) / TCH_SIZE), gz = (int)((t->z + TCH * TCH_SIZE * 0.5f) / TCH_SIZE);
+    gx = gx < 0 ? 0 : (gx >= TCH ? TCH - 1 : gx); gz = gz < 0 ? 0 : (gz >= TCH ? TCH - 1 : gz);
+    return gz * TCH + gx;
 }
 
-static void draw_tree_shadows(const World *w, Vector3 eye) {
-    Color sh = {0, 0, 0, (unsigned char)(55 * fminf(1.0f, 0.35f + SUN.y))};
+static Color tree_tint(int i) { unsigned char t = (unsigned char)(215 + (i * 97 % 40)); return (Color){t, t, (unsigned char)(t - 10), 255}; }
+
+static void build_tree_patch(const World *w, int pi) {
+    if (patchHas[pi]) { UnloadModel(treePatch[pi]); UnloadModel(shadowPatch[pi]); patchHas[pi] = 0; }
+    MeshB m = {0}, sh = {0};
+    unsigned char sa = (unsigned char)(55 * fminf(1.0f, 0.35f + SUN.y));
     for (int i = 0; i < w->ntree; i++) {
         const Tree *t = &w->tree[i];
-        float dx = t->x - eye.x, dz = t->z - eye.z;
-        if (t->broken || dx * dx + dz * dz > 140.0f * 140.0f) continue;
+        if (tree_patch(t) != pi) continue;
+        treeBaked[i] = !t->broken;
+        if (t->broken) continue;
+        const MeshB *P = &treeProto[t->kind];
+        float s = t->h / (t->kind == TREE_CONIFER ? CONIFER_H : BROADLEAF_H);
+        float a = (float)(i * 47 % 360) * DEG2RAD, ca = cosf(a), sn = sinf(a);
+        Color tint = tree_tint(i);
+        for (int k = 0; k < P->n; k++) {
+            float x = P->v[k * 3] * s, y = P->v[k * 3 + 1] * s, z = P->v[k * 3 + 2] * s;
+            V3 p = v3(t->x + x * ca + z * sn, t->y + y, t->z - x * sn + z * ca);
+            Color c = {(unsigned char)(P->c[k * 4] * tint.r / 255), (unsigned char)(P->c[k * 4 + 1] * tint.g / 255), (unsigned char)(P->c[k * 4 + 2] * tint.b / 255), 255};
+            mb_push(&m, p, c);
+        }
+        // Shadow disc, offset away from the sun and laid on the local slope.
         float R = t->h * (t->kind == TREE_CONIFER ? 0.24f : 0.33f);
-        // Offset away from the sun, sitting on the local slope.
         V3 c = v3(t->x - SUN.x * t->h * 0.25f, 0, t->z - SUN.z * t->h * 0.25f);
         c.y = terrain_height(c.x, c.z) + 0.05f;
         V3 n = terrain_normal(c.x, c.z);
-        Vector3 prev = {0};
+        Color col = {0, 0, 0, 255};
+        V3 prev = {0};
         for (int k = 0; k <= 8; k++) {
-            float a = 6.2831853f * k / 8;
-            float px = c.x + cosf(a) * R, pz = c.z + sinf(a) * R;
-            float py = c.y - (n.x * (px - c.x) + n.z * (pz - c.z)) / n.y;
-            Vector3 p = {px, py, pz};
-            if (k) { DrawTriangle3D(RV(c), p, prev, sh); DrawTriangle3D(RV(c), prev, p, sh); }
+            float an = 6.2831853f * k / 8;
+            V3 p = v3(c.x + cosf(an) * R, 0, c.z + sinf(an) * R);
+            p.y = c.y - (n.x * (p.x - c.x) + n.z * (p.z - c.z)) / n.y;
+            if (k) { mb_push(&sh, c, col); mb_push(&sh, p, col); mb_push(&sh, prev, col); }
             prev = p;
         }
     }
+    if (!m.n) { MemFree(m.v); MemFree(m.c); MemFree(sh.v); MemFree(sh.c); return; }
+    for (int k = 0; k < sh.n; k++) sh.c[k * 4 + 3] = sa;
+    treePatch[pi] = mb_model(&m);
+    shadowPatch[pi] = mb_model(&sh);
+    patchHas[pi] = 1;
+}
+
+static void build_tree_patches(const World *w) { for (int i = 0; i < TCH * TCH; i++) build_tree_patch(w, i); }
+
+// Rebuild any patch whose baked trees have since been knocked down.
+static void refresh_tree_patches(const World *w) {
+    static int lastDown = -1;
+    if (w->treesDown == lastDown) return;
+    lastDown = w->treesDown;
+    for (int i = 0; i < w->ntree; i++)
+        if (w->tree[i].broken && treeBaked[i]) build_tree_patch(w, tree_patch(&w->tree[i]));
+}
+
+static void draw_trees(const World *w, Vector3 eye) {
+    for (int i = 0; i < TCH * TCH; i++) if (patchHas[i]) DrawModel(treePatch[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
+    for (int i = 0; i < w->ntree; i++) {
+        const Tree *t = &w->tree[i];
+        if (!t->broken) continue;
+        float dx = t->x - eye.x, dz = t->z - eye.z;
+        if (dx * dx + dz * dz > 300.0f * 300.0f) continue;
+        float s = t->h / (t->kind == TREE_CONIFER ? CONIFER_H : BROADLEAF_H);
+        V3 axis = vcross(v3(0, 1, 0), t->fall);
+        Vector3 base = {t->x, t->y, t->z};
+        Vector3 top = {t->x + t->fall.x * 0.5f * t->r, t->y + 0.5f * s, t->z + t->fall.z * 0.5f * t->r};
+        DrawModelEx(treeModel[t->kind], top, RV(axis), t->tilt * RAD2DEG, (Vector3){s, s, s}, tree_tint(i));
+        float sr = t->r / 0.25f * (t->kind == TREE_CONIFER ? 1.0f : 0.25f / 0.22f);
+        DrawModelEx(stumpModel, base, (Vector3){0, 1, 0}, 0, (Vector3){sr * 0.25f, 1, sr * 0.25f}, WHITE);
+    }
+}
+
+static void draw_tree_shadows(void) {
+    for (int i = 0; i < TCH * TCH; i++) if (patchHas[i]) DrawModel(shadowPatch[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
 }
 
 // ---------------------------------------------------------- skid marks ----
@@ -724,6 +782,116 @@ static void draw_shards(void) {
     }
 }
 
+// -------------------------------------------------------------- weather ----
+// O cycles dry / wet / rain. Wet roads reflect (render.c) and cost ~12-20% tyre grip;
+// rain adds falling streaks and ripples; any wet road throws spray off the tyres.
+
+static int weather = 1;                         // 0 dry, 1 wet, 2 rain
+static const char *WEATHER_NAME[] = {"DRY", "WET", "RAIN"};
+static float weather_wet(void) { return weather == 0 ? 0.0f : (weather == 1 ? 0.75f : 1.0f); }
+static float weather_rain(void) { return weather == 2 ? 1.0f : 0.0f; }
+
+#define MAX_DROPS 2600
+static V3 drops[MAX_DROPS];
+static int dropsInit;
+static const V3 RAIN_VEL = {1.4f, -11.0f, 0.9f};
+
+static void respawn_drop(V3 *d, V3 cam, int anywhere) {
+    d->x = cam.x + (frand() - 0.5f) * 56.0f;
+    d->z = cam.z + (frand() - 0.5f) * 56.0f;
+    d->y = cam.y + (anywhere ? (frand() - 0.4f) * 30.0f : 14.0f + frand() * 6.0f);
+}
+
+static void update_rain(V3 cam, float dt) {
+    if (!dropsInit) { for (int i = 0; i < MAX_DROPS; i++) respawn_drop(&drops[i], cam, 1); dropsInit = 1; }
+    for (int i = 0; i < MAX_DROPS; i++) {
+        V3 *d = &drops[i];
+        *d = vadd(*d, vscale(RAIN_VEL, dt));
+        if (d->y < terrain_height(d->x, d->z) || fabsf(d->x - cam.x) > 30 || fabsf(d->z - cam.z) > 30 || d->y < cam.y - 14)
+            respawn_drop(d, cam, 0);
+    }
+}
+
+// Thin camera-facing streaks along the fall direction.
+static void draw_rain(V3 cam) {
+    V3 dir = vnorm(RAIN_VEL);
+    rlBegin(RL_TRIANGLES);
+    for (int i = 0; i < MAX_DROPS; i++) {
+        V3 a = drops[i], b = vadd(a, vscale(dir, 0.55f));
+        V3 side = vscale(vnorm(vcross(dir, vsub(a, cam))), 0.011f);
+        unsigned char al = (unsigned char)(40 + (i * 37 % 50));
+        rlColor4ub(170, 185, 210, al);
+        rlVertex3f(a.x - side.x, a.y - side.y, a.z - side.z); rlVertex3f(b.x - side.x, b.y - side.y, b.z - side.z); rlVertex3f(b.x + side.x, b.y + side.y, b.z + side.z);
+        rlVertex3f(a.x - side.x, a.y - side.y, a.z - side.z); rlVertex3f(b.x + side.x, b.y + side.y, b.z + side.z); rlVertex3f(a.x + side.x, a.y + side.y, a.z + side.z);
+    }
+    rlEnd();
+}
+
+#define MAX_SPRAY 2400
+typedef struct { V3 p, v; float life, max, size; } Spray;
+static Spray spray[MAX_SPRAY];
+static int sprayHead;
+static Texture2D softTex;
+
+static void init_spray(void) {
+    Image im = GenImageGradientRadial(64, 64, 0.0f, (Color){255, 255, 255, 255}, (Color){255, 255, 255, 0});
+    softTex = LoadTextureFromImage(im);
+    UnloadImage(im);
+    SetTextureFilter(softTex, TEXTURE_FILTER_BILINEAR);
+}
+
+// Mist thrown up behind each tyre on a wet road, more with speed.
+static void emit_spray(const World *w, float dt) {
+    if (!weather) return;
+    for (int ci = 0; ci < w->ncars; ci++) {
+        const Car *c = &w->cars[ci];
+        if (!c->active) continue;
+        float sp = vlen(c->vel);
+        if (sp < 4.0f) continue;
+        for (int i = 0; i < 4; i++) {
+            const Wheel *W = &c->w[i];
+            if (!W->contact) continue;
+            float n = sp * dt * (weather == 2 ? 2.2f : 1.4f) * (road_at(W->cp.x, W->cp.z) ? 1.0f : 0.35f);
+            int k = (int)n + (frand() < n - (int)n);
+            for (int j = 0; j < k; j++) {
+                Spray *s = &spray[sprayHead];
+                sprayHead = (sprayHead + 1) % MAX_SPRAY;
+                V3 back = vscale(c->fwd, -WHEEL_R * 0.9f);
+                s->p = vadd(vadd(W->cp, back), v3(0, 0.12f, 0));
+                s->v = vadd(vscale(c->vel, 0.55f + 0.2f * frand()),
+                            v3((frand() - 0.5f) * 2.5f, 1.0f + frand() * 2.2f, (frand() - 0.5f) * 2.5f));
+                s->v = vadd(s->v, vscale(c->right, (i % 2 ? 1.0f : -1.0f) * frand() * 1.5f));
+                s->max = s->life = 0.5f + 0.7f * frand();
+                s->size = 0.25f + 0.25f * frand();
+            }
+        }
+    }
+}
+
+static void update_spray(float dt) {
+    for (int i = 0; i < MAX_SPRAY; i++) {
+        Spray *s = &spray[i];
+        if (s->life <= 0) continue;
+        s->life -= dt;
+        s->v = vscale(s->v, 1.0f - fminf(dt * 2.6f, 0.9f));     // air drag stops the mist quickly
+        s->v.y -= 2.5f * dt;
+        s->p = vadd(s->p, vscale(s->v, dt));
+        s->size += dt * 1.6f;
+        float g = terrain_height(s->p.x, s->p.z) + 0.05f;
+        if (s->p.y < g) { s->p.y = g; s->v.y = 0; }
+    }
+}
+
+static void draw_spray(Camera3D cam) {
+    for (int i = 0; i < MAX_SPRAY; i++) {
+        const Spray *s = &spray[i];
+        if (s->life <= 0) continue;
+        float a = s->life / s->max;
+        unsigned char al = (unsigned char)(70 * a * a);
+        DrawBillboard(cam, softTex, RV(s->p), s->size, (Color){200, 208, 220, al});
+    }
+}
+
 // ---------------------------------------------------------- world meshes ----
 
 static Model city, cityGlow, cityPool;
@@ -740,6 +908,7 @@ static void build_world_meshes(const World *w) {
     cityGlow.materials[0].shader = post_emissive_shader();
     cityPool.materials[0].shader = post_emissive_shader();
     build_trees();
+    build_tree_patches(w);
     meshesBuilt = 1;
 }
 
@@ -783,7 +952,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     hud_panel(16, 16, 74 + txtw(zn, 20), 40);
     slash(26, 26, 5, 20, HUD_ORANGE); slash(35, 26, 5, 20, HUD_ORANGE);
     txt(zn, 58, 26, 20, RAYWHITE);
-    const char *tr = TextFormat("%s  [L]     %d FPS", ENV->name, GetFPS());
+    const char *tr = TextFormat("%s [L]   %s [O]     %d FPS", ENV->name, WEATHER_NAME[weather], GetFPS());
     txt(tr, sw - 22 - txtw(tr, 15), 22, 15, HUD_DIM);
 
     float px = 16, py = sh - 116, pw = 470, ph = 100;
@@ -822,7 +991,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
         const char *lines[] = {
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  hood cam      B  beam view (stress)", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
-            "T  slow-mo      P  pause      K  clear skids", "G  drop tailgate      L  lighting      H  hide help",
+            "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
             "", "Ramp ahead, crash wall behind you. Town up the", "cross road to the left, warehouses to the right,",
             "forest on the hills. Small trees snap; big ones don't."};
         int n = sizeof lines / sizeof lines[0];
@@ -852,10 +1021,16 @@ int main(void) {
 
     post_init();
     hud_load_font();
+    init_spray();
 
     static World world;
     world_init(&world);
     build_world_meshes(&world);
+    {
+        float rr[16][4]; int nh;
+        int n = road_rects(rr, 16, &nh);
+        post_set_roads((const float (*)[4])rr, n, nh);
+    }
     world.ncars = 3;
     spawn_player(&world);
     car_build(&world.cars[1], v3(-2.2f, CAR_SPAWN_H, 26), PI / 2, PALETTE[1]);
@@ -904,6 +1079,7 @@ int main(void) {
         if (IsKeyPressed(KEY_H) || IsKeyPressed(KEY_F1)) help = !help;
         if (IsKeyPressed(KEY_K)) { skidCount = 0; skidHead = 0; }
         if (IsKeyPressed(KEY_G)) car_pop_tailgate(pc);
+        if (IsKeyPressed(KEY_O)) weather = (weather + 1) % 3;
         if (IsKeyPressed(KEY_L)) { set_env((envIdx + 1) % (int)(sizeof ENVS / sizeof ENVS[0])); build_world_meshes(&world); }
 
         int up = IsKeyDown(KEY_W) || IsKeyDown(KEY_UP);
@@ -934,6 +1110,14 @@ int main(void) {
             if (world.cars[i].glassNew) { spawn_glass(&world.cars[i], world.cars[i].glassNew); world.cars[i].glassNew = 0; }
         update_shards(paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         if (steps) update_skids(&world);
+        refresh_tree_patches(&world);
+        for (int i = 0; i < world.ncars; i++) world.cars[i].wetness = weather_wet();
+        {
+            float sdt = paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f);
+            if (weather == 2) update_rain(v3(camPos.x, camPos.y, camPos.z), sdt);
+            emit_spray(&world, sdt);
+            update_spray(sdt);
+        }
 
         // ---- camera
         Vector2 md = GetMouseDelta();
@@ -978,16 +1162,26 @@ int main(void) {
         post_capture_camera(cam);
         for (int i = 0; i < CH_N * CH_N; i++) DrawModel(chunks[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
         rlDisableBackfaceCulling();
+        post_begin_objects();
         DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
         draw_trees(&world, cam.position);
+        post_end_objects();
         rlDrawRenderBatchActive();
         rlDisableDepthMask();                      // see-through decals: no depth writes, so overlaps just add up
         draw_skids();
-        draw_tree_shadows(&world, cam.position);
+        draw_tree_shadows();
         rlDrawRenderBatchActive();
         rlEnableDepthMask();
+        post_begin_objects();
         for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z));
+        post_end_objects();
         draw_shards();
+        rlDrawRenderBatchActive();
+        rlDisableDepthMask();
+        draw_spray(cam);
+        if (weather == 2) draw_rain(v3(cam.position.x, cam.position.y, cam.position.z));
+        rlDrawRenderBatchActive();
+        rlEnableDepthMask();
         // Things that glow, then additive light pools (no depth writes so they don't occlude).
         int lightsOn = ENV->lights > 0.01f;
         if (lightsOn) { post_set_emissive(0.6f + 2.2f * ENV->lights); DrawModel(cityGlow, (Vector3){0, 0, 0}, 1.0f, WHITE); }
@@ -1010,7 +1204,7 @@ int main(void) {
 
         // ---- grade it onto the screen, then the HUD
         BeginDrawing();
-        post_present(ENV, (float)GetTime());
+        post_present(ENV, (float)GetTime(), weather_wet(), weather_rain());
         draw_hud(pc, &world, vF, ctl, slowmo, paused, help);
         EndDrawing();
     }

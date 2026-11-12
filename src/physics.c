@@ -574,7 +574,7 @@ static void wheel_forces(Car *c, float h) {
         V3 ws = vnorm(vcross(wf, n));
         float vl = vdot(vel, wf), vs = vdot(vel, ws);
         int hb = ctl->handbrake && !W->front;
-        float mu = MU_TIRE * (hb ? 0.55f : 1.0f);
+        float mu = MU_TIRE * (1.0f - 0.2f * c->wetness) * (hb ? 0.55f : 1.0f);
 
         float Fy = -vs * N * LAT_STIFF;
         float Fx = drive * W->driveShare;
@@ -791,6 +791,14 @@ int road_at(float x, float z) {
     for (int i = 0; i < NELEM(ROADS); i++) if (in_rect(&ROADS[i], x, z, 0)) return 1;
     for (int i = 0; i < NELEM(STREETS); i++) if (in_rect(&STREETS[i], x, z, 0)) return 2;
     return 0;
+}
+
+int road_rects(float (*out)[4], int max, int *nHighway) {
+    int n = 0;
+    for (int i = 0; i < NELEM(ROADS) && n < max; i++, n++) { out[n][0] = ROADS[i].x0; out[n][1] = ROADS[i].x1; out[n][2] = ROADS[i].z0; out[n][3] = ROADS[i].z1; }
+    *nHighway = n;
+    for (int i = 0; i < NELEM(STREETS) && n < max; i++, n++) { out[n][0] = STREETS[i].x0; out[n][1] = STREETS[i].x1; out[n][2] = STREETS[i].z0; out[n][3] = STREETS[i].z1; }
+    return n;
 }
 
 static unsigned rng_state;

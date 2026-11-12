@@ -20,7 +20,10 @@ void post_init(void);                           // after InitWindow
 void post_begin_scene(void);                    // render the world between these two...
 void post_capture_camera(Camera3D cam);         // ...call right after BeginMode3D
 void post_end_scene(void);
-void post_present(const Env *e, float time);    // draws the graded image to the screen
+void post_begin_objects(void);                  // draw non-ground geometry between these (keeps it dry)
+void post_end_objects(void);
+void post_present(const Env *e, float time, float wet, float rain);   // draws the graded image to the screen
+void post_set_roads(const float (*rects)[4], int n, int nHighway);    // road rectangles (x0, x1, z0, z1) for wetness
 void post_emissive_begin(float intensity);      // draw glowing things (colour * intensity, can exceed 1)
 void post_emissive_end(void);
 Shader post_emissive_shader(void);              // for models: material shader...
