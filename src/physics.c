@@ -263,6 +263,7 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
     memset(c, 0, sizeof *c);
     memset(ADJ, 0, sizeof ADJ);
     c->def = D; c->type = type;
+    c->grip = 1.0f;
     c->color = color;
     c->active = 1;
     for (int i = 0; i < 6; i++) c->tgLatch[i] = -1;
@@ -669,7 +670,7 @@ static void wheel_forces(Car *c, float h) {
         V3 ws = vnorm(vcross(wf, n));
         float vl = vdot(vel, wf), vs = vdot(vel, ws);
         int hb = ctl->handbrake && !W->front;
-        float mu = MU_TIRE * (1.0f - 0.2f * c->wetness) * (hb ? 0.55f : 1.0f);
+        float mu = MU_TIRE * c->grip * (hb ? 0.55f : 1.0f);
 
         float Fy = -vs * N * LAT_STIFF;
         float Fx = drive * W->driveShare;

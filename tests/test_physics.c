@@ -164,6 +164,16 @@ int main(void) {
         while (vdot(W.cars[0].vel, W.cars[0].fwd) > 0.3f) run(0.05f, brake);
         printf("  hatch 100-0 braking distance: %.1f m\n", fabsf(W.cars[0].pos.x - x0));
         report("  hatch stopped");
+        // Same stop on snow (grip 0.5).
+        world_init(&W); W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(60, hd->spawnH, -60), 3.14159f, v3(1, 0, 0));
+        W.cars[0].grip = 0.5f;
+        run(1, idle);
+        for (int i = 0; i < W.cars[0].nn; i++) W.cars[0].n[i].v = vadd(W.cars[0].n[i].v, vscale(W.cars[0].fwd, 100 / 3.6f));
+        car_update_frame(&W.cars[0]);
+        x0 = W.cars[0].pos.x;
+        while (vdot(W.cars[0].vel, W.cars[0].fwd) > 0.3f) run(0.05f, brake);
+        printf("  hatch 100-0 on snow: %.1f m\n", fabsf(W.cars[0].pos.x - x0));
         world_init(&W); W.ncars = 1;
         car_build_vehicle(&W.cars[0], VEH_HATCH, v3(0, hd->spawnH, -60), 3.14159f, v3(1, 0, 0));
         run(1, idle); run(4.0f, gas); report("hatch before turn");

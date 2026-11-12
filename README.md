@@ -31,7 +31,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | G | drop the tailgate |
 | V | choose vehicle (←/→, Enter) |
 | L | lighting: dusk / day |
-| O | weather: dry / wet / rain |
+| O | weather: dry / wet / rain / snow |
 | Q | recover (fresh car, upright, in place) |
 | R | reset to start |
 | T / P | slow-mo / pause |
@@ -108,6 +108,10 @@ Saplings and young trees snap and fall when you hit them; mature trunks stop you
   vertically, the way wet asphalt streaks lights, and composited after darkening the wet surface.
   Damp asphalt gets a sheen; puddles are nearly mirrors. Rain adds falling streaks and fine
   ripples. Any wet road throws spray off the tyres, and costs about 15–20% of tyre grip.
+- **Snow**: snow cover is baked into the terrain, roofs and tree tops, wherever a surface faces
+  up. Ploughed roads keep less of it and steep rock sheds it. Snowflakes drift as soft sprites
+  around the camera. The sky turns overcast with thicker haze, every rolling wheel leaves a track,
+  and tyre grip halves (the Sparrow's 100–0 km/h stop goes from 37 m to 68 m).
 - **Integration**: semi-implicit Euler at 1200 Hz fixed substeps. Each beam's stiffness and
   damping is limited by the masses it connects, which keeps the explicit integrator stable.
 

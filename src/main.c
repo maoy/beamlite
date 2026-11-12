@@ -3,6 +3,7 @@
 
 #include "raylib.h"
 #include "rlgl.h"
+#include "raymath.h"
 #include "physics.h"
 #include "render.h"
 #include <stdio.h>
@@ -29,6 +30,15 @@ static void set_env(int i) {
     SUNC = v3(ENV->bakeSun.x, ENV->bakeSun.y, ENV->bakeSun.z);
 }
 
+// Snow lying on the world (0..1). Baked into terrain, buildings and trees, so changing it rebuilds them.
+static float snowCover;
+static Color snow_over(Color c, float k) {          // blend toward fresh snow by k
+    if (k <= 0) return c;
+    const float sr = 228, sg = 233, sb = 242;
+    return (Color){(unsigned char)(c.r + (sr - c.r) * k), (unsigned char)(c.g + (sg - c.g) * k), (unsigned char)(c.b + (sb - c.b) * k), c.a};
+}
+static float smoothk(float e0, float e1, float x) { float t = fminf(fmaxf((x - e0) / (e1 - e0), 0.0f), 1.0f); return t * t * (3 - 2 * t); }
+
 // Bake ambient + sun light into a colour for a face with normal n.
 static Color lit(Color c, V3 n, float k) {
     float d = fmaxf(vdot(n, SUN), 0.0f);
@@ -48,24 +58,27 @@ static Model chunks[CH_N * CH_N];
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
 static Color terrain_color(float x, float z, float y, V3 n) {
-    float r, g, b;
+    float r, g, b, cover = 1.0f;
     float noise = 0.5f + 0.25f * sinf(x * 0.37f + 1.7f) * sinf(z * 0.41f) + 0.25f * sinf(x * 0.13f - z * 0.17f);
-    if (x > 40 && x < 58 && fabsf(z) < 6.5f) { r = 0.72f; g = 0.66f; b = 0.55f; }               // ramp
-    else if (fabsf(x) < 8 && z > 40 && z < 140) { r = 0.55f; g = 0.42f; b = 0.28f; }             // dirt
-    else if (road_at(x, z) == 1) { r = g = b = 0.30f + 0.04f * noise; }                          // highway
-    else if (road_at(x, z) == 2) { r = g = b = 0.27f + 0.03f * noise; }                          // town street
+    if (x > 40 && x < 58 && fabsf(z) < 6.5f) { r = 0.72f; g = 0.66f; b = 0.55f; cover = 0.7f; }  // ramp
+    else if (fabsf(x) < 8 && z > 40 && z < 140) { r = 0.55f; g = 0.42f; b = 0.28f; cover = 0.8f; } // dirt
+    else if (road_at(x, z) == 1) { r = g = b = 0.30f + 0.04f * noise; cover = 0.18f + 0.22f * noise; }   // highway (ploughed)
+    else if (road_at(x, z) == 2) { r = g = b = 0.27f + 0.03f * noise; cover = 0.25f + 0.25f * noise; }   // town street
     else if (road_at(x + 2.2f, z) == 2 || road_at(x - 2.2f, z) == 2 || road_at(x, z + 2.2f) == 2 || road_at(x, z - 2.2f) == 2) {
-        r = 0.50f; g = 0.49f; b = 0.47f;                                                         // pavement
+        r = 0.50f; g = 0.49f; b = 0.47f; cover = 0.85f;                                          // pavement
     }
     else {                                                                                       // grass / hills
         r = 0.26f + 0.10f * noise; g = 0.47f + 0.12f * noise; b = 0.20f;
         float rock = fminf(fmaxf((1.0f - n.y) * 4.0f, 0), 1);
         r += (0.50f - r) * rock; g += (0.47f - g) * rock; b += (0.42f - b) * rock;
+        cover = 1.0f - 0.8f * rock;                                                              // steep rock sheds snow
         (void)y;
     }
     int gx = (int)lroundf(x / CELL), gz = (int)lroundf(z / CELL);
     if (gx % 5 == 0 || gz % 5 == 0) { r *= 0.93f; g *= 0.93f; b *= 0.93f; }  // 10 m grid for speed sense
-    return lit((Color){(unsigned char)fminf(255, r * 255), (unsigned char)fminf(255, g * 255), (unsigned char)fminf(255, b * 255), 255}, n, 1.0f);
+    Color base = {(unsigned char)fminf(255, r * 255), (unsigned char)fminf(255, g * 255), (unsigned char)fminf(255, b * 255), 255};
+    base = snow_over(base, snowCover * cover * (0.92f + 0.08f * noise));
+    return lit(base, n, 1.0f);
 }
 
 static Model build_chunk(int cx, int cz) {
@@ -122,6 +135,7 @@ static void mb_tri(MeshB *m, V3 a, V3 b, V3 c, Color col, V3 ref) {
     V3 n = vnorm(vcross(vsub(b, a), vsub(c, a)));
     V3 ctr = vscale(vadd(vadd(a, b), c), 1.0f / 3.0f);
     if (vdot(n, vsub(ctr, ref)) < 0) { V3 t = b; b = c; c = t; n = vscale(n, -1); }
+    if (!mbFlat && snowCover > 0) col = snow_over(col, snowCover * 0.9f * smoothk(0.40f, 0.80f, n.y));
     Color s = mbFlat ? col : lit(col, n, 1.08f);
     s.a = 255;
     mb_push(m, a, s); mb_push(m, b, s); mb_push(m, c, s);
@@ -573,16 +587,23 @@ static int skidCount, skidHead;
 static V3 skidLast[MAX_CARS][4];
 static int skidHas[MAX_CARS][4];
 
+static int snowTracks;                          // set while snowing: all rolling wheels leave tracks
+
+static void skids_forget(int ci) { for (int i = 0; i < 4; i++) skidHas[ci][i] = 0; }
+
 static void update_skids(World *w) {
     for (int ci = 0; ci < w->ncars; ci++) {
         Car *c = &w->cars[ci];
         for (int i = 0; i < 4; i++) {
             Wheel *W = &c->w[i];
-            if (!c->active || !W->contact || W->slip < 0.12f) { skidHas[ci][i] = 0; continue; }
+            int track = snowTracks && vlen(c->vel) > 0.8f;
+            if (!c->active || !W->contact || (W->slip < 0.12f && !track)) { skidHas[ci][i] = 0; continue; }
             V3 n = terrain_normal(W->cp.x, W->cp.z);
             V3 cur = vadd(W->cp, vscale(n, 0.03f));
             if (skidHas[ci][i]) {
-                if (vlen(vsub(cur, skidLast[ci][i])) < 0.3f) continue;
+                float gap = vlen(vsub(cur, skidLast[ci][i]));
+                if (gap < 0.3f) continue;
+                if (gap > 2.0f) { skidLast[ci][i] = cur; continue; }   // car was rebuilt or teleported: start a new mark
                 V3 s = vscale(W->side, 0.11f), l = skidLast[ci][i];
                 skids[skidHead] = (Skid){RV(vsub(l, s)), RV(vadd(l, s)), RV(vadd(cur, s)), RV(vsub(cur, s))};
                 skidHead = (skidHead + 1) % MAX_SKID;
@@ -594,7 +615,7 @@ static void update_skids(World *w) {
 }
 
 static void draw_skids(void) {
-    Color col = {20, 20, 20, 150};
+    Color col = snowTracks ? (Color){70, 76, 88, 150} : (Color){20, 20, 20, 150};
     for (int i = 0; i < skidCount; i++) {
         Skid *s = &skids[i];
         DrawTriangle3D(s->a, s->c, s->b, col);
@@ -913,10 +934,12 @@ static void draw_shards(void) {
 // O cycles dry / wet / rain. Wet roads reflect (render.c) and cost ~12-20% tyre grip;
 // rain adds falling streaks and ripples; any wet road throws spray off the tyres.
 
-static int weather = 1;                         // 0 dry, 1 wet, 2 rain
-static const char *WEATHER_NAME[] = {"DRY", "WET", "RAIN"};
-static float weather_wet(void) { return weather == 0 ? 0.0f : (weather == 1 ? 0.75f : 1.0f); }
+static int weather = 1;                         // 0 dry, 1 wet, 2 rain, 3 snow
+#define WEATHER_COUNT 4
+static const char *WEATHER_NAME[] = {"DRY", "WET", "RAIN", "SNOW"};
+static float weather_wet(void) { return weather == 1 ? 0.75f : (weather == 2 ? 1.0f : 0.0f); }
 static float weather_rain(void) { return weather == 2 ? 1.0f : 0.0f; }
+static float weather_grip(void) { return weather == 3 ? 0.5f : (weather == 2 ? 0.8f : (weather == 1 ? 0.85f : 1.0f)); }
 
 #define MAX_DROPS 2600
 static V3 drops[MAX_DROPS];
@@ -924,17 +947,23 @@ static int dropsInit;
 static const V3 RAIN_VEL = {1.4f, -11.0f, 0.9f};
 
 static void respawn_drop(V3 *d, V3 cam, int anywhere) {
-    d->x = cam.x + (frand() - 0.5f) * 56.0f;
-    d->z = cam.z + (frand() - 0.5f) * 56.0f;
-    d->y = cam.y + (anywhere ? (frand() - 0.4f) * 30.0f : 14.0f + frand() * 6.0f);
+    float span = weather == 3 ? 30.0f : 56.0f;         // snow: keep the flakes close, where you can see them
+    d->x = cam.x + (frand() - 0.5f) * span;
+    d->z = cam.z + (frand() - 0.5f) * span;
+    if (weather == 3) d->y = cam.y + (anywhere ? (frand() - 0.35f) * 16.0f : 5.0f + frand() * 6.0f);   // flakes fall slowly: start close
+    else d->y = cam.y + (anywhere ? (frand() - 0.4f) * 30.0f : 14.0f + frand() * 6.0f);
 }
 
 static void update_rain(V3 cam, float dt) {
     if (!dropsInit) { for (int i = 0; i < MAX_DROPS; i++) respawn_drop(&drops[i], cam, 1); dropsInit = 1; }
+    float t = (float)GetTime();
     for (int i = 0; i < MAX_DROPS; i++) {
         V3 *d = &drops[i];
-        *d = vadd(*d, vscale(RAIN_VEL, dt));
-        if (d->y < terrain_height(d->x, d->z) || fabsf(d->x - cam.x) > 30 || fabsf(d->z - cam.z) > 30 || d->y < cam.y - 14)
+        if (weather == 3)                                // flakes: slow fall, each drifting on its own wobble
+            *d = vadd(*d, vscale(v3(0.5f + 0.6f * sinf(t * 0.9f + i * 1.7f), -1.1f - 0.4f * ((i * 37) % 10) / 10.0f, 0.3f + 0.6f * cosf(t * 0.7f + i * 2.3f)), dt));
+        else *d = vadd(*d, vscale(RAIN_VEL, dt));
+        float lim = weather == 3 ? 16.0f : 30.0f;
+        if (d->y < terrain_height(d->x, d->z) || fabsf(d->x - cam.x) > lim || fabsf(d->z - cam.z) > lim || d->y < cam.y - 14)
             respawn_drop(d, cam, 0);
     }
 }
@@ -954,11 +983,19 @@ static void draw_rain(V3 cam) {
     rlEnd();
 }
 
+// Snowflakes: small soft sprites (softTex is created with the spray, below).
+static Texture2D softTex;
+static void draw_snow(Camera3D cam) {
+    for (int i = 0; i < MAX_DROPS; i++) {
+        float sz = 0.07f + 0.07f * ((i * 53) % 10) / 10.0f;
+        DrawBillboard(cam, softTex, RV(drops[i]), sz, (Color){240, 244, 252, 230});
+    }
+}
+
 #define MAX_SPRAY 2400
 typedef struct { V3 p, v; float life, max, size; } Spray;
 static Spray spray[MAX_SPRAY];
 static int sprayHead;
-static Texture2D softTex;
 
 static void init_spray(void) {
     Image im = GenImageGradientRadial(64, 64, 0.0f, (Color){255, 255, 255, 255}, (Color){255, 255, 255, 0});
@@ -1200,6 +1237,7 @@ static int playerType = VEH_PICKUP;
 static V3 player_paint(void) { return vehicle_def(playerType)->paint; }
 
 static void spawn_player(World *w) {
+    skids_forget(0);
     car_build_vehicle(&w->cars[0], playerType, v3(0, terrain_height(0, 0) + vehicle_def(playerType)->spawnH, 0), 0, player_paint());
 }
 
@@ -1251,6 +1289,7 @@ int main(void) {
         if (IsKeyPressed(KEY_Q)) {       // recover: upright where you are, keep heading, fresh car
             float hdg = atan2f(pc->fwd.z, pc->fwd.x);
             V3 p = pc->pos;
+            skids_forget(0);
             car_build_vehicle(pc, playerType, v3(p.x, terrain_height(p.x, p.z) + vehicle_def(playerType)->spawnH + 0.2f, p.z), -hdg, player_paint());
         }
         if (IsKeyPressed(KEY_N)) {       // drop a parked truck ahead, side-on (unless that's inside a building)
@@ -1261,6 +1300,7 @@ int main(void) {
                 int slot = world.ncars < MAX_CARS ? world.ncars++ : nextSlot;
                 if (slot == nextSlot) nextSlot = nextSlot + 1 >= MAX_CARS ? 1 : nextSlot + 1;
                 int ty = slot % VEH_COUNT;
+                skids_forget(slot);
                 car_build_vehicle(&world.cars[slot], ty, v3(p.x, p.y + vehicle_def(ty)->spawnH + 0.1f, p.z), -hdg + PI / 2, PALETTE[slot % 8]);
                 world.cars[slot].ctl = (Controls){0, 0.6f, 0, 1};
             }
@@ -1273,7 +1313,12 @@ int main(void) {
         if (IsKeyPressed(KEY_H) || IsKeyPressed(KEY_F1)) help = !help;
         if (IsKeyPressed(KEY_K)) { skidCount = 0; skidHead = 0; }
         if (IsKeyPressed(KEY_G)) car_pop_tailgate(pc);
-        if (IsKeyPressed(KEY_O)) weather = (weather + 1) % 3;
+        if (IsKeyPressed(KEY_O)) {
+            int was = weather == 3;
+            weather = (weather + 1) % WEATHER_COUNT;
+            dropsInit = 0;                               // reseed precipitation for the new weather
+            if ((weather == 3) != was) { snowCover = weather == 3 ? 1.0f : 0.0f; build_world_meshes(&world); }
+        }
         if (IsKeyPressed(KEY_V)) { pickerOpen = !pickerOpen; pickerSel = playerType; }
         else if (pickerOpen) {
             if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) pickerSel = (pickerSel + VEH_COUNT - 1) % VEH_COUNT;
@@ -1283,6 +1328,7 @@ int main(void) {
                 playerType = pickerSel; pickerOpen = 0;
                 float hdg = atan2f(pc->fwd.z, pc->fwd.x);
                 V3 p = pc->pos;
+                skids_forget(0);
                 car_build_vehicle(pc, playerType, v3(p.x, terrain_height(p.x, p.z) + vehicle_def(playerType)->spawnH + 0.2f, p.z), -hdg, player_paint());
             }
         }
@@ -1318,10 +1364,11 @@ int main(void) {
         update_shards(paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         if (steps) update_skids(&world);
         refresh_tree_patches(&world);
-        for (int i = 0; i < world.ncars; i++) world.cars[i].wetness = weather_wet();
+        for (int i = 0; i < world.ncars; i++) world.cars[i].grip = weather_grip();
+        snowTracks = weather == 3;
         {
             float sdt = paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f);
-            if (weather == 2) update_rain(v3(camPos.x, camPos.y, camPos.z), sdt);
+            if (weather >= 2) update_rain(v3(camPos.x, camPos.y, camPos.z), sdt);
             emit_spray(&world, sdt);
             update_spray(sdt);
         }
@@ -1387,6 +1434,7 @@ int main(void) {
         rlDisableDepthMask();
         draw_spray(cam);
         if (weather == 2) draw_rain(v3(cam.position.x, cam.position.y, cam.position.z));
+        if (weather == 3) draw_snow(cam);
         rlDrawRenderBatchActive();
         rlEnableDepthMask();
         // Things that glow, then additive light pools (no depth writes so they don't occlude).
@@ -1411,7 +1459,18 @@ int main(void) {
 
         // ---- grade it onto the screen, then the HUD
         BeginDrawing();
-        post_present(ENV, (float)GetTime(), weather_wet(), weather_rain());
+        Env env = *ENV;
+        if (weather == 3) {                              // overcast: flatter, greyer sky and thicker haze
+            float day = 1.0f - ENV->lights;
+            Vector3 grey = {0.16f + 0.48f * day, 0.18f + 0.50f * day, 0.24f + 0.50f * day};
+            env.zenith = Vector3Lerp(env.zenith, Vector3Scale(grey, 0.75f), 0.7f);
+            env.horizon = Vector3Lerp(env.horizon, grey, 0.75f);
+            env.horizonAway = Vector3Lerp(env.horizonAway, grey, 0.75f);
+            env.fogCol = Vector3Lerp(env.fogCol, Vector3Scale(grey, 0.9f), 0.8f);
+            env.sunCol = Vector3Scale(env.sunCol, 0.35f);
+            env.fogDensity *= 2.2f;
+        }
+        post_present(&env, (float)GetTime(), weather_wet(), weather_rain());
         draw_hud(pc, &world, vF, pickerOpen ? (Controls){0} : ctl, slowmo, paused, help);
         if (pickerOpen) draw_picker();
         EndDrawing();
