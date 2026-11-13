@@ -1071,6 +1071,7 @@ static void draw_trees(const World *w, Vector3 eye) {
 }
 
 static void draw_tree_shadows(void) {
+    if (post_shadow_active()) return;
     for (int i = 0; i < TCH * TCH; i++) if (patchHas[i]) DrawModel(shadowPatch[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
 }
 
@@ -1080,17 +1081,17 @@ static void draw_tree_shadows(void) {
 typedef struct { Vector3 a, b, c, d; } Skid;
 static Skid skids[MAX_SKID];
 static int skidCount, skidHead;
-static V3 skidLast[MAX_CARS][4];
-static int skidHas[MAX_CARS][4];
+static V3 skidLast[MAX_CARS][MAX_WHEELS];
+static int skidHas[MAX_CARS][MAX_WHEELS];
 
 static int snowTracks;                          // set while snowing: all rolling wheels leave tracks
 
-static void skids_forget(int ci) { for (int i = 0; i < 4; i++) skidHas[ci][i] = 0; }
+static void skids_forget(int ci) { for (int i = 0; i < MAX_WHEELS; i++) skidHas[ci][i] = 0; }
 
 static void update_skids(World *w) {
     for (int ci = 0; ci < w->ncars; ci++) {
         Car *c = &w->cars[ci];
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < c->nw; i++) {
             Wheel *W = &c->w[i];
             int track = snowTracks && vlen(c->vel) > 0.8f;
             if (!c->active || !W->contact || (W->slip < 0.12f && !track)) { skidHas[ci][i] = 0; continue; }
@@ -1137,9 +1138,17 @@ static void draw_lightbar(const Car *c, const LightStrip *L, Color col) {
     DrawTriangle3D(RV(a), RV(bl), RV(b), col);
 }
 
-// Paint shading for one point: baked-style sun/ambient, a sky reflection that grows toward
-// grazing angles (clear coat), and a sun highlight.
+// ---- materials for the paint shader
+enum { MAT_UNLIT = 255, MAT_PAINT = 250, MAT_FLAME = 245, MAT_CHROME = 240, MAT_GLASS = 235, MAT_SATIN = 230, MAT_MATTE = 225, MAT_STEEL = 220, MAT_GLOSS = 215 };
+static int pbrOn;                               // drawing between post_paint_begin/end
+static int depthOnly;                           // drawing the shadow map: skip decals
+static Color pbr(Color base, V3 n, int mat) { rlNormal3f(n.x, n.y, n.z); base.a = (unsigned char)mat; return base; }
+
+// Paint shading for one point. Under the paint shader this just hands over the normal and a material;
+// otherwise (CPU fallback) baked-style sun/ambient, a sky reflection toward grazing angles, a highlight.
 static Color shade_paint(Color base, V3 n, V3 p, V3 eye, float gloss) {
+    if (pbrOn) return pbr(base, n, gloss >= 0.95f ? MAT_PAINT : gloss >= 0.5f ? MAT_GLOSS : gloss > 0.05f ? MAT_SATIN : MAT_MATTE);
+    if (depthOnly) return base;                 // shadow map: colour is irrelevant
     Color col = lit(base, n, 1.0f);
     V3 v = vnorm(vsub(eye, p));
     float fres = 0.10f + 0.55f * powf(1.0f - fmaxf(vdot(n, v), 0.0f), 3.0f);
@@ -1162,10 +1171,251 @@ static void draw_obox(V3 c, V3 ax, V3 ay, V3 az, Color col, V3 eye) {
             V3 n = vscale(axes[a], (float)sgn), u = axes[(a + 1) % 3], w = axes[(a + 2) % 3];
             V3 fc = vadd(c, n);
             V3 q0 = vsub(vsub(fc, u), w), q1 = vsub(vadd(fc, u), w), q2 = vadd(vadd(fc, u), w), q3 = vadd(vsub(fc, u), w);
-            Color k = oboxGloss > 0 ? shade_paint(col, vnorm(n), fc, eye, oboxGloss) : lit(col, vnorm(n), 1.15f);
+            Color k = oboxGloss > 0 ? shade_paint(col, vnorm(n), fc, eye, oboxGloss) : pbrOn ? pbr(col, vnorm(n), MAT_MATTE) : lit(col, vnorm(n), 1.15f);
             DrawTriangle3D(RV(q0), RV(q1), RV(q2), k); DrawTriangle3D(RV(q0), RV(q2), RV(q3), k);
         }
 }
+
+// A triangle with one normal and material.
+static void ptri(V3 a, V3 b, V3 d, V3 n, Color col, int mat) {
+    Color k = pbrOn ? pbr(col, n, mat) : col;
+    DrawTriangle3D(RV(a), RV(b), RV(d), k);
+}
+// A box given its centre and three half-axis vectors.
+static void pbox(V3 c, V3 ax, V3 ay, V3 az, Color col, int mat) {
+    V3 axes[3] = {ax, ay, az};
+    for (int a = 0; a < 3; a++)
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            V3 n = vscale(axes[a], (float)sgn), u = axes[(a + 1) % 3], w = axes[(a + 2) % 3];
+            V3 fc = vadd(c, n), nn = vnorm(n);
+            V3 q0 = vsub(vsub(fc, u), w), q1 = vsub(vadd(fc, u), w), q2 = vadd(vadd(fc, u), w), q3 = vadd(vsub(fc, u), w);
+            ptri(q0, q1, q2, nn, col, mat); ptri(q0, q2, q3, nn, col, mat);
+        }
+}
+// A cylinder or cone frustum from a (radius r0) to b (radius r1), smooth-shaded; caps: 1 = at a, 2 = at b.
+static void pcyl(V3 a, V3 b, float r0, float r1, int sides, Color col, int mat, int caps) {
+    V3 ax = vnorm(vsub(b, a));
+    V3 u = vnorm(vcross(ax, fabsf(ax.y) < 0.9f ? v3(0, 1, 0) : v3(1, 0, 0))), w = vcross(ax, u);
+    float len = vlen(vsub(b, a)), slope = len > 1e-5f ? (r0 - r1) / len : 0.0f;
+    if (len < 0.004f) slope = r0 > r1 ? 50.0f : -50.0f;          // a flat ring: normal along the axis
+    unsigned char al = (unsigned char)(pbrOn ? mat : 255);
+    rlBegin(RL_TRIANGLES);
+    rlColor4ub(col.r, col.g, col.b, al);
+    for (int i = 0; i < sides; i++) {
+        float a0 = i * 6.2831853f / sides, a1 = (i + 1) * 6.2831853f / sides;
+        V3 d0 = vadd(vscale(u, cosf(a0)), vscale(w, sinf(a0))), d1 = vadd(vscale(u, cosf(a1)), vscale(w, sinf(a1)));
+        V3 n0 = vnorm(vadd(d0, vscale(ax, slope))), n1 = vnorm(vadd(d1, vscale(ax, slope)));
+        V3 p0 = vadd(a, vscale(d0, r0)), p1 = vadd(a, vscale(d1, r0)), q0 = vadd(b, vscale(d0, r1)), q1 = vadd(b, vscale(d1, r1));
+        rlNormal3f(n0.x, n0.y, n0.z); rlVertex3f(p0.x, p0.y, p0.z); rlVertex3f(q0.x, q0.y, q0.z);
+        rlNormal3f(n1.x, n1.y, n1.z); rlVertex3f(q1.x, q1.y, q1.z);
+        rlNormal3f(n0.x, n0.y, n0.z); rlVertex3f(p0.x, p0.y, p0.z);
+        rlNormal3f(n1.x, n1.y, n1.z); rlVertex3f(q1.x, q1.y, q1.z); rlVertex3f(p1.x, p1.y, p1.z);
+        if (caps & 1) { rlNormal3f(-ax.x, -ax.y, -ax.z); rlVertex3f(a.x, a.y, a.z); rlVertex3f(p1.x, p1.y, p1.z); rlVertex3f(p0.x, p0.y, p0.z); }
+        if (caps & 2) { rlNormal3f(ax.x, ax.y, ax.z); rlVertex3f(b.x, b.y, b.z); rlVertex3f(q0.x, q0.y, q0.z); rlVertex3f(q1.x, q1.y, q1.z); }
+    }
+    rlEnd();
+}
+
+// ---- render-only parts carried by body nodes
+#define RN(r, p) ((r) * 9 + (p))                // body node: ring r, perimeter point p (C FL RKL BLL TPL TPR BLR RKR FR)
+static V3 part(const Car *c, int node, float x, float y, float z) {   // a car-local point, moved with a nearby node
+    V3 d = vsub(v3(x, y, z), c->rest[node]);
+    return vadd(c->n[node].p, vadd(vadd(vscale(c->fwd, d.x), vscale(c->up, d.y)), vscale(c->right, d.z)));
+}
+static void lbox(const Car *c, int node, float x0, float x1, float y0, float y1, float z0, float z1, Color col, int mat) {
+    pbox(part(c, node, 0.5f * (x0 + x1), 0.5f * (y0 + y1), 0.5f * (z0 + z1)), vscale(c->fwd, 0.5f * (x1 - x0)), vscale(c->up, 0.5f * (y1 - y0)), vscale(c->right, 0.5f * (z1 - z0)), col, mat);
+}
+
+static const Color CHROME = {236, 238, 242, 255}, FLAME_RED = {190, 22, 14, 255};
+
+// The semi's brightwork and fenders: bumper, grille, lamps, air cleaners, stacks, tanks, visor, mirrors.
+static void draw_semi_parts(const Car *c) {
+    const Color dark = {20, 20, 22, 255}, steel = {70, 72, 78, 255};
+    const float NOSE = c->def->st[0].x;
+    Color blue = {(unsigned char)(c->color.x * 255), (unsigned char)(c->color.y * 255), (unsigned char)(c->color.z * 255), 255};
+    int n0 = RN(0, 0);
+    // Bumper: a deep chrome blade across the full width, with a lower lip.
+    lbox(c, n0, 3.84f, 4.02f, -0.14f, 0.34f, -1.23f, 1.23f, CHROME, MAT_CHROME);
+    lbox(c, n0, 3.80f, 3.98f, -0.20f, -0.14f, -1.18f, 1.18f, CHROME, MAT_CHROME);
+    // Grille: dark core behind vertical chrome bars, inside the chrome shell (the nose face).
+    lbox(c, n0, 3.800f, 3.812f, 0.54f, 1.30f, -0.50f, 0.50f, dark, MAT_MATTE);
+    for (int i = 0; i < 15; i++) {
+        float z = -0.47f + i * (0.94f / 14.0f);
+        lbox(c, n0, 3.806f, 3.832f, 0.55f, 1.29f, z - 0.013f, z + 0.013f, CHROME, MAT_CHROME);
+    }
+    lbox(c, n0, 3.80f, 3.84f, 1.30f, 1.36f, -0.56f, 0.56f, CHROME, MAT_CHROME);     // shell header and sill
+    lbox(c, n0, 3.80f, 3.84f, 0.48f, 0.54f, -0.60f, 0.60f, CHROME, MAT_CHROME);
+    for (int sd = -1; sd <= 1; sd += 2) {
+        float z = (float)sd;
+        int rk0 = RN(0, sd < 0 ? 2 : 7), ax = RN(3, sd < 0 ? 2 : 7), cowl = RN(6, sd < 0 ? 3 : 6);
+        int door = RN(8, sd < 0 ? 3 : 6), cabR = RN(10, sd < 0 ? 3 : 6), cabRT = RN(10, sd < 0 ? 4 : 5), tankN = RN(9, sd < 0 ? 2 : 7);
+        // Twin-lamp headlight pod on a bracket beside the grille.
+        lbox(c, rk0, 3.60f, 3.80f, 0.60f, 0.86f, z * 0.68f, z * 1.14f, CHROME, MAT_CHROME);
+        lbox(c, rk0, 3.50f, 3.62f, 0.66f, 0.80f, z * 0.60f, z * 0.72f, steel, MAT_SATIN);
+        // Front fender: an arc over the tyre, flame-painted.
+        {
+            const float cx = 2.95f, cy = -0.02f, R = 0.70f, zi = 0.63f, zo = 1.25f;
+            V3 prevI = {0}, prevO = {0}, prevL = {0};
+            for (int k = 0; k <= 14; k++) {
+                float a = (-22.0f + k * (222.0f / 14.0f)) * DEG2RAD;
+                float x = cx + R * cosf(a), y = cy + R * sinf(a);
+                V3 pi = part(c, ax, x, y, z * zi), po = part(c, ax, x, y, z * zo);
+                V3 pl = part(c, ax, cx + (R - 0.09f) * cosf(a), cy + (R - 0.09f) * sinf(a), z * (zo + 0.005f));
+                if (k) {
+                    V3 n = vnorm(vadd(vscale(c->fwd, cosf(a)), vscale(c->up, sinf(a))));
+                    Color col = pbrOn ? pbr(FLAME_RED, n, MAT_FLAME) : FLAME_RED;
+                    rlBegin(RL_TRIANGLES);
+                    rlColor4ub(col.r, col.g, col.b, col.a);
+                    #define FV(p, zz, xx, yy) rlTexCoord2f(NOSE - (xx) + 0.9f, (yy) + 1.3f - (zz)); rlVertex3f((p).x, (p).y, (p).z)
+                    float xp = cx + R * cosf(a - 222.0f / 14.0f * DEG2RAD), yp = cy + R * sinf(a - 222.0f / 14.0f * DEG2RAD);
+                    FV(prevI, zi, xp, yp); FV(prevO, zo, xp, yp); FV(po, zo, x, y);
+                    FV(prevI, zi, xp, yp); FV(po, zo, x, y); FV(pi, zi, x, y);
+                    V3 no = vscale(c->right, z);
+                    rlNormal3f(no.x, no.y, no.z);                           // outer lip
+                    FV(prevO, zo, xp, yp); FV(prevL, zo + 0.3f, xp, yp); FV(pl, zo + 0.3f, x, y);
+                    FV(prevO, zo, xp, yp); FV(pl, zo + 0.3f, x, y); FV(po, zo, x, y);
+                    #undef FV
+                    rlEnd();
+                }
+                prevI = pi; prevO = po; prevL = pl;
+            }
+        }
+        // Air cleaner on the cowl.
+        pcyl(part(c, cowl, 1.88f, 0.78f, z * 0.90f), part(c, cowl, 1.88f, 1.50f, z * 0.90f), 0.17f, 0.17f, 18, CHROME, MAT_CHROME, 0);
+        pcyl(part(c, cowl, 1.88f, 1.50f, z * 0.90f), part(c, cowl, 1.88f, 1.58f, z * 0.90f), 0.17f, 0.09f, 18, CHROME, MAT_CHROME, 2);
+        pcyl(part(c, cowl, 1.88f, 0.70f, z * 0.90f), part(c, cowl, 1.88f, 0.78f, z * 0.90f), 0.10f, 0.17f, 18, CHROME, MAT_CHROME, 1);
+        lbox(c, cowl, 1.80f, 1.96f, 1.05f, 1.15f, z * 0.62f, z * 0.76f, steel, MAT_SATIN);
+        // Exhaust stack: heat-shielded lower pipe, slim upper pipe; bends with the cab.
+        V3 s0 = part(c, cabR, 0.20f, 0.45f, z * 1.14f), s1 = part(c, cabR, 0.20f, 1.95f, z * 1.14f), s2 = part(c, cabRT, 0.20f, 3.42f, z * 1.14f);
+        pcyl(s0, s1, 0.105f, 0.105f, 16, CHROME, MAT_CHROME, 0);
+        pcyl(s1, vadd(s1, vscale(vnorm(vsub(s2, s1)), 0.08f)), 0.105f, 0.07f, 16, CHROME, MAT_CHROME, 0);
+        pcyl(s1, s2, 0.07f, 0.07f, 14, CHROME, MAT_CHROME, 0);
+        pcyl(vadd(s2, vscale(c->up, -0.002f)), s2, 0.062f, 0.062f, 14, dark, MAT_MATTE, 2);
+        lbox(c, cabR, 0.14f, 0.26f, 1.20f, 1.26f, z * 1.03f, z * 1.12f, steel, MAT_SATIN);
+        // Fuel tank under the cab with its straps and a step; toolbox behind it.
+        pcyl(part(c, tankN, 1.28f, 0.02f, z * 0.93f), part(c, tankN, -0.50f, 0.02f, z * 0.93f), 0.33f, 0.33f, 22, CHROME, MAT_CHROME, 3);
+        for (int k = 0; k < 2; k++) {
+            float x = 0.95f - k * 1.10f;
+            pcyl(part(c, tankN, x + 0.03f, 0.02f, z * 0.93f), part(c, tankN, x - 0.03f, 0.02f, z * 0.93f), 0.337f, 0.337f, 22, steel, MAT_SATIN, 0);
+        }
+        lbox(c, tankN, 0.55f, 1.25f, 0.355f, 0.385f, z * 0.96f, z * 1.24f, CHROME, MAT_STEEL);
+        lbox(c, RN(11, sd < 0 ? 2 : 7), -1.38f, -0.62f, -0.26f, 0.32f, z * 0.62f, z * 1.20f, CHROME, MAT_STEEL);
+        // Door mirror on a tube bracket.
+        V3 m0 = part(c, door, 1.40f, 1.56f, z * 1.06f), m1 = part(c, door, 1.42f, 1.74f, z * 1.36f), m2 = part(c, door, 1.42f, 2.18f, z * 1.36f), m3 = part(c, door, 1.40f, 2.30f, z * 1.02f);
+        pcyl(m0, m1, 0.014f, 0.014f, 6, CHROME, MAT_CHROME, 0); pcyl(m1, m2, 0.014f, 0.014f, 6, CHROME, MAT_CHROME, 0); pcyl(m2, m3, 0.014f, 0.014f, 6, CHROME, MAT_CHROME, 0);
+        lbox(c, door, 1.395f, 1.445f, 1.76f, 2.16f, z * 1.37f, z * 1.55f, CHROME, MAT_CHROME);
+        // Rear fender over the tandem: flat top with rolled ends, painted red.
+        {
+            static const float PX[8] = {-2.02f, -2.08f, -2.24f, -2.50f, -4.30f, -4.56f, -4.72f, -4.78f};
+            static const float PY[8] = {0.05f, 0.36f, 0.56f, 0.64f, 0.64f, 0.56f, 0.36f, 0.05f};
+            int fn = RN(17, sd < 0 ? 3 : 6);
+            for (int k = 0; k + 1 < 8; k++) {
+                V3 a = part(c, fn, PX[k], PY[k], z * 0.50f), b = part(c, fn, PX[k], PY[k], z * 1.26f);
+                V3 a2 = part(c, fn, PX[k + 1], PY[k + 1], z * 0.50f), b2 = part(c, fn, PX[k + 1], PY[k + 1], z * 1.26f);
+                V3 n = vnorm(vcross(vsub(a2, a), vsub(b, a)));
+                if (vdot(n, c->up) < 0 && k > 0 && k < 6) n = vscale(n, -1);
+                rlTexCoord2f(0.3f, 1.0f + 0.2f * k);
+                ptri(a, b, b2, n, FLAME_RED, MAT_PAINT); ptri(a, b2, a2, n, FLAME_RED, MAT_PAINT);
+                V3 l = part(c, fn, PX[k], PY[k] - 0.10f, z * 1.262f), l2 = part(c, fn, PX[k + 1], PY[k + 1] - 0.10f, z * 1.262f);
+                V3 no = vscale(c->right, z);
+                ptri(b, l, l2, no, FLAME_RED, MAT_PAINT); ptri(b, l2, b2, no, FLAME_RED, MAT_PAINT);
+            }
+            lbox(c, RN(19, sd < 0 ? 2 : 7), -4.82f, -4.80f, -0.42f, 0.10f, z * 0.60f, z * 1.22f, dark, MAT_MATTE);      // mud flap
+        }
+        // Air horn on the roof.
+        pcyl(part(c, RN(8, sd < 0 ? 4 : 5), 0.95f, 2.53f, z * 0.34f), part(c, RN(8, sd < 0 ? 4 : 5), 1.42f, 2.55f, z * 0.34f), 0.025f, 0.065f, 10, CHROME, MAT_CHROME, 0);
+    }
+    // Sun visor over the windshield, raked down.
+    {
+        V3 f = vnorm(vadd(vscale(c->fwd, 0.90f), vscale(c->up, -0.42f))), u = vnorm(vcross(c->right, f));
+        V3 ctr = vscale(vadd(part(c, RN(8, 4), 1.60f, 2.37f, -0.5f), part(c, RN(8, 5), 1.60f, 2.37f, 0.5f)), 0.5f);
+        pbox(ctr, vscale(f, 0.19f), vscale(u, 0.018f), vscale(c->right, 0.99f), CHROME, MAT_CHROME);
+    }
+    // Roof marker lamp bases.
+    for (int k = 0; k < 5; k++) lbox(c, RN(8, k < 2 ? 4 : 5), 1.20f, 1.34f, 2.44f, 2.50f, -0.76f + k * 0.38f - 0.04f, -0.76f + k * 0.38f + 0.04f, CHROME, MAT_CHROME);
+    // Windshield centre post.
+    pcyl(part(c, RN(7, 4), 1.555f, 1.58f, 0), part(c, RN(8, 4), 1.365f, 2.42f, 0), 0.022f, 0.022f, 6, blue, MAT_PAINT, 0);
+    // Fifth wheel on the frame deck.
+    pcyl(part(c, RN(17, 0), -3.40f, 0.46f, 0), part(c, RN(17, 0), -3.40f, 0.56f, 0), 0.50f, 0.50f, 24, steel, MAT_SATIN, 2);
+    lbox(c, RN(17, 0), -4.05f, -3.70f, 0.47f, 0.53f, -0.30f, 0.30f, steel, MAT_SATIN);
+}
+
+// One wheel: tyre with rounded shoulders, then the wheel face in the vehicle's style.
+static void draw_wheel(const Car *c, int i) {
+    const Wheel *W = &c->w[i];
+    const VehicleDef *D = c->def;
+    const Color rubber = {30, 30, 32, 255};
+    float R = D->wheelR, wid = (i >= 2 && D->wheelWR > 0) ? D->wheelWR : D->wheelW;
+    V3 axis = vrot(c->right, c->up, W->steerAngle);
+    float out = (i % 2 == 0) ? -1.0f : 1.0f;                  // left wheels sit at -right
+    V3 n = vscale(axis, out), ctr = W->hub;
+    V3 a = vsub(ctr, vscale(n, wid * 0.5f)), b = vadd(ctr, vscale(n, wid * 0.5f));
+    float sh = fminf(0.05f, wid * 0.2f);
+    float rimR = R * (D->wheelStyle == 2 ? 0.58f : D->wheelStyle == 1 ? 0.74f : 0.68f);
+    int dual = D->wheelStyle == 2 && i >= 2;
+    pcyl(a, vadd(a, vscale(n, sh)), R * 0.92f, R, 26, rubber, MAT_MATTE, 1);
+    if (dual) {                                               // two tyres with a groove between them
+        float tw = (wid - 0.05f) * 0.5f;
+        pcyl(vadd(a, vscale(n, sh)), vadd(a, vscale(n, tw)), R, R, 26, rubber, MAT_MATTE, 0);
+        pcyl(vadd(a, vscale(n, tw)), vadd(a, vscale(n, tw + 0.05f)), R * 0.86f, R * 0.86f, 26, (Color){12, 12, 13, 255}, MAT_MATTE, 0);
+        pcyl(vadd(a, vscale(n, tw)), vadd(a, vscale(n, tw + 0.001f)), R, R * 0.86f, 26, rubber, MAT_MATTE, 0);
+        pcyl(vadd(a, vscale(n, tw + 0.049f)), vadd(a, vscale(n, tw + 0.05f)), R * 0.86f, R, 26, rubber, MAT_MATTE, 0);
+        pcyl(vadd(a, vscale(n, tw + 0.05f)), vsub(b, vscale(n, sh)), R, R, 26, rubber, MAT_MATTE, 0);
+    } else pcyl(vadd(a, vscale(n, sh)), vsub(b, vscale(n, sh)), R, R, 26, rubber, MAT_MATTE, 0);
+    pcyl(vsub(b, vscale(n, sh)), b, R, R * 0.92f, 26, rubber, MAT_MATTE, 0);
+    pcyl(b, vadd(b, vscale(n, 0.001f)), R * 0.92f, rimR, 26, rubber, MAT_MATTE, 0);       // sidewall
+    V3 fw = vcross(c->up, axis);
+    if (D->wheelStyle == 2) {                                 // polished truck wheels
+        if (dual) {                                           // deep dish with a hub in the bottom
+            V3 in = vsub(b, vscale(n, 0.16f));
+            pcyl(in, b, rimR * 0.50f, rimR, 26, CHROME, MAT_CHROME, 0);
+            pcyl(in, vadd(in, vscale(n, 0.001f)), rimR * 0.50f, 0.0f, 20, CHROME, MAT_STEEL, 0);
+            pcyl(in, vadd(in, vscale(n, 0.13f)), R * 0.20f, R * 0.14f, 14, CHROME, MAT_CHROME, 2);
+            for (int k = 0; k < 10; k++) {
+                V3 d = vrot(fw, axis, W->spin + k * 0.628318f), p = vadd(in, vscale(d, rimR * 0.40f));
+                pcyl(p, vadd(p, vscale(n, 0.035f)), 0.016f, 0.016f, 6, CHROME, MAT_CHROME, 2);
+            }
+        } else {                                              // front: shallow dish, domed hub cap
+            V3 f1 = vadd(b, vscale(n, 0.035f));
+            pcyl(b, f1, rimR, rimR * 0.82f, 26, CHROME, MAT_CHROME, 0);
+            pcyl(f1, vsub(f1, vscale(n, 0.03f)), rimR * 0.82f, rimR * 0.40f, 26, CHROME, MAT_CHROME, 0);
+            pcyl(vsub(f1, vscale(n, 0.03f)), vadd(f1, vscale(n, 0.09f)), R * 0.24f, R * 0.13f, 16, CHROME, MAT_CHROME, 2);
+            for (int k = 0; k < 10; k++) {
+                V3 d = vrot(fw, axis, W->spin + k * 0.628318f), p = vadd(vsub(f1, vscale(n, 0.02f)), vscale(d, rimR * 0.56f));
+                pcyl(p, vadd(p, vscale(n, 0.035f)), 0.016f, 0.016f, 6, CHROME, MAT_CHROME, 2);
+            }
+            for (int k = 0; k < 5; k++) {                     // hand holes show the wheel turning
+                V3 d = vrot(fw, axis, W->spin + 0.3f + k * 1.25664f), p = vadd(vsub(f1, vscale(n, 0.012f)), vscale(d, rimR * 0.70f));
+                pcyl(p, vadd(p, vscale(n, 0.002f)), 0.035f, 0.035f, 8, (Color){14, 14, 16, 255}, MAT_MATTE, 2);
+            }
+        }
+        return;
+    }
+    if (D->wheelStyle == 1) {                                 // dark alloy: barrel, ten spokes, lip, cap
+        V3 f1 = vadd(b, vscale(n, 0.002f)), f2 = vadd(b, vscale(n, 0.007f)), f3 = vadd(b, vscale(n, 0.014f));
+        pcyl(b, f1, rimR, rimR, 28, (Color){96, 98, 104, 255}, MAT_STEEL, 2);
+        pcyl(f1, vadd(f1, vscale(n, 0.001f)), rimR * 0.93f, rimR * 0.93f, 28, (Color){12, 12, 14, 255}, MAT_MATTE, 2);
+        V3 nn = vnorm(n);
+        for (int k = 0; k < 10; k++) {
+            float ang = W->spin + (k >> 1) * 1.25664f + (k & 1 ? 0.16f : -0.16f);
+            V3 d = vrot(fw, axis, ang), sd = vcross(axis, d);
+            float w0 = R * 0.055f, w1 = R * 0.030f;
+            V3 r0 = vadd(f2, vscale(d, R * 0.13f)), r1 = vadd(f2, vscale(d, R * 0.69f));
+            V3 q0 = vsub(r0, vscale(sd, w0)), q1 = vadd(r0, vscale(sd, w0)), q2 = vadd(r1, vscale(sd, w1)), q3 = vsub(r1, vscale(sd, w1));
+            ptri(q0, q1, q2, nn, (Color){150, 152, 160, 255}, MAT_STEEL); ptri(q0, q2, q3, nn, (Color){150, 152, 160, 255}, MAT_STEEL);
+        }
+        pcyl(f2, f3, R * 0.17f, R * 0.14f, 14, (Color){50, 50, 56, 255}, MAT_SATIN, 2);
+        return;
+    }
+    pcyl(b, vadd(b, vscale(n, 0.006f)), rimR, rimR * 0.97f, 24, (Color){168, 170, 176, 255}, MAT_STEEL, 2);   // flat aero cover
+    for (int s = 0; s < 6; s++) {                             // cover segments show rotation
+        V3 dir = vrot(fw, axis, W->spin + s * 1.0472f), sd = vcross(axis, dir);
+        V3 f0 = vadd(b, vscale(n, 0.008f)), e = vadd(f0, vscale(dir, rimR * 0.96f));
+        ptri(vsub(f0, vscale(sd, 0.012f)), vadd(f0, vscale(sd, 0.012f)), vadd(e, vscale(sd, 0.012f)), vnorm(n), (Color){74, 76, 80, 255}, MAT_SATIN);
+        ptri(vsub(f0, vscale(sd, 0.012f)), vadd(e, vscale(sd, 0.012f)), vsub(e, vscale(sd, 0.012f)), vnorm(n), (Color){74, 76, 80, 255}, MAT_SATIN);
+    }
+}
+
 
 // A soft-body airliner, drawn from its current node positions so dents and bends show.
 static V3 afN[MAX_NODES];
@@ -1186,10 +1436,10 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
     }
     Color liv = LIVERY[A->seed % 6];
     const Color pal[7] = {{236, 237, 240, 255}, {196, 198, 202, 255}, liv, {44, 56, 72, 255}, {205, 207, 212, 255}, {176, 178, 184, 255}, {36, 36, 40, 255}};
-    // Blob shadow of the belly, wings and stabilisers.
+    // Blob shadow of the belly, wings and stabilisers (only without real shadows).
     rlDrawRenderBatchActive();
     rlDisableDepthMask();
-    for (int i = 0; i < c->nt; i++) {
+    for (int i = 0; i < c->nt && !post_shadow_active() && !depthOnly; i++) {
         if (A->paint[i] != 1) continue;
         const Tri *t = &c->t[i];
         Vector3 p[3];
@@ -1215,7 +1465,7 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
         for (int k = 0; k < 3; k++) {
             V3 p = c->n[t->v[k]].p;
             Color col = shade_paint(base, afN[t->v[k]], p, eye, gloss);
-            rlColor4ub(col.r, col.g, col.b, 255);
+            rlColor4ub(col.r, col.g, col.b, col.a);
             rlVertex3f(p.x, p.y, p.z);
         }
     }
@@ -1225,9 +1475,9 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
         const Tri *t = &c->t[i];
         V3 p[3] = {c->n[t->v[0]].p, c->n[t->v[1]].p, c->n[t->v[2]].p};
         V3 nrm = vnorm(vcross(vsub(p[1], p[0]), vsub(p[2], p[0])));
-        Color col = A->paint[i] == 6 ? pal[6] : shade_paint(pal[A->paint[i]], nrm, p[0], eye, 0.35f);
+        Color col = A->paint[i] == 6 ? (pbrOn ? pbr(pal[6], nrm, MAT_MATTE) : pal[6]) : A->paint[i] == 5 && pbrOn ? pbr(pal[5], nrm, MAT_STEEL) : shade_paint(pal[A->paint[i]], nrm, p[0], eye, 0.6f);
         DrawTriangle3D(RV(p[0]), RV(p[1]), RV(p[2]), col);
-        if (A->paint[i] == 2) DrawTriangle3D(RV(p[0]), RV(p[2]), RV(p[1]), shade_paint(pal[2], vscale(nrm, -1), p[0], eye, 0.35f));
+        if (A->paint[i] == 2) DrawTriangle3D(RV(p[0]), RV(p[2]), RV(p[1]), shade_paint(pal[2], vscale(nrm, -1), p[0], eye, 0.6f));
     }
     // Window band and livery cheatline, laid on the deforming skin between frames 2 and 13.
     for (int side = 0; side < 2; side++) {
@@ -1253,13 +1503,13 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
         V3 w0 = c->n[A->gearWheel[g][0]].p, w1 = c->n[A->gearWheel[g][1]].p, top = c->n[A->gear[g][1]].p;
         float r = g ? 0.55f : 0.4f;
         V3 hub = vadd(vscale(vadd(w0, w1), 0.5f), v3(0, r, 0));
-        DrawCylinderEx(RV(hub), RV(top), 0.14f, 0.14f, 6, strut);
+        pcyl(hub, top, 0.14f, 0.14f, 8, strut, MAT_STEEL, 0);
         for (int k = 0; k < 2; k++) {
             V3 wc = vadd(k ? w1 : w0, v3(0, r, 0));
             V3 off = g ? vscale(ax, 0.45f) : v3(0, 0, 0);
             for (int sgn = -1; sgn <= (g ? 1 : -1); sgn += 2) {
                 V3 cc = vadd(wc, vscale(off, (float)sgn));
-                DrawCylinderEx(RV(vsub(cc, vscale(ax, 0.17f))), RV(vadd(cc, vscale(ax, 0.17f))), r, r, 10, tyre);
+                pcyl(vsub(cc, vscale(ax, 0.17f)), vadd(cc, vscale(ax, 0.17f)), r, r, 14, tyre, MAT_MATTE, 3);
             }
         }
     }
@@ -1379,7 +1629,7 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
     Color sh = {0, 0, 0, 90};
     rlDrawRenderBatchActive();
     rlDisableDepthMask();
-    for (int i = 0; i < c->nt; i++) {
+    for (int i = 0; i < c->nt && !post_shadow_active() && !depthOnly; i++) {
         const Tri *t = &c->t[i];
         if (t->kind != SURF_UNDER) continue;
         Vector3 p[3];
@@ -1414,7 +1664,7 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
             for (int k = 0; k < 3; k++) {
                 V3 p = c->n[t->v[k]].p;
                 Color col = inside ? INTERIOR : shade_paint(base, nodeN[t->v[k]], p, eye, gloss);
-                rlColor4ub(col.r, col.g, col.b, 255);
+                rlColor4ub(col.r, col.g, col.b, col.a);
                 rlVertex3f(p.x, p.y, p.z);
             }
         }
@@ -1438,16 +1688,42 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
             }
             V3 p[3] = {c->n[t->v[0]].p, c->n[t->v[1]].p, c->n[t->v[2]].p};
             V3 nrm = vnorm(vcross(vsub(p[1], p[0]), vsub(p[2], p[0])));
-            Color base = t->kind == SURF_GLASS ? glass : t->kind == SURF_UNDER ? under :
+            Color base = t->kind == SURF_GLASS ? glass : t->kind == SURF_UNDER ? under : t->kind == SURF_CHROME ? CHROME :
                          t->kind == SURF_TONNEAU ? tonneau : t->kind == SURF_TRIM ? trim : body;
             Color col = lit(base, nrm, 1.0f);
             if (interior && vdot(nrm, vsub(eye, p[0])) < 0) { DrawTriangle3D(RV(p[0]), RV(p[1]), RV(p[2]), INTERIOR); continue; }
-            if (t->kind == SURF_BODY) {                            // brushed steel picks up the sky
+            int semi = c->type == VEH_SEMI;
+            if (pbrOn && semi && t->kind == SURF_BODY) {
+                // Flame livery: paint coordinates are metres behind the nose and height around the body.
+                // Behind the sleeper the bare frame is dark.
+                const V3 *r0 = &c->rest[t->v[0]];
+                if (r0->x < -1.50f && c->rest[t->v[1]].x < -1.50f && c->rest[t->v[2]].x < -1.50f) {
+                    col = pbr((Color){38, 38, 42, 255}, nrm, MAT_SATIN);
+                    DrawTriangle3D(RV(p[0]), RV(p[1]), RV(p[2]), col);
+                } else {
+                    int top = 1;
+                    for (int k = 0; k < 3; k++) { int pp = t->v[k] % 9; if (t->v[k] >= c->def->nr * 9 || (pp != 4 && pp != 5)) top = 0; }
+                    col = pbr(base, nrm, MAT_FLAME);
+                    rlBegin(RL_TRIANGLES);
+                    rlColor4ub(col.r, col.g, col.b, col.a);
+                    for (int k = 0; k < 3; k++) {
+                        const V3 *r = &c->rest[t->v[k]];
+                        rlTexCoord2f(c->def->st[0].x - r->x, r->y + 1.2f - (top ? r->z : fabsf(r->z)));
+                        rlVertex3f(p[k].x, p[k].y, p[k].z);
+                    }
+                    rlEnd();
+                }
+                continue;
+            }
+            if (pbrOn) {
+                col = pbr(base, nrm, t->kind == SURF_GLASS ? MAT_GLASS : t->kind == SURF_CHROME ? MAT_CHROME : t->kind == SURF_UNDER ? MAT_MATTE :
+                                     t->kind == SURF_BODY ? (c->type == VEH_PICKUP ? MAT_STEEL : MAT_PAINT) : MAT_SATIN);
+            } else if (t->kind == SURF_BODY) {                     // brushed steel picks up the sky
                 float f = 0.18f + 0.22f * fmaxf(nrm.y, 0.0f);
                 Color sk = {(unsigned char)(255 * powf(ENV->horizonAway.x, 0.4545f)), (unsigned char)(255 * powf(ENV->horizonAway.y, 0.4545f)), (unsigned char)(255 * powf(ENV->horizonAway.z, 0.4545f)), 255};
                 col = (Color){(unsigned char)(col.r + (sk.r - col.r) * f), (unsigned char)(col.g + (sk.g - col.g) * f), (unsigned char)(col.b + (sk.b - col.b) * f), 255};
             }
-            if (t->kind == SURF_BODY || t->kind == SURF_GLASS) {   // flat-faceted stainless / glass highlight
+            if (!pbrOn && (t->kind == SURF_BODY || t->kind == SURF_GLASS)) {   // flat-faceted stainless / glass highlight
                 V3 hv = vnorm(vadd(SUN, vnorm(vsub(eye, p[0]))));
                 float s = powf(fmaxf(vdot(nrm, hv), 0.0f), t->kind == SURF_GLASS ? 40.0f : 14.0f);
                 col = brighten(col, s * (t->kind == SURF_GLASS ? 0.55f : 0.30f));
@@ -1517,46 +1793,33 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
         DrawTriangle3D(RV(a), RV(a2), RV(a3), lip); DrawTriangle3D(RV(b), RV(b2), RV(b3), lip);
     }
 
-    // Wheels.
-    for (int i = 0; i < 4; i++) {
-        const Wheel *W = &c->w[i];
-        V3 axis = vrot(c->right, c->up, W->steerAngle);
-        float out = (i % 2 == 0) ? -1.0f : 1.0f;              // left wheels sit at -right
-        V3 ctr = W->hub;
-        V3 a = vsub(ctr, vscale(axis, c->def->wheelW * 0.5f)), b = vadd(ctr, vscale(axis, c->def->wheelW * 0.5f));
-        DrawCylinderEx(RV(a), RV(b), c->def->wheelR, c->def->wheelR, 24, (Color){26, 26, 28, 255});
-        V3 face = vadd(ctr, vscale(axis, out * (c->def->wheelW * 0.5f + 0.004f)));
-        if (c->def->wheelStyle == 1) {                 // dark alloy laid over the tyre's outer face: barrel, ten spokes, lip, cap
-            float R = c->def->wheelR;
-            V3 fw = vcross(c->up, axis), n = vscale(axis, out);
-            V3 f1 = vadd(face, vscale(n, 0.002f)), f2 = vadd(face, vscale(n, 0.005f)), f3 = vadd(face, vscale(n, 0.008f));
-            DrawCylinderEx(RV(face), RV(f1), R * 0.74f, R * 0.74f, 28, (Color){70, 72, 78, 255});      // rim lip
-            DrawCylinderEx(RV(f1), RV(vadd(f1, vscale(n, 0.001f))), R * 0.69f, R * 0.69f, 28, (Color){12, 12, 14, 255});   // barrel shadow
-            Color sp = brighten(lit((Color){128, 130, 138, 255}, n, 1.0f), 0.06f);
-            for (int k = 0; k < 10; k++) {
-                float ang = W->spin + (k >> 1) * 1.25664f + (k & 1 ? 0.16f : -0.16f);
-                V3 d = vrot(fw, axis, ang), sd = vcross(axis, d);
-                float w0 = R * 0.055f, w1 = R * 0.030f;
-                V3 r0 = vadd(f2, vscale(d, R * 0.13f)), r1 = vadd(f2, vscale(d, R * 0.69f));
-                V3 q0 = vsub(r0, vscale(sd, w0)), q1 = vadd(r0, vscale(sd, w0)), q2 = vadd(r1, vscale(sd, w1)), q3 = vsub(r1, vscale(sd, w1));
-                DrawTriangle3D(RV(q0), RV(q1), RV(q2), sp); DrawTriangle3D(RV(q0), RV(q2), RV(q3), sp);
-            }
-            DrawCylinderEx(RV(f2), RV(f3), R * 0.17f, R * 0.14f, 14, (Color){40, 40, 46, 255});         // centre cap
-            continue;
-        }
-        DrawCylinderEx(RV(vsub(face, vscale(axis, out * 0.01f))), RV(face), c->def->wheelR * 0.66f, c->def->wheelR * 0.66f, 6, (Color){150, 152, 156, 255});
-        V3 fw = vcross(c->up, axis);
-        for (int s = 0; s < 6; s++) {   // cover segments show rotation
-            V3 dir = vrot(fw, axis, W->spin + s * 1.0472f);
-            V3 f0 = vadd(face, vscale(axis, out * 0.004f));
-            DrawLine3D(RV(f0), RV(vadd(f0, vscale(dir, c->def->wheelR * 0.66f))), (Color){70, 72, 76, 255});
-        }
-    }
+    if (!beamView && c->type == VEH_SEMI) draw_semi_parts(c);
+    for (int i = 0; i < c->nw; i++) draw_wheel(c, i);
 }
 
 // Light bars, drawn in the emissive pass so they bloom.
 static void draw_car_lights(const Car *c, int on) {
     float front = on ? 3.2f : 0.9f, rear = (on ? 2.2f : 1.4f) * (c->ctl.brake > 0.1f ? 2.0f : 1.0f);
+    if (c->def->lightStyle == 2) {                  // the semi: twin headlamps each side, amber roof markers, tail lamps
+        post_emissive_begin(front);
+        for (int sd = -1; sd <= 1; sd += 2)
+            for (int k = 0; k < 2; k++) {
+                float z = sd * (0.80f + 0.22f * k);
+                int nd = RN(0, sd < 0 ? 2 : 7);
+                pcyl(part(c, nd, 3.800f, 0.73f, z), part(c, nd, 3.812f, 0.73f, z), 0.088f, 0.088f, 14, (Color){235, 242, 255, 255}, MAT_UNLIT, 2);
+            }
+        post_emissive_end();
+        post_emissive_begin(on ? 2.4f : 0.8f);
+        for (int k = 0; k < 5; k++) {
+            float z = -0.76f + k * 0.38f;
+            lbox(c, RN(8, k < 2 ? 4 : 5), 1.335f, 1.36f, 2.445f, 2.495f, z - 0.035f, z + 0.035f, (Color){255, 150, 30, 255}, MAT_UNLIT);
+        }
+        post_emissive_end();
+        post_emissive_begin(rear);
+        for (int sd = -1; sd <= 1; sd += 2) lbox(c, RN(19, 0), -4.475f, -4.45f, 0.22f, 0.36f, sd * 0.50f - 0.10f, sd * 0.50f + 0.10f, (Color){255, 26, 20, 255}, MAT_UNLIT);
+        post_emissive_end();
+        return;
+    }
     for (int i = 0; i < c->nlights; i++) {
         const LightStrip *L = &c->lights[i];
         if (L->rear && c->tailgate == TG_GONE && c->def->hasTailgate) continue;   // went with the tailgate
@@ -1569,7 +1832,7 @@ static void draw_car_lights(const Car *c, int on) {
 // Headlight spill on the road ahead (additive), following the terrain.
 static void draw_headlights(const Car *c) {
     V3 f = vnorm(v3(c->fwd.x, 0, c->fwd.z)), r = v3(-f.z, 0, f.x);
-    V3 o = vadd(c->pos, vscale(f, 2.6f));
+    V3 o = vadd(c->pos, vscale(f, c->def->st[0].x - c->comLocal.x - 0.2f));
     for (int i = 0; i < 12; i++) {
         float d0 = 1.0f + i * 2.4f, d1 = d0 + 2.4f;
         float w0 = 1.1f + d0 * 0.32f, w1 = 1.1f + d1 * 0.32f;
@@ -1720,7 +1983,7 @@ static void emit_spray(const World *w, float dt) {
         if (!c->active) continue;
         float sp = vlen(c->vel);
         if (sp < 4.0f) continue;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < c->nw; i++) {
             const Wheel *W = &c->w[i];
             if (!W->contact) continue;
             float n = sp * dt * (weather == 2 ? 2.2f : 1.4f) * (road_at(W->cp.x, W->cp.z) ? 1.0f : 0.35f);
@@ -1881,6 +2144,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
             "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
             "M  map: Default / New York / Airport      J  traffic",
+            "F2  sun shadows + ambient occlusion on / off",
             "", "Ramp ahead, crash wall behind you, warehouses to the", "right, forest on the hills. Default: towns to the left.",
             "New York: Times Square up 7th Avenue, straight ahead."};
         int n = sizeof lines / sizeof lines[0];
@@ -1911,8 +2175,8 @@ static void draw_profile(const VehicleDef *d, float cx, float cy, float scale, C
             Vector2 a2 = {a.x, cy - (d->st[r].belt + clear) * scale}, b2 = {b.x, cy - (d->st[r + 1].belt + clear) * scale};
             DrawTriangle(a, a2, b2, (Color){120, 170, 220, 90}); DrawTriangle(a, b2, b, (Color){120, 170, 220, 90});
         }
-    for (int w = 0; w < 2; w++) {
-        float x = d->st[w ? d->axleR : d->axleF].x;
+    for (int w = 0; w < (d->axleR2 >= 0 ? 3 : 2); w++) {
+        float x = d->st[w == 2 ? d->axleR2 : w ? d->axleR : d->axleF].x;
         Vector2 c = {cx + x * scale, cy - d->wheelR * scale};
         DrawCircleV(c, d->wheelR * scale, (Color){20, 22, 26, 255});
         DrawCircleLinesV(c, d->wheelR * scale, col);
@@ -2032,7 +2296,7 @@ int main(void) {
     cam.fovy = 62;
     cam.projection = CAMERA_PERSPECTIVE;
     float camHeading = 0, camYawOff = 0, camPitch = 0.28f, camDist = 10.5f, idleOrbit = 0;
-    int camMode = 0, beamView = 0, paused = 0, slowmo = 0, help = 1;
+    int camMode = 0, beamView = 0, paused = 0, slowmo = 0, help = 1, fancy = 1;
     Vector3 camPos = {-10, 4, 0};
 
     const float H = 1.0f / SIM_HZ;
@@ -2076,6 +2340,7 @@ int main(void) {
         if (IsKeyPressed(KEY_P)) paused = !paused;
         if (IsKeyPressed(KEY_T)) slowmo = !slowmo;
         if (IsKeyPressed(KEY_H) || IsKeyPressed(KEY_F1)) help = !help;
+        if (IsKeyPressed(KEY_F2)) fancy = !fancy;           // sun shadows + ambient occlusion
         if (IsKeyPressed(KEY_K)) { skidCount = 0; skidHead = 0; }
         if (IsKeyPressed(KEY_G)) car_pop_tailgate(pc);
         if (IsKeyPressed(KEY_O)) {
@@ -2181,6 +2446,20 @@ int main(void) {
         }
         cam.fovy = camMode ? 72.0f : 62.0f;
 
+        // ---- sun shadow map: the casters, seen from the sun
+        post_set_quality(fancy, fancy);
+        if (post_shadow_begin(RV(pc->pos), ENV, RV(AMB), RV(SUNC))) {
+            depthOnly = 1;
+            DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
+            if (world.map == MAP_AIRPORT && hasPlane) draw_plane();
+            draw_trees(&world, cam.position);
+            V3 eyeS = v3(cam.position.x, cam.position.y, cam.position.z);
+            for (int i = 0; i < world.nplanes; i++) draw_airframe(&world.air[i], 0, eyeS);
+            for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], 0, eyeS, 0);
+            depthOnly = 0;
+            post_shadow_end();
+        }
+
         // ---- draw the world into the HDR buffer
         post_begin_scene();
         BeginMode3D(cam);
@@ -2201,8 +2480,12 @@ int main(void) {
         rlDrawRenderBatchActive();
         rlEnableDepthMask();
         post_begin_objects();
+        if (!beamView) { post_paint_begin(ENV, RV(AMB), RV(SUNC), (float)GetTime()); pbrOn = 1; }
+        rlTexCoord2f(0, 0);
         for (int i = 0; i < world.nplanes; i++) draw_airframe(&world.air[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z));
         for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z), camMode && i == 0);
+        if (pbrOn) { pbrOn = 0; post_paint_end(); }
+        rlNormal3f(0, 0, 1);
         post_end_objects();
         draw_shards();
         rlDrawRenderBatchActive();

@@ -190,8 +190,62 @@ static void define_hatch(VehicleDef *d) {
     d->paint = v3(0.93f, 0.33f, 0.09f);                       // bright orange
 }
 
+// ---- Long-nose semi: a classic conventional tractor with a sleeper, bobtail. 8.25 m long, 2.45 m
+// over the fenders, 3.0 m tall, 8.2 t, three axles (tandem drive, dual tyres). The body rings are the
+// narrow butterfly hood, the cab and sleeper box, and the bare frame behind; bumper, fenders, stacks,
+// tanks and the rest of the brightwork are drawn by the renderer on these nodes.
+static void define_semi(VehicleDef *d) {
+    static const Station S[] = {
+        { 3.80f, 0.12f, 0.50f, 1.26f, 1.40f, 0.50f, 0.52f, 0, 1, 0, -1, -1},   //  0 grille
+        { 3.60f, 0.04f, 0.46f, 1.28f, 1.43f, 0.50f, 0.52f, 0, 0, 0, -1, -1},   //  1
+        { 3.25f, 0.00f, 0.45f, 1.30f, 1.45f, 0.50f, 0.52f, 0, 0, 0, -1, -1},   //  2
+        { 2.95f, 0.00f, 0.45f, 1.31f, 1.47f, 0.50f, 0.52f, 0, 1, 0, -1, -1},   //  3 front axle
+        { 2.55f, 0.00f, 0.45f, 1.32f, 1.49f, 0.50f, 0.53f, 0, 0, 0, -1, -1},   //  4
+        { 2.10f, 0.00f, 0.45f, 1.33f, 1.51f, 0.51f, 0.54f, 0, 0, 0, -1, -1},   //  5
+        { 1.70f, 0.00f, 0.45f, 1.34f, 1.53f, 0.52f, 0.56f, 0, 1, 0, -1, -1},   //  6 hood rear / cowl
+        { 1.55f, 0.00f, 0.35f, 1.50f, 1.58f, 0.98f, 0.875f, 0, 1, 1,  0, -1},  //  7 firewall, dash, windshield base
+        { 1.36f, 0.00f, 0.35f, 1.50f, 2.42f, 0.93f, 0.875f, 0, 0, 1, -1,  1},  //  8 windshield top / door front
+        { 0.80f, 0.00f, 0.35f, 1.50f, 2.46f, 0.93f, 0.875f, 0, 0, 0, -1,  1},  //  9
+        { 0.30f, 0.00f, 0.35f, 1.50f, 2.46f, 0.93f, 0.875f, 0, 1, 1, -1, -1},  // 10 cab rear / sleeper front
+        {-0.60f, 0.00f, 0.35f, 1.50f, 2.46f, 0.93f, 0.875f, 0, 0, 0, -1, -1},  // 11 sleeper
+        {-1.45f, 0.00f, 0.35f, 1.50f, 2.46f, 0.93f, 0.875f, 0, 1, 1, -1, -1},  // 12 sleeper rear
+        {-1.56f, 0.00f, 0.20f, 0.40f, 0.46f, 0.45f, 0.40f, 0, 0, 0, -2, -1},   // 13 frame deck
+        {-2.00f, 0.00f, 0.20f, 0.40f, 0.46f, 0.45f, 0.40f, 0, 0, 0, -2, -1},   // 14
+        {-2.40f, 0.00f, 0.20f, 0.40f, 0.46f, 0.45f, 0.40f, 0, 0, 0, -2, -1},   // 15
+        {-2.75f, 0.00f, 0.20f, 0.40f, 0.46f, 0.45f, 0.40f, 0, 1, 0, -2, -1},   // 16 first drive axle
+        {-3.40f, 0.00f, 0.20f, 0.40f, 0.46f, 0.45f, 0.40f, 0, 0, 0, -2, -1},   // 17
+        {-4.05f, 0.00f, 0.20f, 0.40f, 0.46f, 0.45f, 0.40f, 0, 1, 0, -2, -1},   // 18 second drive axle
+        {-4.45f, 0.00f, 0.20f, 0.40f, 0.46f, 0.45f, 0.40f, 0, 1, 0, -1, -1},   // 19 frame end
+    };
+    d->nr = (int)(sizeof S / sizeof S[0]);
+    for (int r = 0; r < d->nr; r++) d->st[r] = S[r];
+    d->name = "LONG-NOSE SEMI";
+    d->blurb = "8.2 t  |  600 hp tandem drive  |  flame livery";
+    d->floorHalf = 0.55f; d->sillHalf = 1.20f; d->beltHalf = 1.20f;
+    d->axleF = 3; d->axleR = 16; d->axleR2 = 18; d->doorR0 = 8; d->doorR1 = 10; d->dashRing = 7; d->bRing = 10;
+    d->mass = 8200.0f;
+    d->batW = 1.5f; d->batX0 = -1.40f; d->batX1 = 0.40f;      // fuel tanks under the cab
+    d->engW = 3.0f; d->engX0 = 1.60f; d->engX1 = 3.40f;       // 15 L diesel and gearbox under the hood
+    d->crumpleF = 3.10f; d->crumpleR = -4.20f; d->cabinX0 = -1.45f; d->cabinX1 = 1.56f;
+    d->kScale = 2.4f; d->yScale = 1.0f;
+    d->wheelR = 0.52f; d->wheelW = 0.30f; d->trackHalf = 1.02f; d->wheelWR = 0.62f; d->trackHalfR = 0.91f;
+    d->suspRest = 0.05f; d->suspTravel = 0.20f; d->ks = 230000.0f; d->cs = 15000.0f; d->kbump = 1600000.0f;
+    d->brakeMax = 9400.0f; d->engineF = 27000.0f; d->enginePower = 450000.0f; d->reverseF = 12000.0f; d->driveFront = 0.0f;
+    d->rearSteer = 0.0f; d->maxLock = 0.66f; d->cdA = 3.6f;
+    d->spawnH = 0.56f;
+    d->seat = v3(0.72f, 2.02f, -0.52f); d->dashX = 1.36f; d->dashY = 1.60f; d->rearSeatX = -0.75f;
+    d->npanels = 3; d->hasTailgate = 0; d->lightStyle = 2;
+    d->smooth = 0; d->wheelStyle = 2; d->mirrorRing = -1; d->spoilerRing = -1;
+    d->noEdges = 1; d->chromeNose = 1;
+    d->paint = v3(0.05f, 0.09f, 0.42f);                       // deep blue under the flames
+}
+
 const VehicleDef *vehicle_def(int type) {
-    if (!defsReady) { define_pickup(&DEFS[VEH_PICKUP]); define_hatch(&DEFS[VEH_HATCH]); defsReady = 1; }
+    if (!defsReady) {
+        define_pickup(&DEFS[VEH_PICKUP]); define_hatch(&DEFS[VEH_HATCH]); define_semi(&DEFS[VEH_SEMI]);
+        DEFS[VEH_PICKUP].axleR2 = DEFS[VEH_HATCH].axleR2 = -1;
+        defsReady = 1;
+    }
     return &DEFS[type < 0 || type >= VEH_COUNT ? 0 : type];
 }
 
@@ -292,7 +346,7 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
         float x = ST[r].x;
         if (p == P_C && x < D->batX1 && x > D->batX0) w += D->batW;
         if (is_floor(p) && x < D->engX1 && x > D->engX0) w += D->engW;
-        if ((p == P_FL || p == P_FR) && (r == D->axleF || r == D->axleR)) w += 1.0f;
+        if ((p == P_FL || p == P_FR) && (r == D->axleF || r == D->axleR || r == D->axleR2)) w += 1.0f;
         wt[r][p] = w; wsum += w;
     }
     float unit = (D->mass - TG_MASS) / wsum;
@@ -353,7 +407,10 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
         static unsigned char strut[MAX_NODES];
         memset(strut, 0, sizeof strut);
         const int sp[4] = {P_FL, P_FR, P_RKL, P_RKR};
-        for (int i = 0; i < 4; i++) { strut[R[D->axleF][sp[i]]] = 1; strut[R[D->axleR][sp[i]]] = 1; }
+        for (int i = 0; i < 4; i++) {
+            strut[R[D->axleF][sp[i]]] = 1; strut[R[D->axleR][sp[i]]] = 1;
+            if (D->axleR2 >= 0) strut[R[D->axleR2][sp[i]]] = 1;
+        }
         const float h = 1.0f / SIM_HZ;
         for (int i = 0; i < c->nb; i++) {
             Beam *B = &c->b[i];
@@ -381,7 +438,7 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
                 if (ST[r].topPanel >= 0) panel = ST[r].topPanel;
                 else if (ST[r].topPanel == -2) kind = SURF_TONNEAU;
             }
-            if (D->smooth) e = 0;
+            if (D->smooth || D->noEdges) e = 0;
             if (panel >= 0) { kind = SURF_GLASS; e = 15; }
             if (ST[r].seam && s >= 2 && s <= 6) e |= 8;
             add_quad(c, R[r][p], R[r + 1][p], R[r + 1][q], R[r][q], kind, panel, e, ref);
@@ -391,8 +448,8 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
     {   // nose: front face, fan from the floor centre
         V3 ref = v3(xN - 0.8f, 0.4f, 0);
         for (int i = 1; i < NP - 1; i++) {
-            int kind = (i == 1 || i == NP - 2) ? SURF_TRIM : SURF_BODY;
-            int e = D->smooth ? 0 : 2 | (i == 1 ? 1 : 0) | (i == NP - 2 ? 4 : 0);
+            int kind = (i == 1 || i == NP - 2) ? SURF_TRIM : D->chromeNose ? SURF_CHROME : SURF_BODY;
+            int e = (D->smooth || D->noEdges) ? 0 : 2 | (i == 1 ? 1 : 0) | (i == NP - 2 ? 4 : 0);
             add_tri(c, R[0][P_C], R[0][i], R[0][i + 1], kind, -1, e, ref);
         }
     }
@@ -407,7 +464,7 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
     } else {                // closed tail, like the nose
         for (int i = 1; i < NP - 1; i++) {
             int kind = (i == 1 || i == NP - 2) ? SURF_TRIM : SURF_BODY;
-            int e = D->smooth ? 0 : 2 | (i == 1 ? 1 : 0) | (i == NP - 2 ? 4 : 0);
+            int e = (D->smooth || D->noEdges) ? 0 : 2 | (i == 1 ? 1 : 0) | (i == NP - 2 ? 4 : 0);
             add_tri(c, T[P_C], T[i], T[i + 1], kind, -1, e, tref);
         }
     }
@@ -458,7 +515,9 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
     } else c->tailgate = TG_NONE;
 
     // ---- lights
-    if (D->lightStyle == 0) {                                   // full-width bars
+    if (D->lightStyle == 2) {
+        // lamps are render-only details
+    } else if (D->lightStyle == 0) {                            // full-width bars
         add_light(c, R[0][P_TPL], R[0][P_TPR], R[0][P_BLL], R[0][P_BLR], 0.45f, 0, 1, 1.0f, 0);
         add_light(c, c->tgNode[0], c->tgNode[1], c->tgNode[2], c->tgNode[3], 0.09f, 0, 1, -1.0f, 1);
     } else {                                                    // headlamps and tail-light clusters at the corners
@@ -493,6 +552,7 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
     c->bPillar[2] = R[D->bRing][P_BLR]; c->bPillar[3] = R[D->bRing][P_TPR];
 
     // ---- place in the world
+    for (int n = 0; n < c->nn; n++) c->rest[n] = L[n];
     float cy = cosf(yaw), sy = sinf(yaw);
     for (int n = 0; n < c->nn; n++) {
         V3 l = L[n];
@@ -501,17 +561,19 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color) {
     }
 
     // ---- wheels: FL, FR, RL, RR on the floor-edge nodes at the axle bulkheads
-    for (int w = 0; w < 4; w++) {
-        int left = (w % 2 == 0), ring = w < 2 ? D->axleF : D->axleR;
+    c->nw = D->axleR2 >= 0 ? 6 : 4;
+    for (int w = 0; w < c->nw; w++) {
+        int left = (w % 2 == 0), ring = w < 2 ? D->axleF : w < 4 ? D->axleR : D->axleR2;
         Wheel *W = &c->w[w];
         W->mount = R[ring][left ? P_FL : P_FR];
         W->upper = R[ring][left ? P_RKL : P_RKR];
-        W->off = (left ? -1.0f : 1.0f) * (D->trackHalf - D->floorHalf);
+        float track = (w >= 2 && D->trackHalfR > 0) ? D->trackHalfR : D->trackHalf;
+        W->off = (left ? -1.0f : 1.0f) * (track - D->floorHalf);
         W->front = w < 2;
-        W->driveShare = 0.5f * (W->front ? D->driveFront : 1.0f - D->driveFront);
+        W->driveShare = (W->front ? D->driveFront : 1.0f - D->driveFront) / (W->front ? 2.0f : (float)(c->nw - 2));
     }
     car_update_frame(c);
-    for (int w = 0; w < 4; w++) {
+    for (int w = 0; w < c->nw; w++) {
         Wheel *W = &c->w[w];
         W->hub = vsub(vadd(c->n[W->mount].p, vscale(c->right, W->off)), vscale(c->up, D->suspRest));
     }
@@ -658,7 +720,7 @@ static void wheel_forces(Car *c, float h) {
     if (ctl->throttle > 0) drive = ctl->throttle * fminf(D->engineF, D->enginePower / fmaxf(fabsf(vF), 2.0f));
     else if (ctl->throttle < 0 && vF > -12.0f) drive = ctl->throttle * D->reverseF;
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < c->nw; i++) {
         Wheel *W = &c->w[i];
         Node *m = &c->n[W->mount], *u = &c->n[W->upper];
         V3 up = c->up;

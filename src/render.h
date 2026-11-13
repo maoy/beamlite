@@ -31,6 +31,17 @@ void post_emissive_begin(float intensity);      // draw glowing things (colour *
 void post_emissive_end(void);
 Shader post_emissive_shader(void);              // for models: material shader...
 void post_set_emissive(float intensity);        // ...and its intensity
+// Vehicle paint: per-pixel shading for immediate-mode geometry whose vertices carry a normal and a
+// material id in the colour's alpha (see render.c). bakeAmb/bakeSun are the vertex-light multipliers.
+void post_paint_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time);
+void post_paint_end(void);
+// Sun shadows. post_shadow_begin returns 1 when the map is due a refresh: then draw the casters
+// (depth only) and call post_shadow_end. post_shadow_active: shadows are in effect this frame.
+int post_shadow_begin(Vector3 focus, const Env *e, Vector3 bakeAmb, Vector3 bakeSun);
+void post_shadow_end(void);
+int post_shadow_active(void);
+Shader post_depth_shader(void);
+void post_set_quality(int shadows, int ao);     // toggle sun shadows / ambient occlusion
 void post_shutdown(void);
 
 #endif

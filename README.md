@@ -1,9 +1,9 @@
 # BeamLite
 
 A small soft-body driving sandbox in the spirit of BeamNG.drive, written from scratch in C.
-Two vehicles, picked with **V**: an angular stainless-steel electric pickup (a Cybertruck-style
-wedge) and the Sparrow, a modern compact sport hatchback (unbadged, proportioned after a current
-C-segment five-door).
+Three vehicles, picked with **V**: an angular stainless-steel electric pickup (a Cybertruck-style
+wedge), the Sparrow, a modern compact sport hatchback (unbadged, proportioned after a current
+C-segment five-door), and a long-nose semi tractor in a red-and-blue flame livery (unbadged).
 Runs natively on macOS (Apple Silicon or Intel).
 
 ## Build & run (macOS)
@@ -33,6 +33,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | M | map: Default / New York / Airport |
 | J | traffic on / off |
 | L | lighting: dusk / day |
+| F2 | sun shadows + ambient occlusion on / off |
 | O | weather: dry / wet / rain / snow |
 | Q | recover (fresh car, upright, in place) |
 | R | reset to start |
@@ -78,6 +79,13 @@ trunks stop you dead.
     a window line that kicks up into a pointed rear quarter window, round arches and flared rear
     haunches. Drawn with smooth-shaded clear-coat paint (no panel outlines, just shut lines),
     door mirrors, a roof spoiler, a black grille, intake and diffuser, and dark ten-spoke alloys.
+  - *Long-nose semi*: a classic conventional tractor with a sleeper, bobtail. 8.25 m long, 3.0 m
+    tall, 8.2 t, ~600 hp, three axles with tandem drive: six wheels in the physics, duals on the
+    rear. The node/beam body is the narrow hood, cab, sleeper and bare frame. The chrome bumper,
+    barred grille, twin headlamps, fenders, air cleaners, exhaust stacks, fuel tanks, visor, mirrors
+    and fifth wheel are drawn on those nodes, so they move with the damage but don't collide
+    themselves. The flames are a procedural pattern in the paint shader: red-orange tongues with a
+    pinstripe, licking back from the nose over deep blue, with tone-on-tone ghost flames behind.
     0–100 km/h in 8.2 s, 100–0 in 36 m.
 - **Body**: 18 cross-section rings along a 5.68 m body, 9 nodes each (floor centre, floor
   edges, sills, beltline crease, roof/sail edge), shaped by the signature profile: one straight
@@ -132,6 +140,19 @@ trunks stop you dead.
   50 m patch, which is rebuilt when a tree in it falls. The renderer bakes the buildings into one
   flat-shaded mesh, with windows, doors, shopfronts, gable roofs, chimneys and rooftop plant.
   The chase camera pulls in so buildings never block the view.
+- **Vehicle paint** (`src/render.c`): vehicles and airliners are shaded per pixel. Each vertex
+  carries a normal and a material: clear-coated paint, flame livery, chrome, glass, satin trim,
+  rubber or brushed stainless. Diffuse light matches the world's baked lighting. On top come a
+  Fresnel reflection of the procedural sky (with clouds), the ground and a dark skyline, and a sun
+  highlight. Chrome and stainless are mirrors of that environment, sharp or blurred.
+- **Sun shadows**: a 2048² shadow map, an orthographic view down the sun's rays covering 60 m
+  either side of your car, refreshed every other frame. Buildings, trees, vehicles and airliners
+  cast. The post pass looks each pixel up in it. Because the world's sunlight is baked into its
+  colours, a shadowed pixel is scaled back to its ambient-only share, using a normal rebuilt from
+  depth. Soft edges come from six rotated samples.
+- **Ambient occlusion**: computed from the depth buffer at half resolution (eight samples in the
+  hemisphere over each pixel), blurred, and multiplied in. It darkens creases, wheel arches and
+  where things meet the ground. **F2** turns shadows and occlusion off together.
 - **Rendering** (`src/render.c`): the world is drawn into a half-float HDR buffer with a depth
   texture. A post pass rebuilds each pixel's world position from depth, then draws the sky
   (gradient, sun, procedural clouds) behind everything and blends exponential height fog over it.
@@ -161,6 +182,5 @@ a tailgate drop, a 60 km/h wall crash, a ramp jump, a T-bone and hitting a sapli
 
 ## Ideas for next steps
 
-Real-time shadow maps; per-pixel lighting from nearby
-lamps; node-beam wheels and tyres; opening doors and frunk; self-collision so crushed panels
+Per-pixel lighting from nearby lamps; screen-space reflections on chrome and paint; node-beam wheels and tyres; opening doors and frunk; self-collision so crushed panels
 stack up instead of passing through each other; slip-angle tyre model; Metal renderer; sound.

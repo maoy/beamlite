@@ -114,7 +114,130 @@ static const char *BILLBOARD_FS = GLSL
     "  finalColor = vec4(col * intensity * bez + vec3(0.02) * (1.0 - bez), 1.0);\n"
     "}\n";
 
+// Vehicle paint: per-pixel lighting for everything drawn between post_paint_begin/end. Vertex colour
+// rgb is the albedo; its alpha selects the material (the shader always writes alpha 1):
+//   255 unlit (colour as given)   250 clear-coated paint   245 flame livery over the paint
+//   240 chrome   235 glass   230 satin trim   225 matte (rubber, cloth)   220 brushed stainless
+//   215 gloss paint (airliners)
+// Diffuse light matches the baked vertex lighting of the world (ambient + sun, display space); on top
+// come a Fresnel reflection of the procedural sky and ground and a sun highlight.
+static const char *PAINT_VS =
+    "#version 330\n"
+    "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec3 vertexNormal; in vec4 vertexColor;\n"
+    "uniform mat4 mvp;\n"
+    "out vec2 fragTexCoord; out vec4 fragColor; out vec3 fragPos; out vec3 fragNormal;\n"
+    "void main() { fragTexCoord = vertexTexCoord; fragColor = vertexColor; fragPos = vertexPosition; fragNormal = vertexNormal;\n"
+    "  gl_Position = mvp * vec4(vertexPosition, 1.0); }\n";
+static const char *PAINT_FS = GLSL SKY_GLSL
+    "in vec3 fragPos; in vec3 fragNormal;\n"
+    "uniform vec3 bakeAmb, bakeSun, groundCol;\n"
+    "uniform float lampGlow;\n"
+    "vec3 envAt(vec3 r) {\n"                                    // what a mirror sees: sky above, the ground below
+    "  vec3 up = sky(normalize(vec3(r.x, max(r.y, 0.0), r.z)), 0.0);\n"
+    "  vec3 dn = mix(groundCol * 0.7, groundCol * 1.25 + horizonCol(r) * 0.22, smoothstep(-0.45, 0.0, r.y));\n"
+    "  vec2 gp = r.xz / max(-r.y, 0.04);\n"                     // where the ray meets the ground: mottle it like road and verge
+    "  dn *= 0.72 + 0.56 * noise(gp * 0.9 + 3.0) * smoothstep(0.0, -0.08, r.y);\n"
+    "  float az = atan(r.z, r.x);\n"                             // a dark skyline (trees, roofs) along the horizon
+    "  float skyline = 0.035 + 0.075 * noise(vec2(az * 9.0, 1.7)) + 0.05 * step(0.62, noise(vec2(az * 23.0, 8.3)));\n"
+    "  up = mix(groundCol * 0.45, up, smoothstep(skyline - 0.012, skyline + 0.012, r.y));\n"
+    "  dn += vec3(1.0, 0.72, 0.42) * lampGlow * (0.10 + 0.25 * smoothstep(0.90, 1.0, sin(r.x * 23.0) * sin(r.z * 19.0))) * smoothstep(-0.30, -0.02, r.y);\n"
+    "  return mix(dn, up, smoothstep(-0.02, 0.03, r.y)); }\n"
+    "vec3 envRough(vec3 r, float rough) {\n"
+    "  vec3 a = envAt(r);\n"
+    "  if (rough < 0.12) return a;\n"
+    "  vec3 avg = mix(groundCol, 0.5 * (zenith + horizonAway), smoothstep(-0.6, 0.6, r.y));\n"
+    "  return mix(a, avg, clamp(rough * 1.6, 0.0, 1.0)); }\n"
+    "vec3 flames(vec2 t, vec3 base) {\n"                        // t.x: metres behind the nose; t.y: height around the body
+    "  float s = t.x + 0.10 * sin(t.y * 7.0 + t.x * 2.3);\n"
+    "  float w = t.y * 2.3 + 0.30 * sin(t.x * 1.3 + t.y * 2.0);\n"
+    "  float id = floor(w), lane = fract(w);\n"
+    "  float tri = 1.0 - abs(lane * 2.0 - 1.0);\n"
+    "  float len = 1.2 + 3.0 * hash(vec2(id, 7.3));\n"
+    "  float d = 0.70 + len * pow(tri, 0.75) - s;\n"            // > 0 inside a tongue of flame
+    "  vec3 fl = mix(vec3(0.95, 0.36, 0.05), vec3(0.74, 0.04, 0.03), smoothstep(0.0, 1.3, d));\n"
+    "  vec3 c = mix(base, fl, smoothstep(0.0, 0.025, d));\n"
+    "  float w2 = t.y * 3.1 + 1.7 + 0.25 * sin(t.x * 1.9);\n"   // ghost flames further back, tone on tone
+    "  float d2 = 2.2 + (1.0 + 2.5 * hash(vec2(floor(w2), 3.1))) * pow(1.0 - abs(fract(w2) * 2.0 - 1.0), 0.8) - s;\n"
+    "  c = mix(c, c * 1.5 + vec3(0.02, 0.03, 0.10), smoothstep(0.0, 0.03, d2) * (1.0 - smoothstep(0.0, 0.025, d)) * 0.55);\n"
+    "  return mix(c, vec3(1.0, 0.72, 0.22), smoothstep(0.022, 0.006, abs(d - 0.012)) * 0.85); }\n"
+    "void main() {\n"
+    "  float m = fragColor.a * 255.0;\n"
+    "  if (m > 252.5) { finalColor = vec4(fragColor.rgb, 1.0); return; }\n"
+    "  vec3 N = normalize(fragNormal), V = normalize(camPos - fragPos);\n"
+    "  if (dot(N, V) < 0.0) N = -N;\n"
+    "  vec3 alb = fragColor.rgb;\n"
+    "  float metal = 0.0, rough = 0.6, coat = 0.0, f0 = 0.04;\n"
+    "  if (m > 247.5) { coat = 1.0; f0 = 0.05; }\n"
+    "  else if (m > 242.5) { alb = flames(fragTexCoord, alb); coat = 1.0; f0 = 0.06; }\n"
+    "  else if (m > 237.5) { metal = 1.0; rough = 0.04; }\n"
+    "  else if (m > 232.5) { coat = 1.0; f0 = 0.09; }\n"
+    "  else if (m > 227.5) { coat = 0.30; rough = 0.5; }\n"
+    "  else if (m > 222.5) { coat = 0.0; }\n"
+    "  else if (m > 217.5) { metal = 1.0; rough = 0.30; }\n"
+    "  else { coat = 0.60; }\n"
+    "  float ndl = max(dot(N, sunDir), 0.0), ndv = max(dot(N, V), 0.0);\n"
+    "  vec3 light = bakeAmb + 0.10 * max(N.y, 0.0) * vec3(1.0, 1.0, 1.2) + bakeSun * ndl;\n"
+    "  vec3 lin = pow(alb * light, vec3(2.2)) * (1.0 - metal);\n"
+    "  vec3 R = reflect(-V, N);\n"
+    "  float fr = pow(1.0 - ndv, 5.0);\n"
+    "  vec3 H = normalize(V + sunDir);\n"
+    "  float ndh = max(dot(N, H), 0.0);\n"
+    "  if (metal > 0.5) {\n"
+    "    vec3 tint = mix(pow(alb, vec3(2.2)), vec3(1.0), fr);\n"
+    "    float shin = mix(900.0, 40.0, clamp(rough * 3.0, 0.0, 1.0));\n"
+    "    lin = envRough(R, rough) * tint * (rough > 0.12 ? 0.80 : 0.92) + sunCol * tint * pow(ndh, shin) * (rough > 0.12 ? 0.30 : 6.0) * step(0.0, sunDir.y + 0.2);\n"
+    "  } else {\n"
+    "    float F = (f0 + (1.0 - f0) * fr) * coat;\n"
+    "    lin = lin * (1.0 - F) + envRough(R, coat > 0.9 ? 0.0 : 0.35) * F;\n"
+    "    lin += sunCol * (pow(ndh, 420.0) * 2.2 * coat + pow(ndh, 24.0) * 0.05) * ndl;\n"
+    "  }\n"
+    "  finalColor = vec4(pow(max(lin, 0.0), vec3(1.0 / 2.2)), 1.0);\n"
+    "}\n";
+
+// Shadow-map depth pass: any colour will do.
+static const char *DEPTH_FS = "#version 330\nout vec4 finalColor;\nvoid main() { finalColor = vec4(1.0); }\n";
+
+// Ambient occlusion from the depth buffer (half resolution, blurred afterwards).
+static const char *AO_FS = GLSL SKY_GLSL
+    "float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * 0.1 * 1500.0 / (1500.1 - z * 1499.9); }\n"
+    "void main() {\n"
+    "  vec2 uv = fragTexCoord;\n"
+    "  float d = texture(depthTex, uv).r;\n"
+    "  if (d >= 0.999999) { finalColor = vec4(1.0); return; }\n"
+    "  vec3 P = worldAt(uv, d);\n"
+    "  float dist = length(P - camPos);\n"
+    "  if (dist > 160.0) { finalColor = vec4(1.0); return; }\n"
+    "  vec3 N = normalize(cross(dFdx(P), dFdy(P)));\n"
+    "  if (dot(N, P - camPos) > 0.0) N = -N;\n"
+    "  vec3 T = normalize(abs(N.y) < 0.9 ? cross(N, vec3(0, 1, 0)) : cross(N, vec3(1, 0, 0))), B = cross(N, T);\n"
+    "  float ang = 6.2831 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"
+    "  float ca = cos(ang), sa = sin(ang);\n"
+    "  float radius = clamp(dist * 0.06, 0.35, 1.4), occ = 0.0;\n"
+    "  for (int i = 0; i < 8; i++) {\n"
+    "    float fi = float(i) + 0.5;\n"
+    "    float r = sqrt(fi / 8.0), th = fi * 2.399963;\n"      // golden-angle spiral on the disc, lifted into the hemisphere
+    "    vec2 k = r * vec2(cos(th), sin(th));\n"
+    "    k = vec2(k.x * ca - k.y * sa, k.x * sa + k.y * ca);\n"
+    "    float kz = sqrt(max(1.0 - r * r, 0.0));\n"
+    "    vec3 S = P + N * 0.04 + (T * k.x + B * k.y + N * kz) * radius * (0.35 + 0.65 * fi / 8.0);\n"
+    "    vec4 c = VP * vec4(S, 1.0);\n"
+    "    if (c.w <= 0.0) continue;\n"
+    "    vec3 n = c.xyz / c.w; vec2 su = n.xy * 0.5 + 0.5;\n"
+    "    if (su.x < 0.0 || su.x > 1.0 || su.y < 0.0 || su.y > 1.0) continue;\n"
+    "    float sceneZ = linz(texture(depthTex, su).r), sampZ = linz(n.z * 0.5 + 0.5);\n"
+    "    float diff = sampZ - sceneZ;\n"
+    "    occ += step(0.04, diff) * smoothstep(0.0, 1.0, radius * 1.5 / max(diff, 1e-3));\n"
+    "  }\n"
+    "  float ao = 1.0 - occ / 8.0;\n"
+    "  ao = mix(ao, 1.0, smoothstep(90.0, 160.0, dist));\n"
+    "  finalColor = vec4(ao, ao, ao, 1.0);\n"
+    "}\n";
+
 static const char *ATMOS_FS = GLSL SKY_GLSL
+    "uniform sampler2D shadowMap, aoTex;\n"
+    "uniform mat4 lightVP;\n"
+    "uniform vec3 shadowAmb, shadowSun;\n"
+    "uniform float shadowOn, aoOn, shadowTexel;\n"
     "void main() {\n"
     "  vec2 uv = fragTexCoord;\n"
     "  float d = texture(depthTex, uv).r;\n"
@@ -122,7 +245,33 @@ static const char *ATMOS_FS = GLSL SKY_GLSL
     "  vec3 r = normalize(w - camPos);\n"
     "  if (d >= 0.999999) { finalColor = vec4(sky(r, 1.0), 0.0); return; }\n"
     "  vec4 sc = texture(texture0, uv);\n"
+    "  bool glow = max(sc.r, max(sc.g, sc.b)) > 1.02;\n"       // emissive things are not shaded
+    "  if (shadowOn > 0.5 && !glow) {\n"
+    // Sun shadows, deferred: the world's lighting is baked (ambient + sun) into its colours, so where the
+    // shadow map says the sun is blocked, scale back to the ambient-only share.
+    "    vec3 Ng = normalize(cross(dFdx(w), dFdy(w)));\n"
+    "    if (dot(Ng, r) > 0.0) Ng = -Ng;\n"
+    "    float ndl = dot(Ng, sunDir);\n"
+    "    if (ndl > 0.02) {\n"
+    "      vec4 lp = lightVP * vec4(w + Ng * 0.09 + sunDir * 0.05, 1.0);\n"
+    "      vec3 q = lp.xyz / lp.w * 0.5 + 0.5;\n"
+    "      if (q.x > 0.0 && q.x < 1.0 && q.y > 0.0 && q.y < 1.0 && q.z < 1.0) {\n"
+    "        float ang = 6.2831 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"
+    "        float lit = 0.0;\n"
+    "        for (int i = 0; i < 6; i++) {\n"
+    "          float fi = float(i) + 0.5, rr = sqrt(fi / 6.0) * 1.6, th = fi * 2.399963 + ang;\n"
+    "          lit += step(q.z - 0.00005, texture(shadowMap, q.xy + rr * shadowTexel * vec2(cos(th), sin(th))).r);\n"
+    "        }\n"
+    "        lit /= 6.0;\n"
+    "        vec2 e = smoothstep(0.0, 0.06, q.xy) * (1.0 - smoothstep(0.94, 1.0, q.xy));\n"
+    "        lit = mix(1.0, lit, e.x * e.y);\n"
+    "        vec3 a = shadowAmb + 0.10 * max(Ng.y, 0.0) * vec3(1.0, 1.0, 1.2);\n"
+    "        sc.rgb *= mix(a / (a + shadowSun * ndl), vec3(1.0), lit);\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
     "  vec3 col = pow(max(sc.rgb, 0.0), vec3(2.2));\n"   // scene colours are authored in sRGB
+    "  if (aoOn > 0.5 && !glow) col *= mix(1.0, texture(aoTex, uv).r, 0.85);\n"
     "  float dist = length(w - camPos);\n"
     "  float ry = r.y * dist * fogFalloff;\n"
     "  float f = fogDensity * exp(-fogFalloff * camPos.y) * dist * (abs(ry) > 1e-4 ? (1.0 - exp(-ry)) / ry : 1.0);\n"
@@ -271,7 +420,16 @@ static int locBbTime, locBbInt;
 static Shader shEmissive, shAtmos, shSSR, shComposite, shBright, shBlur, shFinal;
 static int locIntensity, locAtmos[U_COUNT], locSSR[U_COUNT], locWet, locRain, locRoads, locNRoads, locNHighway, locRefl;
 static int locBrightTexel, locBrightThr, locBlurStep, locFinal[6];
-static RenderTexture2D scene, hdr, hdr2, refl[2], bl[3][2];
+static RenderTexture2D scene, hdr, hdr2, refl[2], bl[3][2], aoRT[2];
+static Shader shPaint, shDepth, shAO;
+static int locPaint[U_COUNT], locPaintAmb, locPaintSun, locPaintGround, locPaintLamp, locAO[U_COUNT];
+static int locShMap, locShVP, locShAmb, locShSun, locShOn, locShTexel, locAoTex, locAoOn;
+#define SHADOW_RES 2048
+#define SHADOW_HALF 60.0f                       // the shadow map covers this far either side of its focus
+static RenderTexture2D shadowRT;
+static Matrix lightVP;
+static int shadowReady, shadowDrawn, aoEnabled = 1, shadowsEnabled = 1;
+static Vector3 shadowAmb, shadowSun;
 static int curW, curH;
 static Matrix invVP, VP;
 static Vector3 camPos;
@@ -303,6 +461,7 @@ static void free_targets(void) {
     if (!curW) return;
     UnloadRenderTexture(scene); UnloadRenderTexture(hdr); UnloadRenderTexture(hdr2);
     UnloadRenderTexture(refl[0]); UnloadRenderTexture(refl[1]);
+    UnloadRenderTexture(aoRT[0]); UnloadRenderTexture(aoRT[1]);
     for (int i = 0; i < 3; i++) { UnloadRenderTexture(bl[i][0]); UnloadRenderTexture(bl[i][1]); }
     curW = curH = 0;
 }
@@ -320,6 +479,8 @@ static void ensure_targets(void) {
     hdr2 = make_rt(w, h, 0);
     refl[0] = make_rt(w / 3, h / 3, 0);                // reflections are blurred anyway: 1/3 resolution
     refl[1] = make_rt(w / 3, h / 3, 0);
+    aoRT[0] = make_rt(w / 2, h / 2, 0);
+    aoRT[1] = make_rt(w / 2, h / 2, 0);
     for (int i = 0; i < 3; i++) {
         int d = 2 << i;
         bl[i][0] = make_rt(w / d, h / d, 0);
@@ -341,7 +502,39 @@ void post_init(void) {
     shBlur = LoadShaderFromMemory(NULL, BLUR_FS);
     shFinal = LoadShaderFromMemory(NULL, FINAL_FS);
     locIntensity = GetShaderLocation(shEmissive, "intensity");
+    shPaint = LoadShaderFromMemory(PAINT_VS, PAINT_FS);
+    shDepth = LoadShaderFromMemory(NULL, DEPTH_FS);
+    shAO = LoadShaderFromMemory(NULL, AO_FS);
+    locPaintAmb = GetShaderLocation(shPaint, "bakeAmb");
+    locPaintSun = GetShaderLocation(shPaint, "bakeSun");
+    locPaintGround = GetShaderLocation(shPaint, "groundCol");
+    locPaintLamp = GetShaderLocation(shPaint, "lampGlow");
+    locShMap = GetShaderLocation(shAtmos, "shadowMap");
+    locShVP = GetShaderLocation(shAtmos, "lightVP");
+    locShAmb = GetShaderLocation(shAtmos, "shadowAmb");
+    locShSun = GetShaderLocation(shAtmos, "shadowSun");
+    locShOn = GetShaderLocation(shAtmos, "shadowOn");
+    locShTexel = GetShaderLocation(shAtmos, "shadowTexel");
+    locAoTex = GetShaderLocation(shAtmos, "aoTex");
+    locAoOn = GetShaderLocation(shAtmos, "aoOn");
+    {   // shadow map: a depth texture (plus a token colour attachment so the framebuffer is complete)
+        shadowRT.id = rlLoadFramebuffer();
+        rlEnableFramebuffer(shadowRT.id);
+        shadowRT.texture.id = rlLoadTexture(NULL, SHADOW_RES, SHADOW_RES, PIXELFORMAT_UNCOMPRESSED_GRAYSCALE, 1);
+        shadowRT.texture.width = shadowRT.texture.height = SHADOW_RES; shadowRT.texture.mipmaps = 1;
+        shadowRT.texture.format = PIXELFORMAT_UNCOMPRESSED_GRAYSCALE;
+        rlFramebufferAttach(shadowRT.id, shadowRT.texture.id, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+        shadowRT.depth.id = rlLoadTextureDepth(SHADOW_RES, SHADOW_RES, false);
+        shadowRT.depth.width = shadowRT.depth.height = SHADOW_RES; shadowRT.depth.mipmaps = 1;
+        rlFramebufferAttach(shadowRT.id, shadowRT.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+        shadowReady = rlFramebufferComplete(shadowRT.id);
+        if (!shadowReady) TraceLog(LOG_WARNING, "post: shadow framebuffer incomplete");
+        rlDisableFramebuffer();
+        SetTextureWrap(shadowRT.depth, TEXTURE_WRAP_CLAMP);
+    }
     for (int i = 0; i < U_COUNT; i++) {
+        locPaint[i] = GetShaderLocation(shPaint, SKY_UNIFORMS[i]);
+        locAO[i] = GetShaderLocation(shAO, SKY_UNIFORMS[i]);
         locAtmos[i] = GetShaderLocation(shAtmos, SKY_UNIFORMS[i]);
         locSSR[i] = GetShaderLocation(shSSR, SKY_UNIFORMS[i]);
     }
@@ -417,7 +610,7 @@ static void blit(RenderTexture2D dst, Shader sh, Texture2D src) {
 
 // Sky/fog/camera uniforms shared by the atmosphere and reflection shaders (call inside shader mode).
 static void set_sky_uniforms(Shader sh, const int *loc, const Env *e, float time) {
-    SetShaderValueTexture(sh, loc[U_DEPTH], scene.depth);
+    if (loc[U_DEPTH] >= 0) SetShaderValueTexture(sh, loc[U_DEPTH], scene.depth);
     SetShaderValueMatrix(sh, loc[U_INVVP], invVP);
     SetShaderValueMatrix(sh, loc[U_VP], VP);
     SetShaderValue(sh, loc[U_CAM], &camPos, SHADER_UNIFORM_VEC3);
@@ -433,6 +626,64 @@ static void set_sky_uniforms(Shader sh, const int *loc, const Env *e, float time
     SetShaderValue(sh, loc[U_TIME], &time, SHADER_UNIFORM_FLOAT);
 }
 
+// Vehicle paint shader: wrap immediate-mode drawing whose vertices carry normals and a material alpha.
+void post_paint_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time) {
+    BeginShaderMode(shPaint);
+    set_sky_uniforms(shPaint, locPaint, e, time);
+    SetShaderValue(shPaint, locPaintAmb, &bakeAmb, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shPaint, locPaintSun, &bakeSun, SHADER_UNIFORM_VEC3);
+    Vector3 sd = Vector3Normalize(e->sunDir);
+    float up = sd.y > 0 ? sd.y : 0;
+    // The ground as a mirror sees it: mid-grey asphalt/grass under the baked light, linear.
+    Vector3 g = {powf(0.44f * (bakeAmb.x + bakeSun.x * up), 2.2f), powf(0.45f * (bakeAmb.y + bakeSun.y * up), 2.2f), powf(0.43f * (bakeAmb.z + bakeSun.z * up), 2.2f)};
+    SetShaderValue(shPaint, locPaintGround, &g, SHADER_UNIFORM_VEC3);
+    float lamp = e->lights * 0.25f;
+    SetShaderValue(shPaint, locPaintLamp, &lamp, SHADER_UNIFORM_FLOAT);
+}
+void post_paint_end(void) { EndShaderMode(); }
+
+// Sun shadow map: draw the shadow casters between these two. The map is an orthographic view down the
+// sun's rays, SHADOW_HALF metres either side of `focus`, snapped to whole texels so it doesn't shimmer.
+int post_shadow_begin(Vector3 focus, const Env *e, Vector3 bakeAmb, Vector3 bakeSun) {
+    static int tick;
+    static const Env *lastEnv;
+    shadowAmb = bakeAmb; shadowSun = bakeSun;
+    if (!shadowReady || !shadowsEnabled) { shadowDrawn = 0; return 0; }
+    // Refresh the map every other frame; in between, the previous map (and its matrix) still holds.
+    if (shadowDrawn && lastEnv == e && (tick++ & 1)) return 0;
+    lastEnv = e;
+    Vector3 L = Vector3Normalize(e->sunDir);
+    Vector3 up = fabsf(L.y) > 0.95f ? (Vector3){1, 0, 0} : (Vector3){0, 1, 0};
+    Vector3 rx = Vector3Normalize(Vector3CrossProduct(up, L)), ry = Vector3CrossProduct(L, rx);
+    float texel = 2.0f * SHADOW_HALF / SHADOW_RES;
+    float fx = floorf(Vector3DotProduct(focus, rx) / texel) * texel, fy = floorf(Vector3DotProduct(focus, ry) / texel) * texel;
+    float fz = Vector3DotProduct(focus, L);
+    Vector3 f = Vector3Add(Vector3Add(Vector3Scale(rx, fx), Vector3Scale(ry, fy)), Vector3Scale(L, fz));
+    Camera3D lc = {0};
+    lc.position = Vector3Add(f, Vector3Scale(L, 600.0f));
+    lc.target = f;
+    lc.up = up;
+    lc.fovy = 2.0f * SHADOW_HALF;
+    lc.projection = CAMERA_ORTHOGRAPHIC;
+    BeginTextureMode(shadowRT);
+    ClearBackground(WHITE);
+    BeginMode3D(lc);
+    lightVP = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
+    rlDisableBackfaceCulling();
+    BeginShaderMode(shDepth);
+    shadowDrawn = 1;
+    return 1;
+}
+void post_shadow_end(void) {
+    EndShaderMode();
+    rlEnableBackfaceCulling();
+    EndMode3D();
+    EndTextureMode();
+}
+int post_shadow_active(void) { return shadowDrawn; }
+Shader post_depth_shader(void) { return shDepth; }
+void post_set_quality(int shadows, int ao) { shadowsEnabled = shadows; aoEnabled = ao; }
+
 static void blur_pass(RenderTexture2D a, RenderTexture2D b, float sx, float sy) {
     Vector2 tx = {1.0f / a.texture.width, 1.0f / a.texture.height};
     Vector2 h = {tx.x * sx, 0}, v = {0, tx.y * sy};
@@ -446,12 +697,32 @@ void post_present(const Env *e, float time, float wet, float rain) {
     if (!curW) return;
     Rectangle full = {0, 0, (float)curW, -(float)curH}, dst = {0, 0, (float)curW, (float)curH};
 
-    // 1. Atmosphere (alpha written as-is: it carries the ground mask).
+    // 0. Ambient occlusion at half resolution, blurred.
+    if (aoEnabled) {
+        BeginTextureMode(aoRT[0]);
+        BeginShaderMode(shAO);
+        set_sky_uniforms(shAO, locAO, e, time);
+        DrawTexturePro(scene.texture, full, (Rectangle){0, 0, (float)aoRT[0].texture.width, (float)aoRT[0].texture.height}, (Vector2){0, 0}, 0, WHITE);
+        EndShaderMode();
+        EndTextureMode();
+        blur_pass(aoRT[0], aoRT[1], 1.0f, 1.0f);
+    }
+
+    // 1. Atmosphere (alpha written as-is: it carries the ground mask), with sun shadows and AO.
     BeginTextureMode(hdr);
     rlSetBlendFactors(1, 0, 0x8006);
     rlSetBlendMode(BLEND_CUSTOM);
     BeginShaderMode(shAtmos);
     set_sky_uniforms(shAtmos, locAtmos, e, time);
+    float shOn = shadowDrawn ? 1.0f : 0.0f, aoOn = aoEnabled ? 1.0f : 0.0f, shTexel = 1.0f / SHADOW_RES;
+    SetShaderValueTexture(shAtmos, locShMap, shadowRT.depth);
+    SetShaderValueTexture(shAtmos, locAoTex, aoRT[0].texture);
+    SetShaderValueMatrix(shAtmos, locShVP, lightVP);
+    SetShaderValue(shAtmos, locShAmb, &shadowAmb, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shAtmos, locShSun, &shadowSun, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shAtmos, locShOn, &shOn, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shAtmos, locShTexel, &shTexel, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shAtmos, locAoOn, &aoOn, SHADER_UNIFORM_FLOAT);
     DrawTexturePro(scene.texture, full, dst, (Vector2){0, 0}, 0, WHITE);
     EndShaderMode();
     rlSetBlendMode(BLEND_ALPHA);
@@ -520,4 +791,6 @@ void post_shutdown(void) {
     free_targets();
     UnloadShader(shEmissive); UnloadShader(shBillboard); UnloadShader(shAtmos); UnloadShader(shSSR); UnloadShader(shComposite);
     UnloadShader(shBright); UnloadShader(shBlur); UnloadShader(shFinal);
+    UnloadShader(shPaint); UnloadShader(shDepth); UnloadShader(shAO);
+    if (shadowReady) UnloadRenderTexture(shadowRT);
 }

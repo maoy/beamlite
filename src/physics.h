@@ -35,6 +35,7 @@ static inline V3 vrot(V3 v, V3 k, float a) {
 
 #define SIM_HZ 1200.0f          // physics substep rate
 #define CAR_SPAWN_H 0.56f       // floor height above ground when the pickup is dropped in (tests)
+#define MAX_WHEELS 6
 #define NR_MAX 24               // body rings per vehicle (at most)
 
 typedef struct { V3 p, v, f; float m; } Node;
@@ -60,7 +61,7 @@ typedef struct {
     V3 hub, cp, side;           // wheel centre, contact point, lateral axis
 } Wheel;
 
-enum { SURF_BODY, SURF_GLASS, SURF_UNDER, SURF_TONNEAU, SURF_TRIM };
+enum { SURF_BODY, SURF_GLASS, SURF_UNDER, SURF_TONNEAU, SURF_TRIM, SURF_CHROME };
 
 typedef struct {
     int v[3];
@@ -87,7 +88,7 @@ typedef struct {
 
 typedef struct { int q[4]; float t, u0, u1, out; unsigned char rear; } LightStrip;
 
-enum { VEH_PICKUP, VEH_HATCH, VEH_COUNT };
+enum { VEH_PICKUP, VEH_HATCH, VEH_SEMI, VEH_COUNT };
 
 typedef struct {
     const char *name, *blurb;
@@ -95,6 +96,9 @@ typedef struct {
     Station st[NR_MAX];
     float floorHalf, sillHalf, beltHalf;    // half-widths
     int axleF, axleR, doorR0, doorR1, dashRing, bRing;
+    int axleR2;                             // second rear axle ring (tandem), or -1
+    float wheelWR, trackHalfR;              // rear wheel width (duals) and half-track; 0 = same as the front
+    int noEdges, chromeNose;                // no panel outlines; the nose face is a chrome grille
     float mass;
     float batW, batX0, batX1, engW, engX0, engX1;   // extra mass (weight units) on floor nodes in [x0, x1]
     float crumpleF, crumpleR, cabinX0, cabinX1;     // structural zones (x)
@@ -107,7 +111,7 @@ typedef struct {
     V3 seat;                                // driver's eye point (car-local; left-hand drive, so z < 0)
     float dashX, dashY;                     // dashboard top: x of its leading edge, height
     float rearSeatX;                        // rear bench cushion centre (x)
-    int npanels, hasTailgate, lightStyle;   // lightStyle: 0 full-width bars, 1 corner lamps
+    int npanels, hasTailgate, lightStyle;   // lightStyle: 0 full-width bars, 1 corner lamps, 2 drawn by the renderer
     int smooth;                             // smooth-shaded paint without panel outlines
     int wheelStyle;                         // 0 flat aero covers, 1 dark multi-spoke alloys
     int mirrorRing, spoilerRing;            // ring for door mirrors / roof spoiler (-1 = none)
@@ -119,7 +123,8 @@ typedef struct {
     Node n[MAX_NODES]; int nn, nBody;   // nodes [0, nBody) are the body; the rest is the tailgate
     Beam b[MAX_BEAMS]; int nb;
     Tri t[MAX_TRIS]; int nt;
-    Wheel w[4];
+    Wheel w[MAX_WHEELS]; int nw;        // FL, FR, RL, RR (, second rear axle L, R)
+    V3 rest[MAX_NODES];                 // node positions in the car-local frame when built (paint coordinates)
     Controls ctl;
     float steer;                // actual front-wheel angle (rad)
     V3 pos, vel, fwd, right, up, bmin, bmax;

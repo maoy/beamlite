@@ -216,6 +216,24 @@ int main(void) {
         printf("        respawn reasons: stuck %d, off route %d, flipped %d, damaged %d\n", why[0], why[1], why[2], why[3]);
         traffic_clear(&W);
     }
+    {   // The long-nose semi: six wheels (tandem drive), 8.2 t.
+        const VehicleDef *D = vehicle_def(VEH_SEMI);
+        world_init(&W, MAP_DEFAULT); W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_SEMI, v3(-60, terrain_height(-60, 3.5f) + D->spawnH, 3.5f), 0, D->paint);
+        printf("semi nodes / beams / tris / wheels: %d / %d / %d / %d\n", W.cars[0].nn, W.cars[0].nb, W.cars[0].nt, W.cars[0].nw);
+        run(3, idle); report("semi settle 3s");
+        for (int i = 0; i < W.cars[0].nn; i++) W.cars[0].n[i].v = vadd(W.cars[0].n[i].v, v3(80 / 3.6f, 0, 0));
+        car_update_frame(&W.cars[0]);
+        float x0 = W.cars[0].pos.x; int k = 0;
+        for (; k < 100 && vlen(W.cars[0].vel) > 0.3f; k++) run(0.1f, (Controls){0, 1, 0, 0});
+        printf("  semi 80-0 braking distance: %.1f m, damage %.1f\n", W.cars[0].pos.x - x0, W.cars[0].damage);
+        world_init(&W, MAP_DEFAULT); W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_SEMI, v3(-50, terrain_height(-50, 0) + D->spawnH, 0), 3.14159f, D->paint);
+        run(0.5f, idle);
+        for (int i = 0; i < W.cars[0].nn; i++) W.cars[0].n[i].v = vadd(W.cars[0].n[i].v, v3(-60 / 3.6f, 0, 0));
+        run(3, idle);
+        printf("  semi into the wall at 60 km/h: damage %.0f%%, torn beams %d, glass %d/%d, exploded %d\n", W.cars[0].damage, W.cars[0].brokenBeams, W.cars[0].glassBrokenCount, W.cars[0].npanels, W.cars[0].exploded);
+    }
     {   // Airport: the parked airliners are soft bodies. Settled on their gear, they sleep; a pickup at
         // 100 km/h into an engine wakes one, stops dead, and dents and bends it without blowing up.
         world_init(&W, MAP_AIRPORT);
