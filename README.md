@@ -60,8 +60,8 @@ trunks stop you dead.
   floodlight masts light it. Further north are two hangars (one with an airliner outside) and a
   490 m runway (09/27), with piano keys, touchdown bars, numbers, edge and threshold lights and
   approach lights. A blue-lit taxiway runs alongside. Every so often an airliner lines up on the
-  runway, rolls and climbs out to the east. It is scenery and has no collision. The parked airliners
-  and buildings are solid. The land around the airfield is flattened, and this map has no washboard.
+  runway, rolls and climbs out to the east. It is scenery and has no collision. The parked airliners are
+  soft bodies (see below), and the buildings are solid. The land around the airfield is flattened, and this map has no washboard.
 
 ## How it works
 
@@ -111,6 +111,15 @@ trunks stop you dead.
   flipped, off-route or deadlocked cars respawn out of sight. At the airport the landside roads
   are unsignalised, and cars just loop around the terminal. The highway past the ramp and
   through the crash wall is left out of the routes.
+- **Airliners**: each parked airliner is a ~40 t node/beam airframe of 246 nodes and 1560 beams,
+  resting on its landing gear. The fuselage is a tube of 10-node frames joined by stringers and
+  shear diagonals. Wings and stabilisers are two-layer boxes, and the engines hang on pylons. Every
+  beam runs at the integrator's stiffness limit for its node masses, so the airframe carries its own
+  weight (the tail droops a few centimetres) but dents, bends and yields where you hit it.
+  Car nodes collide with the airframe's skin triangles as well as its nodes, so nothing slips
+  through the gaps of the coarse structure. An airframe settles when the map loads, sleeps at zero
+  cost, and wakes when a car comes within a metre. The beam view (**B**) shows its structure. The
+  airliner taking off is still a rigid model.
 - **Maps**: `world_init(world, map)` builds the shared proving ground plus that map's own streets,
   buildings and landmarks. Road tables, the dirt washboard's location, Broadway and the city's
   extent all belong to the map, and the terrain asks the current map for them.

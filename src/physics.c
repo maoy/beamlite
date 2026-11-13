@@ -849,6 +849,372 @@ static void update_trees(World *w, float h) {
     }
 }
 
+// ------------------------------------------------------------ airliners ----
+//
+// Parked airliners are soft bodies too: a ~40 t node/beam airframe resting on its landing gear. The
+// fuselage is a tube of 10-node frames joined by stringers and shear diagonals; wings and stabilisers
+// are two-layer boxes; engines hang on pylons. Every beam sits at the integrator's stiffness limit
+// for its node masses, so the structure carries its own weight but dents, buckles and tears where a
+// car hits it. An airframe sleeps (costs nothing) until a car comes near.
+
+static int af_node(Car *c, V3 p, float m) { int i = add_node(c, p, m); c->n[i].p = p; return i; }
+#define AF_K 1.0e9f                                     // every beam clamps to the stability limit
+static int af_beam(Car *c, int a, int b, float Y) { return add_beam(c, a, b, AF_K, Y, 0.0f, BEAM_NORMAL); }
+static void af_tri(Airframe *A, int a, int b, int d, int paint, V3 ref) {
+    int t = A->c.nt;
+    add_tri(&A->c, a, b, d, SURF_BODY, -1, 0, ref);
+    if (A->c.nt > t) A->paint[t] = (unsigned char)paint;
+}
+static void af_quad(Airframe *A, int a, int b, int cc, int d, int paint, V3 ref) { af_tri(A, a, b, cc, paint, ref); af_tri(A, a, cc, d, paint, ref); }
+static void af_brace(Car *c, const int *ids, int n, float Y) {      // all pairs
+    for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) af_beam(c, ids[i], ids[j], Y);
+}
+
+// Fuselage shape: station (m from the nose), radius, centre height.
+static const float AF_ST[][3] = {{0.0f, 0.15f, 3.35f}, {0.9f, 1.0f, 3.40f}, {2.2f, 1.6f, 3.50f}, {4.0f, 1.95f, 3.55f}, {28.0f, 1.95f, 3.6f},
+                                 {31.0f, 1.5f, 3.95f}, {34.0f, 0.8f, 4.5f}, {36.0f, 0.2f, 4.9f}};
+static void af_shape(float s, float *r, float *y) {
+    int n = (int)(sizeof AF_ST / sizeof AF_ST[0]), i = 0;
+    while (i < n - 2 && s > AF_ST[i + 1][0]) i++;
+    float t = clampf((s - AF_ST[i][0]) / (AF_ST[i + 1][0] - AF_ST[i][0]), 0, 1);
+    *r = AF_ST[i][1] + (AF_ST[i + 1][1] - AF_ST[i][1]) * t;
+    *y = AF_ST[i][2] + (AF_ST[i + 1][2] - AF_ST[i][2]) * t;
+}
+
+static void airframe_bounds(Airframe *A) {
+    Car *c = &A->c;
+    V3 mn = c->n[0].p, mx = c->n[0].p;
+    for (int i = 1; i < c->nn; i++) {
+        V3 q = c->n[i].p;
+        mn = v3(fminf(mn.x, q.x), fminf(mn.y, q.y), fminf(mn.z, q.z));
+        mx = v3(fmaxf(mx.x, q.x), fmaxf(mx.y, q.y), fmaxf(mx.z, q.z));
+    }
+    c->bmin = mn; c->bmax = mx;
+}
+
+static const float AF_RING_S[AF_RINGS] = {0.9f, 2.2f, 4.0f, 6.2f, 8.4f, 10.6f, 12.8f, 15.0f, 17.2f, 19.4f, 21.6f, 23.8f, 26.0f, 28.0f, 30.0f, 32.0f, 34.0f};
+
+static void airframe_build(Airframe *A, V3 nose, V3 tail, unsigned seed) {
+    Car *c = &A->c;
+    memset(A, 0, sizeof *A);
+    memset(ADJ, 0, sizeof ADJ);
+    c->active = 1; c->grip = 1.0f;
+    A->seed = seed;
+    V3 up = v3(0, 1, 0), right = v3(tail.z, 0, -tail.x);
+    // Heights below are a 36 m narrow-body's; the whole airframe sits AF_DROP lower on short gear.
+    #define AF_DROP 0.35f
+    #define AFP(s, y, l) vadd(vadd(nose, vscale(tail, (s))), vadd(vscale(up, (y) - AF_DROP), vscale(right, (l))))
+    V3 ctrRef = AFP(18.0f, 3.55f, 0);
+    const float Ys = 0.020f, Yr = 0.008f;             // stringers carry the bending; frames and skin dent sooner
+
+    // ---- fuselage: tip, 17 frames of AF_RN nodes, tail cone tip
+    int tipN = af_node(c, AFP(0.0f, 3.35f, 0), 120.0f);
+    for (int i = 0; i < AF_RINGS; i++) {
+        float r, y; af_shape(AF_RING_S[i], &r, &y);
+        for (int k = 0; k < AF_RN; k++) {
+            float a = k * (6.2831853f / AF_RN);            // k = 0 on the right side, counter-clockwise seen from the nose
+            A->ring[i][k] = af_node(c, AFP(AF_RING_S[i], y + r * sinf(a), r * cosf(a)), i < 2 ? 70.0f : 115.0f);
+        }
+    }
+    int tipT = af_node(c, AFP(36.0f, 4.9f, 0), 110.0f);
+    A->noseNode = tipN; A->tailNode = tipT;
+    for (int i = 0; i < AF_RINGS; i++)
+        for (int k = 0; k < AF_RN; k++) {
+            int a = A->ring[i][k], b = A->ring[i][(k + 1) % AF_RN];
+            af_beam(c, a, b, Yr);                                       // frame
+            af_beam(c, a, A->ring[i][(k + 3) % AF_RN], Yr);             // frame bracing (keeps the section round)
+            if (k < AF_RN / 2) af_beam(c, a, A->ring[i][k + AF_RN / 2], Yr);
+            if (i + 1 < AF_RINGS) {
+                af_beam(c, a, A->ring[i + 1][k], Ys);                   // stringer
+                af_beam(c, a, A->ring[i + 1][(k + 1) % AF_RN], Yr);     // skin shear
+                af_beam(c, b, A->ring[i + 1][k], Yr);
+            }
+            if (i + 2 < AF_RINGS) af_beam(c, a, A->ring[i + 2][k], Ys); // keel / crown stiffening
+        }
+    for (int k = 0; k < AF_RN; k++) {
+        af_beam(c, tipN, A->ring[0][k], Yr); af_beam(c, tipN, A->ring[1][k], Ys);
+        af_beam(c, tipT, A->ring[AF_RINGS - 1][k], Yr); af_beam(c, tipT, A->ring[AF_RINGS - 2][k], Ys);
+    }
+    // Skin. Paint: 0 white, 1 belly, 2 livery, 3 glass, 4 wing, 5 nacelle, 6 dark.
+    for (int k = 0; k < AF_RN; k++) {
+        int k1 = (k + 1) % AF_RN;
+        int belly = k >= 6 && k <= 8;
+        af_tri(A, tipN, A->ring[0][k], A->ring[0][k1], belly ? 1 : 0, ctrRef);
+        for (int i = 0; i + 1 < AF_RINGS; i++) {
+            int paint = belly ? 1 : 0;
+            if (i == 0 && (k <= 1 || k == 3 || k == 4)) paint = 3;     // cockpit windows
+            af_quad(A, A->ring[i][k], A->ring[i][k1], A->ring[i + 1][k1], A->ring[i + 1][k], paint, ctrRef);
+        }
+        af_tri(A, tipT, A->ring[AF_RINGS - 1][k], A->ring[AF_RINGS - 1][k1], 0, ctrRef);
+    }
+
+    A->nFusTris = c->nt;
+
+    // ---- wings: 4 spanwise stations x (leading/trailing edge) x (top/bottom)
+    const float span[4] = {1.9f, 6.5f, 11.5f, 17.0f};
+    for (int side = 0; side < 2; side++) {
+        float sg = side ? -1.0f : 1.0f;                                // side 0: right (+l)
+        for (int j = 0; j < 4; j++) {
+            float u = (span[j] - 1.9f) / 15.1f;
+            float sLE = 14.0f + 8.5f * u, sTE = 21.0f + 4.0f * u, y = 2.4f + 0.9f * u, th = 0.6f - 0.3f * u;
+            float m = j == 0 ? 300.0f : j == 3 ? 120.0f : 240.0f;
+            A->wing[side][j][0] = af_node(c, AFP(sLE, y + th * 0.5f, sg * span[j]), m);
+            A->wing[side][j][1] = af_node(c, AFP(sLE, y - th * 0.5f, sg * span[j]), m);
+            A->wing[side][j][2] = af_node(c, AFP(sTE, y + th * 0.3f, sg * span[j]), m * 0.8f);
+            A->wing[side][j][3] = af_node(c, AFP(sTE, y - th * 0.3f, sg * span[j]), m * 0.8f);
+            af_brace(c, A->wing[side][j], 4, Ys);
+            if (j) {
+                for (int p = 0; p < 4; p++) for (int q = 0; q < 4; q++) af_beam(c, A->wing[side][j - 1][p], A->wing[side][j][q], p == q ? Ys : Yr);
+            }
+        }
+        // Root: tie into the nearest fuselage nodes (wing box through the belly).
+        for (int p = 0; p < 4; p++) {
+            V3 q = c->n[A->wing[side][0][p]].p;
+            int best[4] = {-1, -1, -1, -1}; float bd[4] = {1e9f, 1e9f, 1e9f, 1e9f};
+            for (int i = 0; i < AF_RINGS; i++) for (int k = 0; k < AF_RN; k++) {
+                float d = vlen(vsub(c->n[A->ring[i][k]].p, q));
+                for (int s = 0; s < 4; s++) if (d < bd[s]) { for (int t = 3; t > s; t--) { bd[t] = bd[t - 1]; best[t] = best[t - 1]; } bd[s] = d; best[s] = A->ring[i][k]; break; }
+            }
+            for (int s = 0; s < 4; s++) af_beam(c, A->wing[side][0][p], best[s], Ys);
+        }
+        // The two wings meet through the centre box.
+        if (side) for (int p = 0; p < 4; p++) af_beam(c, A->wing[0][0][p], A->wing[1][0][p], Ys);
+        // Hidden stays from mid-span to the fuselage crown stand in for the wing's real depth.
+        for (int j = 1; j <= 2; j++) {
+            af_beam(c, A->wing[side][j][0], A->ring[7][2], Ys); af_beam(c, A->wing[side][j][2], A->ring[9][2], Ys);
+            af_beam(c, A->wing[side][j][1], A->ring[8][side ? 7 : 8], Ys);
+        }
+        af_beam(c, A->wing[side][3][0], A->ring[8][2], Ys);
+        // Skin: top, bottom, leading and trailing edges, tip.
+        for (int j = 0; j + 1 < 4; j++) {
+            int (*W)[4] = A->wing[side];
+            V3 below = vsub(c->n[W[j][1]].p, v3(0, 5, 0)), above = vadd(c->n[W[j][0]].p, v3(0, 5, 0));
+            V3 behind = vadd(c->n[W[j][1]].p, vscale(tail, 8)), ahead = vsub(c->n[W[j][1]].p, vscale(tail, 8));
+            af_quad(A, W[j][0], W[j + 1][0], W[j + 1][2], W[j][2], 4, below);
+            af_quad(A, W[j][1], W[j + 1][1], W[j + 1][3], W[j][3], 1, above);
+            af_quad(A, W[j][0], W[j + 1][0], W[j + 1][1], W[j][1], 4, behind);
+            af_quad(A, W[j][2], W[j + 1][2], W[j + 1][3], W[j][3], 1, ahead);
+        }
+        af_quad(A, A->wing[side][3][0], A->wing[side][3][2], A->wing[side][3][3], A->wing[side][3][1], 4, ctrRef);
+
+        // ---- engine: front ring (intake) and rear ring, on a pylon under station 1
+        for (int e = 0; e < 2; e++)
+            for (int k = 0; k < AF_EN; k++) {
+                float a = k * (6.2831853f / AF_EN) + 0.5236f, r = e ? 0.8f : 1.0f;
+                A->eng[side][e][k] = af_node(c, AFP(e ? 17.0f : 12.5f, 1.95f + r * sinf(a), sg * 6.5f + r * cosf(a)), 200.0f);
+            }
+        int all[2 * AF_EN];
+        for (int e = 0; e < 2; e++) for (int k = 0; k < AF_EN; k++) all[e * AF_EN + k] = A->eng[side][e][k];
+        af_brace(c, all, 2 * AF_EN, Ys);
+        // Pylon: the top nodes of each ring (k = 1 is the top at 90 degrees) into the wing's lower surface.
+        for (int e = 0; e < 2; e++) {
+            int t = A->eng[side][e][1], tl = A->eng[side][e][0], tr = A->eng[side][e][2];
+            af_beam(c, t, A->wing[side][1][1], Yr); af_beam(c, t, A->wing[side][1][3], Yr);
+            af_beam(c, tl, A->wing[side][1][1], Yr); af_beam(c, tr, A->wing[side][1][1], Yr);
+            af_beam(c, t, A->wing[side][0][1], Yr); af_beam(c, t, A->wing[side][2][1], Yr);
+        }
+        V3 ec = AFP(14.7f, 1.95f, sg * 6.5f);
+        for (int k = 0; k < AF_EN; k++) {
+            int k1 = (k + 1) % AF_EN;
+            af_quad(A, A->eng[side][0][k], A->eng[side][0][k1], A->eng[side][1][k1], A->eng[side][1][k], 5, ec);
+        }
+        for (int k = 1; k + 1 < AF_EN; k++) {
+            af_tri(A, A->eng[side][0][0], A->eng[side][0][k], A->eng[side][0][k + 1], 6, ec);
+            af_tri(A, A->eng[side][1][0], A->eng[side][1][k], A->eng[side][1][k + 1], 6, ec);
+        }
+
+        // ---- horizontal stabiliser
+        int hs[4];
+        hs[0] = af_node(c, AFP(33.6f, 4.95f, sg * 6.5f), 40.0f); hs[1] = af_node(c, AFP(33.6f, 4.75f, sg * 6.5f), 40.0f);
+        hs[2] = af_node(c, AFP(35.4f, 4.9f, sg * 6.5f), 35.0f); hs[3] = af_node(c, AFP(35.4f, 4.8f, sg * 6.5f), 35.0f);
+        af_brace(c, hs, 4, Ys);
+        int rk = side ? 5 : 0;                                         // the fuselage's side nodes at the tail
+        int root[4] = {A->ring[14][rk], A->ring[15][rk], A->ring[16][rk], A->ring[15][side ? 6 : 9]};
+        for (int p = 0; p < 4; p++) for (int q = 0; q < 4; q++) af_beam(c, hs[p], root[q], Ys);
+        af_beam(c, hs[0], A->ring[15][side ? 4 : 1], Ys);
+        af_quad(A, A->ring[14][rk], hs[0], hs[2], A->ring[16][rk], 4, vsub(c->n[hs[0]].p, v3(0, 3, 0)));
+        af_quad(A, A->ring[14][rk], hs[1], hs[3], A->ring[16][rk], 1, vadd(c->n[hs[0]].p, v3(0, 3, 0)));
+    }
+
+    // ---- fin
+    int fn[4];
+    fn[0] = af_node(c, AFP(33.0f, 11.0f, 0.15f), 30.0f); fn[1] = af_node(c, AFP(33.0f, 11.0f, -0.15f), 30.0f);
+    fn[2] = af_node(c, AFP(36.0f, 11.0f, 0.1f), 25.0f);  fn[3] = af_node(c, AFP(36.0f, 11.0f, -0.1f), 25.0f);
+    af_brace(c, fn, 4, Ys);
+    int top[4] = {A->ring[12][2], A->ring[13][2], A->ring[15][2], tipT};
+    int topL[4] = {A->ring[12][3], A->ring[13][3], A->ring[15][3], A->ring[16][2]};
+    for (int p = 0; p < 4; p++) for (int q = 0; q < 4; q++) { af_beam(c, fn[p], top[q], Ys); af_beam(c, fn[p], topL[q], Ys); }
+    af_quad(A, A->ring[12][2], tipT, fn[2], fn[0], 2, AFP(32, 8, -5));
+    af_quad(A, A->ring[12][3], tipT, fn[3], fn[1], 2, AFP(32, 8, 5));
+    af_tri(A, fn[0], fn[1], A->ring[12][2], 2, AFP(40, 8, 0));
+
+    // ---- landing gear: struts from the structure down to wheel nodes on the ground
+    const float Yg = 0.05f;
+    int ng[2] = {af_node(c, AFP(3.0f, AF_DROP, 0.35f), 120.0f), af_node(c, AFP(3.0f, AF_DROP, -0.35f), 120.0f)};
+    af_beam(c, ng[0], ng[1], Yg);
+    for (int g = 0; g < 2; g++) for (int k = 6; k <= 8; k++) { af_beam(c, ng[g], A->ring[1][k], Yg); af_beam(c, ng[g], A->ring[2][k], Yg); }
+    A->gear[0][0] = ng[0]; A->gear[0][1] = A->ring[2][7];
+    for (int side = 0; side < 2; side++) {
+        float sg = side ? -1.0f : 1.0f;
+        int mg[2] = {af_node(c, AFP(18.0f, AF_DROP, sg * 2.8f), 200.0f), af_node(c, AFP(19.2f, AF_DROP, sg * 2.8f), 200.0f)};
+        af_beam(c, mg[0], mg[1], Yg);
+        int up4[4] = {A->wing[side][0][1], A->wing[side][0][3], A->wing[side][1][1], A->ring[8][side ? 6 : 8]};
+        for (int g = 0; g < 2; g++) for (int q = 0; q < 4; q++) af_beam(c, mg[g], up4[q], Yg);
+        A->gear[1 + side][0] = mg[0]; A->gear[1 + side][1] = A->wing[side][0][1];
+    }
+    for (int g = 0; g < 3; g++) A->gearWheel[g][0] = A->gear[g][0];
+    A->gearWheel[0][1] = ng[1];
+    A->gearWheel[1][1] = A->gear[1][0] + 1; A->gearWheel[2][1] = A->gear[2][0] + 1;
+    c->nBody = c->nn;
+    #undef AFP
+    // Nodes where many beams meet would exceed the explicit integrator's limits (sum of k*h^2/m and
+    // c*h/m); scale back the beams there.
+    const float h = 1.0f / SIM_HZ;
+    for (int pass = 0; pass < 3; pass++) {
+        static float ks[MAX_NODES], cs[MAX_NODES];
+        memset(ks, 0, sizeof ks); memset(cs, 0, sizeof cs);
+        for (int i = 0; i < c->nb; i++) { Beam *B = &c->b[i]; ks[B->a] += B->k; ks[B->b] += B->k; cs[B->a] += B->c; cs[B->b] += B->c; }
+        for (int i = 0; i < c->nb; i++) {
+            Beam *B = &c->b[i];
+            float f = 1.0f;
+            for (int e = 0; e < 2; e++) {
+                int n = e ? B->b : B->a;
+                float m = c->n[n].m;
+                f = fminf(f, fminf(0.9f * m / (ks[n] * h * h), 0.75f * m / (cs[n] * h)));
+            }
+            if (f < 1.0f) { B->k *= f; B->c *= f; }
+        }
+    }
+    airframe_bounds(A);
+}
+
+// Let a freshly built airframe settle onto its gear, then put it to sleep with that as its
+// undamaged shape.
+static void airframe_forces(Airframe *A) {
+    Car *c = &A->c;
+    for (int i = 0; i < c->nn; i++) c->n[i].f = v3(0, -GRAV * c->n[i].m, 0);
+    beam_forces(c);
+}
+static void airframe_integrate(World *w, Airframe *A, float h) {
+    Car *c = &A->c;
+    float vmax = 0;
+    for (int i = 0; i < c->nn; i++) {
+        Node *N = &c->n[i];
+        N->v = vadd(N->v, vscale(N->f, h / N->m));
+        N->v = vscale(N->v, 0.9998f);                                 // structural damping
+        N->p = vadd(N->p, vscale(N->v, h));
+        vmax = fmaxf(vmax, fabsf(N->v.x) + fabsf(N->v.y) + fabsf(N->v.z));
+    }
+    if (!(vmax < 400.0f)) c->exploded = 1;
+    collide_static(w, c);
+    airframe_bounds(A);
+    A->vmax = vmax;
+}
+static void airframe_settle(World *w, Airframe *A) {
+    const float h = 1.0f / SIM_HZ;
+    for (int s = 0; s < (int)(SIM_HZ * 3.0f); s++) { airframe_forces(A); airframe_integrate(w, A, h); }
+    for (int i = 0; i < A->c.nn; i++) A->c.n[i].v = v3(0, 0, 0);
+    for (int i = 0; i < A->c.nb; i++) A->c.b[i].rest0 = A->c.b[i].rest;   // the settled shape is "undamaged"
+    A->asleep = 1;
+}
+
+// A car node against the airframe's skin: one-sided contact with each triangle, so a node can't slip
+// between two airframe nodes the way it could with node-to-node contact alone.
+static void collide_shell(Car *C, Airframe *A) {
+    Car *P = &A->c;
+    float D = NODE_R + 0.05f;
+    if (C->bmax.x + D < P->bmin.x || P->bmax.x + D < C->bmin.x || C->bmax.y + D < P->bmin.y || P->bmax.y + D < C->bmin.y ||
+        C->bmax.z + D < P->bmin.z || P->bmax.z + D < C->bmin.z) return;
+    static int cand[MAX_TRIS];
+    int nc = 0;
+    for (int t = 0; t < P->nt; t++) {
+        const Tri *T = &P->t[t];
+        V3 a = P->n[T->v[0]].p, b = P->n[T->v[1]].p, d = P->n[T->v[2]].p;
+        if (fmaxf(a.x, fmaxf(b.x, d.x)) + D < C->bmin.x || fminf(a.x, fminf(b.x, d.x)) - D > C->bmax.x) continue;
+        if (fmaxf(a.y, fmaxf(b.y, d.y)) + D < C->bmin.y || fminf(a.y, fminf(b.y, d.y)) - D > C->bmax.y) continue;
+        if (fmaxf(a.z, fmaxf(b.z, d.z)) + D < C->bmin.z || fminf(a.z, fminf(b.z, d.z)) - D > C->bmax.z) continue;
+        cand[nc++] = t;
+    }
+    if (!nc) return;
+    for (int i = 0; i < C->nn; i++) {
+        Node *N = &C->n[i];
+        if (N->p.x < P->bmin.x - D || N->p.x > P->bmax.x + D || N->p.y < P->bmin.y - D || N->p.y > P->bmax.y + D ||
+            N->p.z < P->bmin.z - D || N->p.z > P->bmax.z + D) continue;
+        for (int q = 0; q < nc; q++) {
+            const Tri *T = &P->t[cand[q]];
+            Node *na = &P->n[T->v[0]], *nb = &P->n[T->v[1]], *nd = &P->n[T->v[2]];
+            V3 e1 = vsub(nb->p, na->p), e2 = vsub(nd->p, na->p), nrm = vcross(e1, e2);
+            float area2 = vlen(nrm);
+            if (area2 < 1e-6f) continue;
+            nrm = vscale(nrm, 1.0f / area2);
+            V3 ap = vsub(N->p, na->p);
+            float dist = vdot(ap, nrm);
+            if (dist > NODE_R || dist < -0.25f) continue;
+            // Barycentric coordinates of the projection.
+            float d11 = vdot(e1, e1), d12 = vdot(e1, e2), d22 = vdot(e2, e2), dp1 = vdot(ap, e1), dp2 = vdot(ap, e2);
+            float den = d11 * d22 - d12 * d12;
+            if (fabsf(den) < 1e-9f) continue;
+            float wb = (d22 * dp1 - d12 * dp2) / den, wd = (d11 * dp2 - d12 * dp1) / den, wa = 1.0f - wb - wd;
+            if (wa < -0.02f || wb < -0.02f || wd < -0.02f) continue;
+            V3 vs = vadd(vadd(vscale(na->v, wa), vscale(nb->v, wb)), vscale(nd->v, wd));
+            V3 rv = vsub(N->v, vs);
+            float vrel = vdot(rv, nrm);
+            float F = KC * (NODE_R - dist) - CC * vrel;
+            if (F <= 0) continue;
+            V3 f = vscale(nrm, F);
+            V3 vt = vsub(rv, vscale(nrm, vrel));
+            float vtl = vlen(vt);
+            if (vtl > 1e-4f) f = vsub(f, vscale(vt, 0.35f * F * fminf(1.0f, vtl / 0.5f) / vtl));
+            add_force(N, f);
+            add_force(na, vscale(f, -wa)); add_force(nb, vscale(f, -wb)); add_force(nd, vscale(f, -wd));
+        }
+    }
+}
+
+// Per substep: wake airframes that a car is near, simulate the awake ones, put quiet ones back to sleep.
+static void airframes_substep(World *w, float h, int phase) {
+    for (int ai = 0; ai < w->nplanes; ai++) {
+        Airframe *A = &w->air[ai];
+        if (phase == 0) {
+            int near = 0;
+            for (int ci = 0; ci < w->ncars && !near; ci++) {
+                const Car *c = &w->cars[ci];
+                if (!c->active) continue;
+                const float m = 1.0f;
+                near = !(c->bmax.x + m < A->c.bmin.x || A->c.bmax.x + m < c->bmin.x || c->bmax.y + m < A->c.bmin.y ||
+                         A->c.bmax.y + m < c->bmin.y || c->bmax.z + m < A->c.bmin.z || A->c.bmax.z + m < c->bmin.z);
+            }
+            if (near) { A->asleep = 0; A->quiet = 0; }
+            if (A->asleep) continue;
+            airframe_forces(A);
+            for (int ci = 0; ci < w->ncars; ci++) {
+                Car *c = &w->cars[ci];
+                if (!c->active) continue;
+                collide_cars(c, &A->c);
+                collide_shell(c, A);
+            }
+        } else if (!A->asleep) {
+            airframe_integrate(w, A, h);
+            int touching = 0;
+            for (int ci = 0; ci < w->ncars && !touching; ci++) {
+                const Car *c = &w->cars[ci];
+                touching = c->active && !(c->bmax.x + 1 < A->c.bmin.x || A->c.bmax.x + 1 < c->bmin.x || c->bmax.z + 1 < A->c.bmin.z || A->c.bmax.z + 1 < c->bmin.z || c->bmax.y + 1 < A->c.bmin.y || A->c.bmax.y + 1 < c->bmin.y);
+            }
+            A->quiet = (!touching && A->vmax < 0.08f) ? A->quiet + h : 0.0f;
+            if (A->quiet > 2.0f) {
+                A->asleep = 1;
+                for (int i = 0; i < A->c.nn; i++) A->c.n[i].v = v3(0, 0, 0);
+            }
+        }
+    }
+}
+
+int airframe_damaged_beams(const Airframe *A) {
+    int n = 0;
+    for (int i = 0; i < A->c.nb; i++) n += A->c.b[i].broken || fabsf(A->c.b[i].rest - A->c.b[i].rest0) > 0.01f * A->c.b[i].rest0;
+    return n;
+}
+
 void world_substep(World *w, float h) {
     update_trees(w, h);
     for (int ci = 0; ci < w->ncars; ci++) {
@@ -867,6 +1233,7 @@ void world_substep(World *w, float h) {
     for (int a = 0; a < w->ncars; a++)
         for (int b = a + 1; b < w->ncars; b++)
             if (w->cars[a].active && w->cars[b].active) collide_cars(&w->cars[a], &w->cars[b]);
+    if (w->nplanes) airframes_substep(w, h, 0);
     for (int ci = 0; ci < w->ncars; ci++) {
         Car *c = &w->cars[ci];
         if (!c->active) continue;
@@ -878,6 +1245,7 @@ void world_substep(World *w, float h) {
         }
         collide_static(w, c);
     }
+    if (w->nplanes) airframes_substep(w, h, 1);
 }
 
 // ------------------------------------------------------------- the maps ---
@@ -1238,9 +1606,6 @@ static void build_newyork(World *w) {
 static void add_plane(World *w, float x, float z, float dx, float dz) {
     if (w->nplanes >= MAX_PLANES) return;
     w->planes[w->nplanes++] = (Plane){x, z, dx, dz, (unsigned)(frnd() * 4294967040.0f)};
-    float g = terrain_height(x, z), tx = x + dx * 36.0f, tz = z + dz * 36.0f;
-    add_box(w, v3(fminf(x, tx) - 2.1f * fabsf(dz) - 0.2f, g + 1.4f, fminf(z, tz) - 2.1f * fabsf(dx) - 0.2f),
-               v3(fmaxf(x, tx) + 2.1f * fabsf(dz) + 0.2f, g + 5.4f, fmaxf(z, tz) + 2.1f * fabsf(dx) + 0.2f));   // fuselage
 }
 static void build_airport(World *w) {
     add_building(w, (Rect){AP_TERM_X0, AP_TERM_X1, AP_TERM_Z0, AP_TERM_Z1}, BLD_TERMINAL, 16.0f, 3);
@@ -1297,4 +1662,9 @@ void world_init(World *w, int map) {
 
     world_build_grid(w);
     w->ncars = 0;
+    for (int i = 0; i < w->nplanes; i++) {             // soft-body airframes, settled onto their gear
+        const Plane *P = &w->planes[i];
+        airframe_build(&w->air[i], v3(P->x, terrain_height(P->x, P->z), P->z), v3(P->dx, 0, P->dz), P->seed);
+        airframe_settle(w, &w->air[i]);
+    }
 }

@@ -21,9 +21,9 @@ static inline V3 vrot(V3 v, V3 k, float a) {
     return vadd(vadd(vscale(v, c), vscale(vcross(k, v), s)), vscale(k, vdot(k, v) * (1 - c)));
 }
 
-#define MAX_NODES 256
+#define MAX_NODES 320
 #define MAX_BEAMS 2048
-#define MAX_TRIS 512
+#define MAX_TRIS 640
 #define MAX_PANELS 12
 #define MAX_CARS 14
 #define MAX_BOXES 320
@@ -173,9 +173,28 @@ typedef struct {
 enum { MAP_DEFAULT, MAP_NEWYORK, MAP_AIRPORT, MAP_COUNT };
 const char *map_name(int map);
 
-// A parked airliner: nose position and the unit direction from nose to tail (its fuselage collides).
+// A parked airliner: nose position and the unit direction from nose to tail.
 typedef struct { float x, z, dx, dz; unsigned seed; } Plane;
-#define MAX_PLANES 8
+#define MAX_PLANES 6
+
+// Its soft-body airframe (~40 t of nodes and beams on its landing gear; see physics.c).
+#define AF_RINGS 17             // fuselage frames
+#define AF_RN 10                // nodes per frame (k = 0 on the right side, counter-clockwise seen from the nose)
+#define AF_EN 6                 // nodes per engine ring
+typedef struct {
+    Car c;                      // nodes, beams, skin triangles (no def, no wheels)
+    unsigned char paint[MAX_TRIS];  // per triangle: 0 white, 1 belly, 2 livery, 3 glass, 4 wing, 5 nacelle, 6 dark
+    int ring[AF_RINGS][AF_RN];
+    int wing[2][4][4];          // [right, left][span station][LE top, LE bottom, TE top, TE bottom]
+    int eng[2][2][AF_EN];       // [side][intake ring, exhaust ring][k]
+    int gear[3][2];             // nose, right main, left main: wheel node, strut top node
+    int gearWheel[3][2];        // the two wheel nodes of each leg
+    int noseNode, tailNode, nFusTris;
+    unsigned seed;
+    int asleep;                 // not simulated until a car comes near
+    float quiet, vmax;
+} Airframe;
+int airframe_damaged_beams(const Airframe *A);
 
 typedef struct {
     int map;                    // MAP_*
@@ -185,6 +204,7 @@ typedef struct {
     Tree tree[MAX_TREES]; int ntree;
     int treesDown;
     Plane planes[MAX_PLANES]; int nplanes;
+    Airframe air[MAX_PLANES];   // one per plane
     // Uniform grid (CSR) of static obstacles: item < MAX_BOXES is a box, otherwise a tree.
     int gridStart[GRID_N * GRID_N + 1];
     int gridItem[MAX_GRID_ITEMS];

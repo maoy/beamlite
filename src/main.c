@@ -627,15 +627,14 @@ static void flood_mast(MeshB *m, float x, float z) {
     ground_pool(v3(x, 0, z), 22.0f, scale_col(LAMP, 0.30f));
 }
 
-// Static airport dressing: airliners and jet bridges, masts, landside lamps, parked cars, airfield lights.
+// Static airport dressing (the parked airliners are soft bodies, drawn each frame): jet bridges, masts, landside lamps, parked cars, airfield lights.
 static void build_airport_extras(MeshB *m, const World *w) {
     for (int i = 0; i < w->nplanes; i++) {
         const Plane *P = &w->planes[i];
-        V3 nose = v3(P->x, terrain_height(P->x, P->z), P->z), tail = v3(P->dx, 0, P->dz);
-        build_airliner(m, nose, tail, P->seed);
+        V3 nose = v3(P->x, terrain_height(P->x, P->z), P->z);
         if (P->dz > 0.5f && P->z < 100) {                  // at a gate: jet bridge from the terminal to the forward door
             Color jb = {170, 174, 180, 255};
-            float bx = P->x - 6.0f, g = nose.y;
+            float bx = P->x - 6.0f, g = nose.y - 0.35f;     // the airframes sit 0.35 m low on their gear
             box_shell(m, v3(bx - 1.3f, g + 3.6f, AP_TERM_Z1), v3(bx + 1.3f, g + 6.2f, P->z + 2.5f), jb, jb);
             box_shell(m, v3(bx, g + 3.4f, P->z + 2.5f), v3(P->x - 1.9f, g + 6.0f, P->z + 6.5f), jb, jb);
             box_shell(m, v3(bx - 0.6f, g, P->z + 1.5f), v3(bx + 0.6f, g + 3.6f, P->z + 2.5f), (Color){90, 92, 96, 255}, jb);
@@ -915,10 +914,6 @@ static Model build_city(const World *w, Model *glow, Model *pool) {
     for (int b = 0; b < w->nbox; b++) {
         int isB = 0;
         for (int i = 0; i < w->nbld && !isB; i++) isB = w->bld[i].mn.x == w->box[b].mn.x && w->bld[i].mn.z == w->box[b].mn.z;
-        for (int i = 0; i < w->nplanes && !isB; i++) {     // an airliner's hidden fuselage collider
-            const Plane *P = &w->planes[i];
-            isB = fabsf(0.5f * (w->box[b].mn.x + w->box[b].mx.x) - (P->x + P->dx * 18.0f)) < 0.5f && fabsf(0.5f * (w->box[b].mn.z + w->box[b].mx.z) - (P->z + P->dz * 18.0f)) < 0.5f;
-        }
         if (!isB) box_shell(&m, w->box[b].mn, w->box[b].mx, (Color){175, 172, 165, 255}, (Color){190, 188, 182, 255});
     }
     return mb_model(&m);
@@ -1170,6 +1165,104 @@ static void draw_obox(V3 c, V3 ax, V3 ay, V3 az, Color col, V3 eye) {
             Color k = oboxGloss > 0 ? shade_paint(col, vnorm(n), fc, eye, oboxGloss) : lit(col, vnorm(n), 1.15f);
             DrawTriangle3D(RV(q0), RV(q1), RV(q2), k); DrawTriangle3D(RV(q0), RV(q2), RV(q3), k);
         }
+}
+
+// A soft-body airliner, drawn from its current node positions so dents and bends show.
+static V3 afN[MAX_NODES];
+static V3 af_lerp_out(const Airframe *A, int a, int b, float t, float out) {
+    V3 p = vlerp(A->c.n[a].p, A->c.n[b].p, t);
+    return vadd(p, vscale(vnorm(vlerp(afN[a], afN[b], t)), out));
+}
+static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
+    const Car *c = &A->c;
+    if (beamView) {
+        for (int i = 0; i < c->nb; i++) {
+            const Beam *B = &c->b[i];
+            if (B->broken) continue;
+            float d = fminf(fabsf(B->rest - B->rest0) / B->rest0 * 12.0f, 1.0f), s = fminf(fabsf(B->stress), 1.0f), t = fmaxf(s * 0.5f, d);
+            DrawLine3D(RV(c->n[B->a].p), RV(c->n[B->b].p), (Color){(unsigned char)(60 + 195 * t), (unsigned char)(220 - 170 * t), (unsigned char)(90 - 60 * t), 255});
+        }
+        return;
+    }
+    Color liv = LIVERY[A->seed % 6];
+    const Color pal[7] = {{236, 237, 240, 255}, {196, 198, 202, 255}, liv, {44, 56, 72, 255}, {205, 207, 212, 255}, {176, 178, 184, 255}, {36, 36, 40, 255}};
+    // Blob shadow of the belly, wings and stabilisers.
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    for (int i = 0; i < c->nt; i++) {
+        if (A->paint[i] != 1) continue;
+        const Tri *t = &c->t[i];
+        Vector3 p[3];
+        for (int k = 0; k < 3; k++) { V3 v = c->n[t->v[k]].p; p[k] = (Vector3){v.x, terrain_height(v.x, v.z) + 0.05f, v.z}; }
+        DrawTriangle3D(p[0], p[1], p[2], (Color){0, 0, 0, 70});
+        DrawTriangle3D(p[0], p[2], p[1], (Color){0, 0, 0, 70});
+    }
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+    // Fuselage: smooth normals from the fuselage skin only.
+    for (int i = 0; i < c->nn; i++) afN[i] = v3(0, 0, 0);
+    for (int i = 0; i < A->nFusTris; i++) {
+        const Tri *t = &c->t[i];
+        V3 a = c->n[t->v[0]].p, fn = vcross(vsub(c->n[t->v[1]].p, a), vsub(c->n[t->v[2]].p, a));
+        for (int k = 0; k < 3; k++) afN[t->v[k]] = vadd(afN[t->v[k]], fn);
+    }
+    for (int i = 0; i < c->nn; i++) afN[i] = vnorm(afN[i]);
+    rlBegin(RL_TRIANGLES);
+    for (int i = 0; i < A->nFusTris; i++) {
+        const Tri *t = &c->t[i];
+        Color base = pal[A->paint[i]];
+        float gloss = A->paint[i] == 3 ? 1.0f : 0.55f;
+        for (int k = 0; k < 3; k++) {
+            V3 p = c->n[t->v[k]].p;
+            Color col = shade_paint(base, afN[t->v[k]], p, eye, gloss);
+            rlColor4ub(col.r, col.g, col.b, 255);
+            rlVertex3f(p.x, p.y, p.z);
+        }
+    }
+    rlEnd();
+    // Wings, engines and tail: flat-shaded, both faces of the thin parts.
+    for (int i = A->nFusTris; i < c->nt; i++) {
+        const Tri *t = &c->t[i];
+        V3 p[3] = {c->n[t->v[0]].p, c->n[t->v[1]].p, c->n[t->v[2]].p};
+        V3 nrm = vnorm(vcross(vsub(p[1], p[0]), vsub(p[2], p[0])));
+        Color col = A->paint[i] == 6 ? pal[6] : shade_paint(pal[A->paint[i]], nrm, p[0], eye, 0.35f);
+        DrawTriangle3D(RV(p[0]), RV(p[1]), RV(p[2]), col);
+        if (A->paint[i] == 2) DrawTriangle3D(RV(p[0]), RV(p[2]), RV(p[1]), shade_paint(pal[2], vscale(nrm, -1), p[0], eye, 0.35f));
+    }
+    // Window band and livery cheatline, laid on the deforming skin between frames 2 and 13.
+    for (int side = 0; side < 2; side++) {
+        int wl = side ? 5 : 0, wh = side ? 4 : 1, cl = side ? 6 : 9, ch = side ? 5 : 0;
+        for (int i = 2; i < 13; i++) {
+            const int *r0 = A->ring[i], *r1 = A->ring[i + 1];
+            V3 a0 = af_lerp_out(A, r0[wl], r0[wh], 0.30f, 0.02f), a1 = af_lerp_out(A, r0[wl], r0[wh], 0.52f, 0.02f);
+            V3 b0 = af_lerp_out(A, r1[wl], r1[wh], 0.30f, 0.02f), b1 = af_lerp_out(A, r1[wl], r1[wh], 0.52f, 0.02f);
+            Color g = shade_paint(pal[3], afN[r0[wl]], a0, eye, 1.0f);
+            DrawTriangle3D(RV(a0), RV(b0), RV(b1), g); DrawTriangle3D(RV(a0), RV(b1), RV(a1), g);
+            DrawTriangle3D(RV(a0), RV(b1), RV(b0), g); DrawTriangle3D(RV(a0), RV(a1), RV(b1), g);
+            V3 c0 = af_lerp_out(A, r0[cl], r0[ch], 0.62f, 0.02f), c1 = af_lerp_out(A, r0[cl], r0[ch], 0.86f, 0.02f);
+            V3 d0 = af_lerp_out(A, r1[cl], r1[ch], 0.62f, 0.02f), d1 = af_lerp_out(A, r1[cl], r1[ch], 0.86f, 0.02f);
+            Color lv = shade_paint(liv, afN[r0[cl]], c0, eye, 0.55f);
+            DrawTriangle3D(RV(c0), RV(d0), RV(d1), lv); DrawTriangle3D(RV(c0), RV(d1), RV(c1), lv);
+            DrawTriangle3D(RV(c0), RV(d1), RV(d0), lv); DrawTriangle3D(RV(c0), RV(c1), RV(d1), lv);
+        }
+    }
+    // Landing gear: struts and wheels, following the nodes.
+    V3 fwd = vnorm(vsub(c->n[A->noseNode].p, c->n[A->tailNode].p)), ax = vnorm(vcross(fwd, v3(0, 1, 0)));
+    Color strut = {150, 150, 156, 255}, tyre = {30, 30, 32, 255};
+    for (int g = 0; g < 3; g++) {
+        V3 w0 = c->n[A->gearWheel[g][0]].p, w1 = c->n[A->gearWheel[g][1]].p, top = c->n[A->gear[g][1]].p;
+        float r = g ? 0.55f : 0.4f;
+        V3 hub = vadd(vscale(vadd(w0, w1), 0.5f), v3(0, r, 0));
+        DrawCylinderEx(RV(hub), RV(top), 0.14f, 0.14f, 6, strut);
+        for (int k = 0; k < 2; k++) {
+            V3 wc = vadd(k ? w1 : w0, v3(0, r, 0));
+            V3 off = g ? vscale(ax, 0.45f) : v3(0, 0, 0);
+            for (int sgn = -1; sgn <= (g ? 1 : -1); sgn += 2) {
+                V3 cc = vadd(wc, vscale(off, (float)sgn));
+                DrawCylinderEx(RV(vsub(cc, vscale(ax, 0.17f))), RV(vadd(cc, vscale(ax, 0.17f))), r, r, 10, tyre);
+            }
+        }
+    }
 }
 
 static V3 nodeN[MAX_NODES];
@@ -2108,6 +2201,7 @@ int main(void) {
         rlDrawRenderBatchActive();
         rlEnableDepthMask();
         post_begin_objects();
+        for (int i = 0; i < world.nplanes; i++) draw_airframe(&world.air[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z));
         for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z), camMode && i == 0);
         post_end_objects();
         draw_shards();

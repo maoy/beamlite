@@ -216,6 +216,23 @@ int main(void) {
         printf("        respawn reasons: stuck %d, off route %d, flipped %d, damaged %d\n", why[0], why[1], why[2], why[3]);
         traffic_clear(&W);
     }
+    {   // Airport: the parked airliners are soft bodies. Settled on their gear, they sleep; a pickup at
+        // 100 km/h into an engine wakes one, stops dead, and dents and bends it without blowing up.
+        world_init(&W, MAP_AIRPORT);
+        Airframe *A = &W.air[1];
+        float g = terrain_height(W.planes[1].x, W.planes[1].z);
+        printf("airliner: %d nodes, %d beams; settled nose %.2f m, tail %.2f m up; asleep %d\n", A->c.nn, A->c.nb,
+               A->c.n[A->noseNode].p.y - g, A->c.n[A->tailNode].p.y - g, A->asleep);
+        V3 e0 = A->c.n[A->eng[0][0][0]].p;
+        W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_PICKUP, v3(e0.x - 25, terrain_height(e0.x - 25, e0.z + 2) + CAR_SPAWN_H, e0.z + 2), 0, v3(.8f, .8f, .8f));
+        for (int i = 0; i < W.cars[0].nn; i++) W.cars[0].n[i].v = v3(100 / 3.6f, 0, 0);
+        car_update_frame(&W.cars[0]);
+        run(4.0f, (Controls){0, 0, 0, 0});
+        car_update_frame(&W.cars[0]); car_update_damage(&W.cars[0]);
+        printf("airliner crash 100 km/h into an engine: truck %.1f km/h after, damage %.0f%%; airliner woke %d, deformed beams %d, engine pushed %.2f m, exploded %d\n",
+               vlen(W.cars[0].vel) * 3.6f, W.cars[0].damage, !A->asleep, airframe_damaged_beams(A), vlen(vsub(A->c.n[A->eng[0][0][0]].p, e0)), A->c.exploded);
+    }
     {   // The generated map: buildings and trees exist and the test routes above are clear of them.
         world_init(&W, MAP_DEFAULT);
         printf("map: %d buildings, %d trees\n", W.nbld, W.ntree);
