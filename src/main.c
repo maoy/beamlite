@@ -16,7 +16,7 @@
 #endif
 
 // ---- optional profiler: BEAMLITE_PROF=<seconds> prints a per-phase breakdown and exits
-static double prof_acc[2][8]; static int prof_frames[2]; static int prof_sel;   // [0] on the ground, [1] airborne
+static double prof_acc[2][8]; static int prof_frames[2]; static int prof_sel; static double prof_sub; static long prof_substeps;   // [0] on the ground, [1] airborne
 static const char *PROF_NAMES[8] = {"input+traffic", "physics", "camera+fx", "shadow pass", "scene draw (CPU)", "GPU wait (scene)", "present+HUD (CPU)", "swap/vsync wait"};
 
 static Vector3 RV(V3 a) { return (Vector3){a.x, a.y, a.z}; }
@@ -65,6 +65,7 @@ static Color lit(Color c, V3 n, float k) {
 static Model chunks[CH_N * CH_N];
 
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
+static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 
 static Color terrain_color(float x, float z, float y, V3 n) {
     float r, g, b, cover = 1.0f;
@@ -245,6 +246,10 @@ static void box_shell(MeshB *m, V3 mn, V3 mx, Color wall, Color top) {
 // the ground go in POOL. Both are drawn only when the environment has its lights on.
 
 static MeshB GLOW, POOL;
+// Each building's vertex range [start, end) in the baked city, glow, pool and screen meshes, so a
+// collapse can blank it in place on the GPU (no rebuild, no extra draw calls).
+typedef struct { int s, e; } VRange;
+static VRange rngCity[MAX_BLD], rngGlow[MAX_BLD], rngPool[MAX_BLD], rngScreen[MAX_BLD], rngScreenPool[MAX_BLD];
 static const Color WARM = {255, 196, 128, 255}, LAMP = {255, 214, 160, 255};
 
 static Color scale_col(Color c, float k) {
@@ -464,6 +469,7 @@ static void build_screens(const World *w) {
         if (B->kind == BLD_WAREHOUSE || B->kind == BLD_STEPS || B->kind == BLD_HOUSE) continue;
         int wedge = B->kind == BLD_WEDGE;
         float Hb = B->mx.y - B->ground;
+        rngScreen[bi].s = sm.n; rngScreenPool[bi].s = pools.n;
         for (int s = 0; s < 4; s++) {
             V3 o, a, n; float len;
             facade(B, s, &o, &a, &n, &len);
@@ -494,6 +500,7 @@ static void build_screens(const World *w) {
                 y += H + 1.0f + 3.0f * brnd();
             }
         }
+        rngScreen[bi].e = sm.n; rngScreenPool[bi].e = pools.n;
     }
     if (!sm.n) return;
     Mesh mesh = {0};
@@ -504,6 +511,7 @@ static void build_screens(const World *w) {
     screens.materials[0].shader = post_billboard_shader();
     hasScreens = 1;
     // Fold the street glow into the city's light pools.
+    for (int bi = 0; bi < w->nbld; bi++) { rngScreenPool[bi].s += POOL.n; rngScreenPool[bi].e += POOL.n; }
     for (int i = 0; i < pools.n; i++) mb_push(&POOL, v3(pools.v[i * 3], pools.v[i * 3 + 1], pools.v[i * 3 + 2]),
                                               (Color){pools.c[i * 4], pools.c[i * 4 + 1], pools.c[i * 4 + 2], 255});
     if (pools.v) { MemFree(pools.v); MemFree(pools.c); }
@@ -816,7 +824,12 @@ static void build_building(MeshB *m, const Building *B) {
 
 static Model build_city(const World *w, Model *glow, Model *pool) {
     MeshB m = {0};
-    for (int i = 0; i < w->nbld; i++) build_building(&m, &w->bld[i]);
+    memset(rngScreen, 0, sizeof rngScreen); memset(rngScreenPool, 0, sizeof rngScreenPool);
+    for (int i = 0; i < w->nbld; i++) {
+        rngCity[i].s = m.n; rngGlow[i].s = GLOW.n; rngPool[i].s = POOL.n;
+        build_building(&m, &w->bld[i]);
+        rngCity[i].e = m.n; rngGlow[i].e = GLOW.n; rngPool[i].e = POOL.n;
+    }
     if (w->map == MAP_NEWYORK) place_lamps_newyork(&m, w);
     else if (w->map == MAP_AIRPORT) build_airport_extras(&m, w);
     else place_street_lamps(&m, w);
@@ -2182,6 +2195,325 @@ static void build_world_meshes(const World *w) {
     meshesBuilt = 1;
 }
 
+// ------------------------------------------------------------ destruction ----
+// Buildings breach and collapse (physics.c decides when). Here: holes punched in walls, chunks of
+// masonry thrown out, the building sinking into its own dust, and the rubble pile that replaces it.
+
+// Baked city colours already carry their lighting; this only adds a facet so chunks read as solid.
+static Color shade_baked(Color c, V3 n) {
+    float k = 0.62f + 0.38f * fmaxf(vdot(n, SUN), 0.0f) + 0.08f * n.y;
+    return (Color){(unsigned char)fminf(255, c.r * k), (unsigned char)fminf(255, c.g * k), (unsigned char)fminf(255, c.b * k), 255};
+}
+static unsigned dseed = 12345u;
+static float drnd(void) { dseed = dseed * 1664525u + 1013904223u; return (dseed >> 8) / 16777216.0f; }
+
+// A colour from the building's own baked mesh (walls, roof, trim), nudged toward dusty grey.
+static Color bld_palette(int bi) {
+    VRange r = rngCity[bi];
+    Color dust = {150, 142, 128, 255};
+    if (r.e <= r.s) return dust;
+    const unsigned char *c = city.meshes[0].colors;
+    int v = r.s;
+    for (int tries = 0; tries < 6; tries++) {                    // prefer wall and roof over dark glass
+        v = r.s + (int)(drnd() * (r.e - r.s));
+        if (c[v * 4] + c[v * 4 + 1] + c[v * 4 + 2] > 3 * 90) break;
+    }
+    float k = 0.35f + 0.3f * drnd();
+    return (Color){(unsigned char)(c[v * 4] * (1 - k) + dust.r * k), (unsigned char)(c[v * 4 + 1] * (1 - k) + dust.g * k), (unsigned char)(c[v * 4 + 2] * (1 - k) + dust.b * k), 255};
+}
+
+// ---- flying and settled chunks
+typedef struct { V3 p, v, e, w, half; Color col; float life; unsigned char rest, alive; } Debris;
+#define MAX_DEBRIS 900
+static Debris debris[MAX_DEBRIS];
+static int debrisHead;
+static void debris_spawn(V3 p, V3 v, float size, Color col) {
+    Debris *d = &debris[debrisHead];
+    debrisHead = (debrisHead + 1) % MAX_DEBRIS;
+    d->p = p; d->v = v;
+    d->e = v3(drnd() * 6.28f, drnd() * 6.28f, drnd() * 6.28f);
+    d->w = v3((drnd() - 0.5f) * 14, (drnd() - 0.5f) * 14, (drnd() - 0.5f) * 14);
+    d->half = v3(size * (0.5f + 0.5f * drnd()), size * (0.25f + 0.35f * drnd()), size * (0.4f + 0.5f * drnd()));
+    d->col = col; d->life = 40.0f + 20.0f * drnd(); d->rest = 0; d->alive = 1;
+}
+static void update_debris(const World *w, float dt) {
+    if (dt <= 0) return;
+    for (int i = 0; i < MAX_DEBRIS; i++) {
+        Debris *d = &debris[i];
+        if (!d->alive) continue;
+        if ((d->life -= dt) <= 0) { d->alive = 0; continue; }
+        float g = terrain_height(d->p.x, d->p.z) + d->half.y * 0.6f;
+        if (d->life < 3.0f) { d->p.y -= dt * 0.25f; continue; }          // old rubble settles into the ground
+        if (d->rest) { if (d->p.y < g) d->p.y = g; continue; }          // a rising pile lifts what lies on it
+        V3 prev = d->p;
+        d->v.y -= 9.81f * dt;
+        d->p = vadd(d->p, vscale(d->v, dt));
+        d->e = vadd(d->e, vscale(d->w, dt));
+        if (world_point_solid(w, d->p)) { d->p = v3(prev.x, d->p.y, prev.z); d->v.x *= -0.2f; d->v.z *= -0.2f; }   // off a standing wall
+        if (d->p.y < g) {
+            d->p.y = g;
+            if (d->v.y < -1.5f) { d->v.y *= -0.25f; d->v.x *= 0.6f; d->v.z *= 0.6f; d->w = vscale(d->w, 0.5f); }
+            else {
+                d->v.y = 0;
+                float f = fmaxf(0.0f, 1.0f - dt * 7.0f);
+                d->v.x *= f; d->v.z *= f; d->w = vscale(d->w, f);
+                if (fabsf(d->v.x) + fabsf(d->v.z) < 0.15f) d->rest = 1;
+            }
+        }
+    }
+}
+static void draw_debris(Vector3 eye) {
+    rlBegin(RL_TRIANGLES);
+    for (int i = 0; i < MAX_DEBRIS; i++) {
+        const Debris *d = &debris[i];
+        if (!d->alive) continue;
+        float dx = d->p.x - eye.x, dz = d->p.z - eye.z;
+        if (dx * dx + dz * dz > 220.0f * 220.0f) continue;
+        Matrix R = MatrixRotateXYZ((Vector3){d->e.x, d->e.y, d->e.z});
+        Vector3 X = Vector3Transform((Vector3){1, 0, 0}, R), Y = Vector3Transform((Vector3){0, 1, 0}, R), Z = Vector3Transform((Vector3){0, 0, 1}, R);
+        V3 ax[3] = {vscale(v3(X.x, X.y, X.z), d->half.x), vscale(v3(Y.x, Y.y, Y.z), d->half.y), vscale(v3(Z.x, Z.y, Z.z), d->half.z)};
+        for (int a = 0; a < 3; a++)
+            for (int sg = -1; sg <= 1; sg += 2) {
+                V3 n = vscale(ax[a], (float)sg), u = ax[(a + 1) % 3], v = ax[(a + 2) % 3];
+                V3 fc = vadd(d->p, n);
+                V3 q[4] = {vsub(vsub(fc, u), v), vsub(vadd(fc, u), v), vadd(vadd(fc, u), v), vadd(vsub(fc, u), v)};
+                if (sg < 0) { V3 t = q[1]; q[1] = q[3]; q[3] = t; }
+                Color c = shade_baked(d->col, vnorm(n));
+                rlColor4ub(c.r, c.g, c.b, 255);
+                rlVertex3f(q[0].x, q[0].y, q[0].z); rlVertex3f(q[1].x, q[1].y, q[1].z); rlVertex3f(q[2].x, q[2].y, q[2].z);
+                rlVertex3f(q[0].x, q[0].y, q[0].z); rlVertex3f(q[2].x, q[2].y, q[2].z); rlVertex3f(q[3].x, q[3].y, q[3].z);
+            }
+    }
+    rlEnd();
+}
+
+// ---- holes punched in walls
+typedef struct { int bld; V3 p, n; float r; unsigned seed; Color rim; } Breach;
+#define MAX_BREACH 300
+static Breach breaches[MAX_BREACH];
+static int breachHead, breachCount;
+static void add_breach(const World *w, const BldEvent *e) {
+    const Building *B = &w->bld[e->bld];
+    Breach *b = &breaches[breachHead];
+    breachHead = (breachHead + 1) % MAX_BREACH;
+    if (breachCount < MAX_BREACH) breachCount++;
+    b->bld = e->bld; b->n = e->n;
+    b->r = fminf(0.5f + sqrtf(e->imp) / 110.0f, 4.0f);
+    V3 p = e->p;                                               // onto the wall it hit, just proud of windows and signs
+    if (e->n.x != 0) p.x = (e->n.x > 0 ? B->mx.x : B->mn.x) + e->n.x * 0.09f;
+    else if (e->n.z != 0) p.z = (e->n.z > 0 ? B->mx.z : B->mn.z) + e->n.z * 0.09f;
+    else p.y = B->mx.y + 0.09f;
+    b->p = p; b->seed = (unsigned)(drnd() * 1e9f);
+    b->rim = bld_palette(e->bld);
+}
+static void draw_breaches(const World *w) {
+    rlBegin(RL_TRIANGLES);
+    for (int k = 0; k < breachCount; k++) {
+        const Breach *b = &breaches[k];
+        const Building *B = &w->bld[b->bld];
+        if (B->collapsed) continue;
+        V3 u = b->n.y != 0 ? v3(1, 0, 0) : v3(-b->n.z, 0, b->n.x), v = b->n.y != 0 ? v3(0, 0, 1) : v3(0, 1, 0);
+        V3 lo = vsub(B->mn, v3(0.2f, 0.2f, 0.2f)), hi = vadd(B->mx, v3(0.2f, 0.2f, 0.2f));
+        unsigned sd = b->seed;
+        #define BR() ((sd = sd * 1664525u + 1013904223u) >> 8) / 16777216.0f
+        V3 in[12], out[12];
+        for (int i = 0; i < 12; i++) {
+            float a = 6.2831853f * (i + 0.3f * BR()) / 12, r0 = b->r * (0.7f + 0.4f * BR()), r1 = r0 * (1.12f + 0.25f * BR());
+            V3 dir = vadd(vscale(u, cosf(a)), vscale(v, sinf(a) * 0.85f));
+            in[i] = vadd(b->p, vscale(dir, r0)); out[i] = vadd(vadd(b->p, vscale(dir, r1)), vscale(b->n, -0.02f));
+            for (int q = 0; q < 2; q++) {                       // keep it on the wall
+                V3 *P = q ? &out[i] : &in[i];
+                if (b->n.x == 0) P->x = clampf(P->x, lo.x, hi.x);
+                if (b->n.y == 0) P->y = fminf(P->y, hi.y);
+                if (b->n.z == 0) P->z = clampf(P->z, lo.z, hi.z);
+            }
+        }
+        #undef BR
+        Color dark = shade_baked((Color){30, 27, 24, 255}, b->n), rim = shade_baked(b->rim, b->n);
+        for (int i = 0; i < 12; i++) {
+            int j = (i + 1) % 12;
+            rlColor4ub(rim.r, rim.g, rim.b, 255);           // broken edge
+            rlVertex3f(in[i].x, in[i].y, in[i].z); rlVertex3f(out[i].x, out[i].y, out[i].z); rlVertex3f(out[j].x, out[j].y, out[j].z);
+            rlVertex3f(in[i].x, in[i].y, in[i].z); rlVertex3f(out[j].x, out[j].y, out[j].z); rlVertex3f(in[j].x, in[j].y, in[j].z);
+            rlColor4ub(dark.r, dark.g, dark.b, 255);        // the dark inside
+            rlVertex3f(b->p.x, b->p.y, b->p.z); rlVertex3f(in[i].x, in[i].y, in[i].z); rlVertex3f(in[j].x, in[j].y, in[j].z);
+        }
+    }
+    rlEnd();
+}
+
+// ---- collapse: the building sinks into its dust, the rubble pile rises
+typedef struct { Model anim, rubble; int hasAnim, hasRubble; } BldFx;
+static BldFx bfx[MAX_BLD];
+
+static void blank_range(Model *m, VRange r) {
+    if (r.e <= r.s || !m->meshCount) return;
+    int n = r.e - r.s;
+    float *zeros = MemAlloc(n * 3 * sizeof(float));             // MemAlloc clears: degenerate triangles draw nothing
+    UpdateMeshBuffer(m->meshes[0], 0, zeros, n * 3 * sizeof(float), r.s * 3 * sizeof(float));
+    memcpy(m->meshes[0].vertices + r.s * 3, zeros, n * 3 * sizeof(float));
+    MemFree(zeros);
+}
+static Model model_from_range(const Model *src, VRange r) {
+    Mesh mesh = {0};
+    int n = r.e - r.s;
+    mesh.vertexCount = n; mesh.triangleCount = n / 3;
+    mesh.vertices = MemAlloc(n * 3 * sizeof(float));
+    mesh.colors = MemAlloc(n * 4);
+    memcpy(mesh.vertices, src->meshes[0].vertices + r.s * 3, n * 3 * sizeof(float));
+    memcpy(mesh.colors, src->meshes[0].colors + r.s * 4, n * 4);
+    UploadMesh(&mesh, false);
+    return LoadModelFromMesh(mesh);
+}
+// A box of rubble (centre, half-sizes, yaw and tilt) into a mesh.
+static void mb_chunk(MeshB *m, V3 c, V3 h, float yaw, float tilt, Color col) {
+    Matrix R = MatrixMultiply(MatrixRotateX(tilt), MatrixRotateY(yaw));
+    V3 ax[3];
+    for (int a = 0; a < 3; a++) {
+        Vector3 e = Vector3Transform((Vector3){a == 0, a == 1, a == 2}, R);
+        ax[a] = vscale(v3(e.x, e.y, e.z), a == 0 ? h.x : a == 1 ? h.y : h.z);
+    }
+    for (int a = 0; a < 3; a++)
+        for (int sg = -1; sg <= 1; sg += 2) {
+            V3 n = vscale(ax[a], (float)sg), u = ax[(a + 1) % 3], v = ax[(a + 2) % 3], fc = vadd(c, n);
+            Color k = shade_baked(col, vnorm(n));
+            mb_quad(m, vsub(vsub(fc, u), v), vsub(vadd(fc, u), v), vadd(vadd(fc, u), v), vadd(vsub(fc, u), v), k, c);
+        }
+}
+static Model build_rubble(const World *w, int bi) {
+    const Building *B = &w->bld[bi];
+    MeshB m = {0};
+    mbFlat = 1;
+    float x0 = B->mn.x - 0.8f, x1 = B->mx.x + 0.8f, z0 = B->mn.z - 0.8f, z1 = B->mx.z + 0.8f;
+    int nx = (int)clampf((x1 - x0) / 1.2f, 4, 48), nz = (int)clampf((z1 - z0) / 1.2f, 4, 48);
+    Color dust = {138, 130, 118, 255};
+    // The pile's surface, at full height (it is drawn lowered while it rises).
+    #define RY(x, z) (terrain_height(x, z) + building_mound(w, bi, x, z) + 0.03f)
+    for (int i = 0; i < nx; i++)
+        for (int j = 0; j < nz; j++) {
+            float xa = lerpf(x0, x1, (float)i / nx), xb = lerpf(x0, x1, (float)(i + 1) / nx);
+            float za = lerpf(z0, z1, (float)j / nz), zb = lerpf(z0, z1, (float)(j + 1) / nz);
+            V3 a = v3(xa, RY(xa, za), za), b = v3(xb, RY(xb, za), za), c = v3(xb, RY(xb, zb), zb), d = v3(xa, RY(xa, zb), zb);
+            float vb = 0.86f + 0.16f * drnd();                    // dusty, with a little variation (chunks carry the colour)
+            Color col = {(unsigned char)(dust.r * vb), (unsigned char)(dust.g * vb), (unsigned char)(dust.b * vb), 255};
+            V3 n = vnorm(vcross(vsub(c, a), vsub(b, a)));
+            if (n.y < 0) n = vscale(n, -1);
+            Color k = shade_baked(col, n);
+            mb_quad(&m, a, b, c, d, k, v3((xa + xb) * 0.5f, -1e4f, (za + zb) * 0.5f));
+        }
+    // Slabs, blocks and (on the big ones) beams strewn over it, half buried.
+    float area = (x1 - x0) * (z1 - z0);
+    int nChunks = (int)clampf(area / 5.0f, 10, 220);
+    int steel = B->kind == BLD_TOWER || B->kind == BLD_APARTMENT || B->kind == BLD_TERMINAL || B->kind == BLD_HANGAR || B->kind == BLD_WEDGE || B->kind == BLD_ATC;
+    for (int k = 0; k < nChunks; k++) {
+        float x = lerpf(x0 + 0.5f, x1 - 0.5f, drnd()), z = lerpf(z0 + 0.5f, z1 - 0.5f, drnd());
+        float sz = 0.3f + 1.4f * drnd() * drnd() + 0.08f * B->moundH;
+        V3 h = v3(sz, sz * (0.15f + 0.3f * drnd()), sz * (0.4f + 0.6f * drnd()));
+        Color col = bld_palette(bi);
+        if (steel && drnd() < 0.15f) { h = v3(1.5f + 3.0f * drnd(), 0.12f, 0.12f); col = (Color){70, 66, 62, 255}; }
+        mb_chunk(&m, v3(x, RY(x, z) + h.y * 0.3f, z), h, drnd() * 6.28f, (drnd() - 0.5f) * 0.9f, col);
+    }
+    #undef RY
+    mbFlat = 0;
+    return mb_model(&m);
+}
+
+static void destruction_reset(void) {
+    for (int i = 0; i < MAX_BLD; i++) {
+        if (bfx[i].hasAnim) UnloadModel(bfx[i].anim);
+        if (bfx[i].hasRubble) UnloadModel(bfx[i].rubble);
+        bfx[i].hasAnim = bfx[i].hasRubble = 0;
+    }
+    for (int i = 0; i < MAX_DEBRIS; i++) debris[i].alive = 0;
+    breachCount = breachHead = 0;
+}
+
+// Dust rolling out from the foot of the building (and a taller cloud for tall buildings).
+static void collapse_dust(const Building *B, float n, int big) {
+    float Hb = B->mx.y - B->ground;
+    for (int k = (int)n + (frand() < n - (int)n); k > 0; k--) {
+        float side = frand();
+        V3 p = side < 0.5f ? v3(lerpf(B->mn.x, B->mx.x, frand()), 0, frand() < 0.5f ? B->mn.z : B->mx.z) : v3(frand() < 0.5f ? B->mn.x : B->mx.x, 0, lerpf(B->mn.z, B->mx.z, frand()));
+        V3 c = vscale(vadd(B->mn, B->mx), 0.5f);
+        V3 out = vnorm(v3(p.x - c.x, 0, p.z - c.z));
+        p.y = B->ground + 0.5f + (big ? frand() * Hb * 0.4f : 0.0f);
+        float sp = 2.0f + 5.0f * frand();
+        fx_emit(frand() < 0.75f ? FX_DUST : FX_SMOKE, p, vadd(vscale(out, sp), v3(0, 1.0f + 2.5f * frand(), 0)), 4.0f + 5.0f * frand(), 3.0f + 4.0f * frand() + 0.05f * Hb);
+    }
+}
+
+static void start_collapse(const World *w, int bi) {
+    const Building *B = &w->bld[bi];
+    BldFx *f = &bfx[bi];
+    if (rngCity[bi].e > rngCity[bi].s) { f->anim = model_from_range(&city, rngCity[bi]); f->hasAnim = 1; }
+    blank_range(&city, rngCity[bi]);
+    blank_range(&cityGlow, rngGlow[bi]);
+    blank_range(&cityPool, rngPool[bi]);
+    blank_range(&cityPool, rngScreenPool[bi]);
+    if (hasScreens) blank_range(&screens, rngScreen[bi]);
+    f->rubble = build_rubble(w, bi); f->hasRubble = 1;
+    float per = 2.0f * ((B->mx.x - B->mn.x) + (B->mx.z - B->mn.z));
+    collapse_dust(B, fminf(per * 1.5f, 400.0f), 1);
+}
+
+// Each frame: what the physics reported, and the collapses in progress.
+static void update_destruction(World *w, float dt) {
+    for (int k = 0; k < w->nbev; k++) {
+        const BldEvent *e = &w->bev[k];
+        if (e->collapse) { start_collapse(w, e->bld); continue; }
+        add_breach(w, e);
+        int n = (int)clampf(e->imp / 900.0f, 3, 40);
+        float sz = clampf(0.12f + sqrtf(e->imp) / 900.0f, 0.12f, 0.5f);
+        for (int i = 0; i < n; i++)
+            debris_spawn(vadd(e->p, vadd(vscale(e->n, 0.4f), v3((drnd() - 0.5f) * 1.5f, drnd() * 1.2f, (drnd() - 0.5f) * 1.5f))),
+                         vadd(vscale(e->n, 1.5f + 4.0f * drnd()), v3((drnd() - 0.5f) * 4.0f, 1.0f + 4.0f * drnd(), (drnd() - 0.5f) * 4.0f)), sz * (0.5f + drnd()), bld_palette(e->bld));
+        for (int i = 0; i < n; i++) fx_emit(FX_DUST, vadd(e->p, vscale(e->n, 0.6f)), vadd(vscale(e->n, 1.0f + 2.0f * frand()), frand3(1.2f)), 2.0f + 2.0f * frand(), 1.0f + 1.5f * frand());
+    }
+    w->nbev = 0;
+    if (dt <= 0) return;
+    for (int bi = 0; bi < w->nbld; bi++) {
+        const Building *B = &w->bld[bi];
+        BldFx *f = &bfx[bi];
+        if (!f->hasAnim) continue;
+        if (B->collapseT >= 1.0f) { UnloadModel(f->anim); f->hasAnim = 0; collapse_dust(B, 60, 0); continue; }
+        float Hb = B->mx.y - B->ground, t = B->collapseT;
+        collapse_dust(B, dt * (30.0f + 0.6f * Hb), 0);
+        // Masonry coming off the top edge as it goes down.
+        float top = B->ground + Hb * (1.0f - t * t) + 0.5f;
+        float n = dt * clampf(Hb * 1.2f, 10, 60);
+        V3 c = vscale(vadd(B->mn, B->mx), 0.5f);
+        for (int k = (int)n + (drnd() < n - (int)n); k > 0; k--) {
+            V3 p = drnd() < 0.5f ? v3(lerpf(B->mn.x, B->mx.x, drnd()), top, drnd() < 0.5f ? B->mn.z - 0.3f : B->mx.z + 0.3f)
+                                 : v3(drnd() < 0.5f ? B->mn.x - 0.3f : B->mx.x + 0.3f, top, lerpf(B->mn.z, B->mx.z, drnd()));
+            V3 out = vnorm(v3(p.x - c.x, 0, p.z - c.z));
+            debris_spawn(p, vadd(vscale(out, 1.0f + 3.0f * drnd()), vscale(B->fallDir, 2.0f * drnd())), 0.15f + 0.35f * drnd(), bld_palette(bi));
+        }
+    }
+}
+
+static void draw_collapses(const World *w, float time) {
+    for (int bi = 0; bi < w->nbld; bi++) {
+        const Building *B = &w->bld[bi];
+        BldFx *f = &bfx[bi];
+        float t = B->collapseT, k = t * t * (3.0f - 2.0f * t);
+        if (f->hasRubble) {
+            f->rubble.transform = MatrixTranslate(0, -(1.0f - k) * (B->moundH * 1.3f + 0.3f), 0);
+            DrawModel(f->rubble, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        }
+        if (f->hasAnim) {
+            float Hb = B->mx.y - B->ground;
+            V3 c = v3((B->mn.x + B->mx.x) * 0.5f, B->ground, (B->mn.z + B->mx.z) * 0.5f);
+            float sink = t * t * (Hb + 2.0f), lean = 0.12f * powf(t, 1.5f), shake = 0.10f * (1.0f - t) * sinf(time * 47.0f);
+            V3 axis = vcross(v3(0, 1, 0), B->fallDir);
+            Matrix M = MatrixTranslate(-c.x, -c.y, -c.z);
+            if (vlen(axis) > 1e-3f) M = MatrixMultiply(M, MatrixRotate((Vector3){axis.x, axis.y, axis.z}, lean));
+            M = MatrixMultiply(M, MatrixTranslate(c.x + shake * B->fallDir.z, c.y - sink, c.z + shake * B->fallDir.x));
+            f->anim.transform = M;
+            DrawModel(f->anim, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        }
+    }
+}
+
 // ------------------------------------------------------------------- HUD ----
 
 static Font hudFont;
@@ -2238,7 +2570,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     const char *tr = TextFormat("%s [M]   %s [L]   %s [O]     %d FPS", map_name(w->map), ENV->name, WEATHER_NAME[weather], GetFPS());
     txt(tr, sw - 22 - txtw(tr, 15), 22, 15, HUD_DIM);
 
-    float px = 16, py = sh - 116, pw = 470, ph = 100;
+    float px = 16, py = sh - 142, pw = 470, ph = 126;
     txt(TextFormat("%s   [V] change", pc->def->name), px + 2, py - 22, 15, HUD_DIM);
     hud_panel(px, py, pw, ph);
     slash(px + 12, py + 16, 4, 26, HUD_ORANGE);
@@ -2250,12 +2582,13 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     txt(TextFormat("TORN BEAMS  %d", pc->brokenBeams), px + 30, py + 72, 14, HUD_DIM);
     DrawLine((int)px + 290, (int)py + 14, (int)px + 290, (int)(py + ph - 14), HUD_LINE);
     static const char *TG[] = {"LATCHED", "OPEN", "HANGING", "GONE", "N/A"};
-    const char *lab[3] = {"GLASS", "TAILGATE", "TREES"};
-    char v0[16], v2[16];
+    const char *lab[4] = {"GLASS", "TAILGATE", "TREES", "BLDGS"};
+    char v0[16], v2[16], v3s[16];
     snprintf(v0, sizeof v0, "%d/%d", pc->glassBrokenCount, pc->npanels);
     snprintf(v2, sizeof v2, "%d", w->treesDown);
-    const char *val[3] = {v0, TG[pc->tailgate], v2};
-    for (int i = 0; i < 3; i++) {
+    snprintf(v3s, sizeof v3s, "%d", w->bldDown);
+    const char *val[4] = {v0, TG[pc->tailgate], v2, v3s};
+    for (int i = 0; i < 4; i++) {
         txt(lab[i], px + 306, py + 14 + i * 26, 17, HUD_DIM);
         txt(val[i], px + 396, py + 14 + i * 26, 17, HUD_ORANGE);
     }
@@ -2430,6 +2763,7 @@ static int trafficOn = 1;
 #define TRAFFIC_CARS 8
 
 static void load_map(World *w, int map, int *nextSlot) {
+    destruction_reset();
     traffic_clear(w);
     traffic_set_map(map);
     world_init(w, map);
@@ -2468,7 +2802,7 @@ static float wrap_pi(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a +=
 
 int main(void) {
     set_env(0);
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | (getenv("BEAMLITE_PROF") ? 0 : FLAG_VSYNC_HINT));
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | ((getenv("BEAMLITE_PROF") && !getenv("BEAMLITE_PROF_VSYNC")) ? 0 : FLAG_VSYNC_HINT));
     InitWindow(1440, 900, "BeamLite — soft-body driving");
     SetExitKey(KEY_NULL);
     SetTargetFPS(120);
@@ -2497,12 +2831,35 @@ int main(void) {
     #define PMARK(i) do { if (profEnv) { double n_ = GetTime(); if (pt) prof_acc[prof_sel][i] += n_ - pt; pt = n_; } } while (0)
     int profFly = profEnv && getenv("BEAMLITE_PROF_FLY");
     if (profFly) { load_map(&world, MAP_AIRPORT, &nextSlot); if (world.flyable >= 0) { flying = 1; world.air[world.flyable].pilot = 1; world.air[world.flyable].flaps = 0.5f; } }
-    if (profEnv) SetTargetFPS(0);   // uncapped; vsync is off via config in profile runs
+    if (profEnv && !getenv("BEAMLITE_PROF_VSYNC")) SetTargetFPS(0);
+    if (profEnv && getenv("BEAMLITE_PROF_DAY")) set_env(1);
+    // BEAMLITE_PROF_CRASH=<map>,<building kind>,<vehicle>,<km/h>: the player is launched at a building's side wall.
+    int profCrash = profEnv && getenv("BEAMLITE_PROF_CRASH");
+    if (profCrash) {
+        int cm = 0, ck = 0, cv = 0; float kmh = 120;
+        sscanf(getenv("BEAMLITE_PROF_CRASH"), "%d,%d,%d,%f", &cm, &ck, &cv, &kmh);
+        if (cm != world.map) load_map(&world, cm, &nextSlot);
+        help = 0;
+        for (int b = 0, done = 0; b < world.nbld && !done; b++) {
+            const Building *B = &world.bld[b];
+            if (B->kind != ck || B->mx.z - B->mn.z < 4) continue;
+            for (int sd = 0; sd < 2 && !done; sd++) {
+                float nx = sd ? -1.0f : 1.0f, x = sd ? B->mn.x - 30.0f : B->mx.x + 30.0f, z = 0.5f * (B->mn.z + B->mx.z);
+                int clear = 1;
+                for (float d = 1.0f; d < 30.0f && clear; d += 1.5f) clear = !world_point_solid(&world, v3(x - nx * (30.0f - d) * 0 - nx * d, terrain_height(x - nx * d, z) + 1.0f, z));
+                if (!clear) continue;
+                car_build_vehicle(&world.cars[0], cv, v3(x, terrain_height(x, z) + vehicle_def(cv)->spawnH, z), nx > 0 ? PI : 0.0f, PALETTE[0]);
+                for (int i = 0; i < world.cars[0].nn; i++) world.cars[0].n[i].v = v3(-nx * kmh / 3.6f, 0, 0);
+                done = 1;
+            }
+        }
+    }
+    if (profEnv) printf("display %d Hz, window %dx%d (render %dx%d), vsync %s\n", GetMonitorRefreshRate(GetCurrentMonitor()), GetScreenWidth(), GetScreenHeight(), GetRenderWidth(), GetRenderHeight(), getenv("BEAMLITE_PROF_VSYNC") ? "on" : "off");   // uncapped; vsync is off via config in profile runs
 
     while (!WindowShouldClose()) {
         if (profEnv) { pt = GetTime(); prof_frames[prof_sel]++; if (pt - profT0 > profEnd) break; }
         float dt = fminf(GetFrameTime(), 1.0f / 20.0f);
-        if (profEnv) dt = 1.0f / 60.0f;
+        if (profEnv) dt = 1.0f / 120.0f;      // the target: a 120 Hz frame is 10 physics substeps
         Car *pc = &world.cars[0];
         Airframe *ap = world.flyable >= 0 ? &world.air[world.flyable] : NULL;
         if (!ap) flying = 0;
@@ -2577,7 +2934,7 @@ int main(void) {
         int right = IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT);
         float vF = vdot(pc->vel, pc->fwd);
         Controls ctl = {0, 0, (float)(left - right), IsKeyDown(KEY_SPACE)};
-        if (profEnv) { ctl.throttle = 0.5f; ctl.steer = 0.3f * sinf((prof_frames[0] + prof_frames[1]) / 60.0f); }
+        if (profEnv && !profCrash) { ctl.throttle = 0.5f; ctl.steer = 0.3f * sinf((prof_frames[0] + prof_frames[1]) / 120.0f); }
         if (up) { if (vF < -1.0f) ctl.brake = 1; else ctl.throttle = 1; }
         if (down) { if (vF > 1.0f) ctl.brake = 1; else ctl.throttle = -1; }
         if (pickerOpen) ctl = (Controls){0, 0, 0, 1};
@@ -2602,7 +2959,9 @@ int main(void) {
         // ---- physics (fixed substeps)
         if (!paused) acc += dt * (slowmo ? 0.2f : 1.0f);
         int steps = 0;
+        double subT0 = profEnv ? GetTime() : 0;
         while (acc >= H && steps < 80) { world_substep(&world, H); acc -= H; steps++; }
+        if (profEnv) { prof_sub += GetTime() - subT0; prof_substeps += steps; }
         if (steps >= 80) acc = 0;
         for (int i = 0; i < world.ncars; i++) {
             Car *c = &world.cars[i];
@@ -2615,6 +2974,8 @@ int main(void) {
         }
         for (int i = 0; i < world.ncars; i++)
             if (world.cars[i].glassNew) { spawn_glass(&world.cars[i], world.cars[i].glassNew); world.cars[i].glassNew = 0; }
+        update_destruction(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
+        update_debris(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         update_shards(paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         if (steps) update_skids(&world);
         refresh_tree_patches(&world);
@@ -2699,6 +3060,7 @@ int main(void) {
         if (post_shadow_begin(flying ? RV(ap->pos) : RV(pc->pos), ENV, RV(AMB), RV(SUNC))) {
             depthOnly = 1;
             DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
+            draw_collapses(&world, (float)GetTime());
             draw_trees(&world, cam.position);
             V3 eyeS = v3(cam.position.x, cam.position.y, cam.position.z);
             for (int i = 0; i < world.nplanes; i++) draw_airframe(&world.air[i], 0, eyeS);
@@ -2729,6 +3091,9 @@ int main(void) {
             post_water_end();
         }
         DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        draw_collapses(&world, (float)GetTime());
+        draw_breaches(&world);
+        draw_debris(cam.position);
         if (hasScreens) { post_set_billboards((float)GetTime(), 1.4f + 1.6f * ENV->lights); DrawModel(screens, (Vector3){0, 0, 0}, 1.0f, WHITE); }
         draw_trees(&world, cam.position);
         post_end_objects();
@@ -2809,7 +3174,20 @@ int main(void) {
         PMARK(6);
         EndDrawing();
         PMARK(7);
-        if (profEnv && getenv("BEAMLITE_SHOT") && prof_frames[0] + prof_frames[1] == 120) { Image im = LoadImageFromScreen(); ExportImage(im, getenv("BEAMLITE_SHOT")); UnloadImage(im); }
+        if (profEnv && getenv("BEAMLITE_SHOT")) {        // BEAMLITE_SHOT=path.png, BEAMLITE_SHOT_FRAMES=120,300 (default 120): one file per frame, numbered
+            const char *fl = getenv("BEAMLITE_SHOT_FRAMES"), *q = fl ? fl : "120";
+            int fr = prof_frames[0] + prof_frames[1];
+            while (*q) {
+                int want = atoi(q);
+                if (want == fr) {
+                    Image im = LoadImageFromScreen();
+                    ExportImage(im, fl ? TextFormat("%s.%d.png", getenv("BEAMLITE_SHOT"), want) : getenv("BEAMLITE_SHOT"));
+                    UnloadImage(im);
+                }
+                while (*q && *q != ',') q++;
+                if (*q == ',') q++;
+            }
+        }
     }
     if (profEnv) {
         for (int k = 0; k < 2; k++) {
@@ -2818,6 +3196,7 @@ int main(void) {
             printf("[%s] frames %d, avg frame %.2f ms (%.0f fps), %d cars, %d planes\n", k ? "airborne" : "ground", prof_frames[k], 1000 * tot / prof_frames[k], prof_frames[k] / tot, world.ncars, world.nplanes);
             for (int i = 0; i < 8; i++) printf("  %-22s %6.2f ms  %4.1f%%\n", PROF_NAMES[i], 1000 * prof_acc[k][i] / prof_frames[k], 100 * prof_acc[k][i] / tot);
         }
+        if (prof_substeps) printf("substeps only: %.2f ms per frame (%.1f substeps/frame, %.0f us each)\n", 1000 * prof_sub / (prof_frames[0] + prof_frames[1]), (double)prof_substeps / (prof_frames[0] + prof_frames[1]), 1e6 * prof_sub / prof_substeps);
         if (world.flyable >= 0) printf("plane end state: airspeed %.0f m/s, agl %.0f m, x %.0f\n", world.air[world.flyable].airspeed, world.air[world.flyable].agl, world.air[world.flyable].pos.x);
         fflush(stdout);
     }

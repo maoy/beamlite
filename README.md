@@ -61,7 +61,10 @@ level and its pitch attitude. To land: flaps full, about 140 kt, throttle to idl
 Three maps, switched with **M**. All share the proving ground: a launch ramp straight ahead, a
 crash-test wall behind you, concrete pillars, a warehouse district off a service road to the right,
 and forest on the hills past ~100 m. Saplings and young trees snap when you hit them; mature
-trunks stop you dead.
+trunks stop you dead. Every building on every map can be knocked down: hard hits punch holes in
+the walls and throw out masonry, and once a building has taken enough it collapses into a rubble
+pile you can drive over. A fast car takes out a house, a semi gets through warehouses and
+apartment blocks, and the towers, hangars and terminal take several big hits (or the airliner).
 
 - **Default**: two small towns up the cross road to the left (+z), with avenues, side streets and
   pavements: houses, shops, apartment blocks, a couple of towers and warehouses, with saplings
@@ -173,7 +176,12 @@ trunks stop you dead.
   extent all belong to the map, and the terrain asks the current map for them.
 - **World**: the towns are generated from a fixed seed: lots are laid out along each block's
   street edges, then yards and the forest are filled in. Areas the headless test drives
-  through are kept clear. Buildings collide as boxes; trees collide as trunk cylinders. A tree
+  through are kept clear. Buildings collide as boxes; trees collide as trunk cylinders. A node
+  hitting a building wall faster than 2.5 m/s adds its impulse to the building's damage; strength
+  scales with volume^(2/3) by building type (`BLD_STRENGTH_K` in `physics.c`). Past it the box stops
+  colliding and a rubble mound rises into the terrain height, so wheels and nodes ride on it. The
+  renderer blanks the building's vertex range in the baked city mesh in place, sinks a copy of it
+  into the dust, and scatters chunks that settle on the ground. A tree
   snaps once the impulse it takes in a short window passes a limit set by its trunk radius, then
   falls like a toppling rod in the direction it was hit. A uniform 6 m grid makes the collision
   checks cheap (about 70 buildings, about 1000 trees). Standing trees are baked into one mesh per

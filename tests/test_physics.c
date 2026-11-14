@@ -188,6 +188,31 @@ int main(void) {
         run(2.0f, idle); report("hatch after wall @50");
         snapshot("/tmp/hatch_wall.ppm", &W.cars[0]);
     }
+    // Buildings: hard hits breach walls and add up; past its strength a building collapses into a rubble mound.
+    {
+        const int kinds[3] = {BLD_HOUSE, BLD_WAREHOUSE, BLD_APARTMENT}, vehs[3] = {VEH_HATCH, VEH_SEMI, VEH_SEMI};
+        const float kmh[3] = {140, 90, 100};
+        const char *names[3] = {"hatch 140 km/h into a house", "semi 90 km/h into a warehouse", "semi 100 km/h into an apartment block"};
+        for (int t = 0; t < 3; t++) {
+            world_init(&W, MAP_DEFAULT); W.ncars = 1;
+            int done = 0;
+            for (int b = 0; b < W.nbld && !done; b++) {
+                Building *B = &W.bld[b];
+                if (B->kind != kinds[t] || B->mx.z - B->mn.z < 4) continue;
+                for (int sd = 0; sd < 2 && !done; sd++) {
+                    float nx = sd ? -1.0f : 1.0f, x = sd ? B->mn.x - 7.0f : B->mx.x + 7.0f, z = 0.5f * (B->mn.z + B->mx.z);
+                    if (world_point_solid(&W, v3(x, terrain_height(x, z) + 1, z)) || world_point_solid(&W, v3(x - nx * 3.5f, terrain_height(x, z) + 1, z))) continue;
+                    car_build_vehicle(&W.cars[0], vehs[t], v3(x, terrain_height(x, z) + vehicle_def(vehs[t])->spawnH, z), nx > 0 ? 3.14159f : 0.0f, v3(1, 0, 0));
+                    for (int i = 0; i < W.cars[0].nn; i++) W.cars[0].n[i].v = v3(-nx * kmh[t] / 3.6f, 0, 0);
+                    run(4.0f, idle);
+                    float cx = 0.5f * (B->mn.x + B->mx.x), cz = 0.5f * (B->mn.z + B->mx.z);
+                    printf("%-38s damage %3.0f%% of %6.0f N s  %s  breaches %d  rubble %.1f m  car %4.1f km/h  expl=%d\n", names[t], 100 * B->damage / B->strength, B->strength,
+                           B->collapsed ? "collapsed" : "standing ", W.nbev - B->collapsed, building_mound(&W, b, cx, cz), vlen(W.cars[0].vel) * 3.6f, W.cars[0].exploded);
+                    done = 1;
+                }
+            }
+        }
+    }
     for (int m = 0; m < MAP_COUNT; m++) {   // Traffic: 8 AI cars drive the junction grid for 90 s.
         world_init(&W, m); W.ncars = 1;
         car_build(&W.cars[0], v3(-30, CAR_SPAWN_H, -60), 0, v3(1, 0, 0));    // player parked out of the way

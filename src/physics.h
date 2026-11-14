@@ -150,7 +150,7 @@ typedef struct {
     float grip;                 // road-surface grip multiplier (1 dry, ~0.85 wet, ~0.5 snow)
 } Car;
 
-typedef struct { V3 mn, mx; } Box;
+typedef struct { V3 mn, mx; int bld; int dead; } Box;   // bld: the building it belongs to, or -1; dead: knocked down
 
 // Buildings collide as their box; the rest of this is for the renderer.
 enum { BLD_HOUSE, BLD_SHOP, BLD_APARTMENT, BLD_TOWER, BLD_WAREHOUSE, BLD_WEDGE, BLD_STEPS, BLD_TERMINAL, BLD_ATC, BLD_HANGAR };   // wedge: the screen-clad tower in the bowtie; steps: the red grandstand
@@ -160,7 +160,22 @@ typedef struct {
     float roof;                 // gable height above the walls (houses, warehouses)
     int kind, front;            // front face: 0 +x, 1 -x, 2 +z, 3 -z
     unsigned seed;
+    int box;                    // its collision box
+    // Destruction (see physics.c): hard hits add up to permanent damage; past `strength` it collapses.
+    float strength, damage;     // N s of impact
+    float hitImp;               // impact gathered for the next breach event, and where it landed
+    V3 hitP, hitN;              // impulse-weighted sums of contact point and wall normal
+    float hitQuiet;             // time since the last contact that added to hitImp
+    int collapsed;              // 1 once it has gone
+    float collapseT;            // 0..1 through the collapse (the rubble mound rises with it)
+    float moundH;               // height of the rubble pile it leaves
+    V3 fallDir;                 // horizontal direction it leans as it goes (away from what hit it)
 } Building;
+
+// Something the renderer should show: a wall breached at p (outward normal n) by `imp` N s of impact,
+// or (collapse = 1) building `bld` starting to come down.
+typedef struct { int bld; V3 p, n; float imp; int collapse; } BldEvent;
+#define MAX_BLD_EVENTS 64
 
 // Trees collide as a vertical trunk cylinder. Thin ones snap and fall when hit hard enough.
 enum { TREE_CONIFER, TREE_BROADLEAF };
@@ -220,6 +235,8 @@ typedef struct {
     Building bld[MAX_BLD]; int nbld;
     Tree tree[MAX_TREES]; int ntree;
     int treesDown;
+    int bldDown;                // buildings knocked down
+    BldEvent bev[MAX_BLD_EVENTS]; int nbev;   // breaches and collapses since the renderer last took them
     Plane planes[MAX_PLANES]; int nplanes;
     Airframe air[MAX_PLANES];   // one per plane
     int flyable;                // the airliner on the runway the player can fly, or -1
@@ -232,6 +249,7 @@ float terrain_height(float x, float z);
 float sea_dist(float x, float z);       // airport map: metres out to sea from the shore (negative on land); elsewhere far inland
 void world_respawn_plane(World *w);     // put the flyable airliner back on the runway threshold
 V3 terrain_normal(float x, float z);
+float building_mound(const World *w, int b, float x, float z);   // full height of building b's rubble pile above the ground at (x, z)
 
 // New York map: a Midtown street grid north of the highway with Broadway cutting across 7th Avenue on a
 // diagonal; the "bowtie" where they cross is centred on (TS_X, TS_Z). Broadway is pedestrian plaza

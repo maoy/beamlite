@@ -19,6 +19,7 @@
 
 #include "physics.h"
 #include <string.h>
+#include <stdlib.h>
 
 #define GRAV 9.81f
 #define MU_TIRE 1.15f
@@ -38,6 +39,17 @@ static float smooth01(float e0, float e1, float x) {
 
 // ---------------------------------------------------------------- terrain --
 
+#ifdef __APPLE__
+#include <os/lock.h>
+static os_unfair_lock treeLock = OS_UNFAIR_LOCK_INIT;
+#define TREE_LOCK() os_unfair_lock_lock(&treeLock)
+#define TREE_UNLOCK() os_unfair_lock_unlock(&treeLock)
+#else
+#define TREE_LOCK() ((void)0)
+#define TREE_UNLOCK() ((void)0)
+#endif
+#define BLD_STRENGTH_K 420.0f     // N s of impact per m^2 of (volume^2/3): the one knob for how tough buildings are
+#define BLD_HIT_SPEED 2.5f        // m/s into a wall before a contact counts as damage (resting contact does not)
 static int g_map;                                 // map the world was last built with (terrain depends on it)
 static float wash_z0(void) { return g_map == MAP_NEWYORK ? -150.0f : g_map == MAP_AIRPORT ? 1.0f : 40.0f; }    // (none on the airport)
 static float wash_z1(void) { return g_map == MAP_NEWYORK ? -90.0f : g_map == MAP_AIRPORT ? 0.0f : 140.0f; }
@@ -54,7 +66,43 @@ float sea_dist(float x, float z) {
     return fminf(ds, dc);
 }
 
+// ---- rubble mounds: a collapsed building leaves a pile that is part of the ground (wheels drive up it,
+// nodes rest on it). k rises 0..1 through the collapse.
+typedef struct { float x0, x1, z0, z1, ramp, H, k, ph; } Mound;
+static Mound g_mound[MAX_BLD];
+static int g_moundOf[MAX_BLD];       // the building each mound belongs to
+static int g_nmound;
+static void make_mound(const Building *B, Mound *m) {
+    const float skirt = 0.8f;
+    m->x0 = B->mn.x - skirt; m->x1 = B->mx.x + skirt; m->z0 = B->mn.z - skirt; m->z1 = B->mx.z + skirt;
+    float half = 0.5f * fminf(m->x1 - m->x0, m->z1 - m->z0);
+    m->ramp = fminf(half, fmaxf(4.0f, 3.0f * B->moundH));
+    m->H = B->moundH; m->k = 1.0f;
+    m->ph = (float)(B->seed % 1000u) * 0.01f;
+}
+static float mound_at(const Mound *m, float x, float z) {
+    float e = fminf(fminf(x - m->x0, m->x1 - x), fminf(z - m->z0, m->z1 - z));
+    if (e <= 0.0f) return 0.0f;
+    float t = fminf(e / m->ramp, 1.0f);
+    float bumps = 0.88f + 0.12f * sinf(x * 0.9f + m->ph) * cosf(z * 0.8f - m->ph);
+    return m->H * m->k * t * t * (3.0f - 2.0f * t) * bumps;
+}
+static float terrain_base(float x, float z);
 float terrain_height(float x, float z) {
+    float h = terrain_base(x, z);
+    for (int i = 0; i < g_nmound; i++) {
+        const Mound *m = &g_mound[i];
+        if (x > m->x0 && x < m->x1 && z > m->z0 && z < m->z1) h += mound_at(m, x, z);
+    }
+    return h;
+}
+float building_mound(const World *w, int b, float x, float z) {
+    if (b < 0 || b >= w->nbld) return 0.0f;
+    Mound m; make_mound(&w->bld[b], &m);
+    return mound_at(&m, x, z);
+}
+
+static float terrain_base(float x, float z) {
     float r = sqrtf(x * x + z * z);
     float hills = smooth01(90.0f, 170.0f, r);
     float far = 0.0f;
@@ -852,6 +900,7 @@ static void collide_static(World *w, Car *c) {
             V3 p = N->p;
             if (it < MAX_BOXES) {
                 Box *B = &w->box[it];
+                if (B->dead) continue;
                 if (p.x < B->mn.x || p.x > B->mx.x || p.y < B->mn.y || p.y > B->mx.y || p.z < B->mn.z || p.z > B->mx.z) continue;
                 float d[6] = {p.x - B->mn.x, B->mx.x - p.x, p.y - B->mn.y, B->mx.y - p.y, p.z - B->mn.z, B->mx.z - p.z};
                 int best = 0;
@@ -860,6 +909,15 @@ static void collide_static(World *w, Car *c) {
                 if (best == 0) n.x = -1; else if (best == 1) n.x = 1;
                 else if (best == 2) n.y = -1; else if (best == 3) n.y = 1;
                 else if (best == 4) n.z = -1; else n.z = 1;
+                float vn = vdot(N->v, n);
+                if (B->bld >= 0 && vn < -BLD_HIT_SPEED) {    // a hard hit on a building: damage, and material for a breach
+                    float J = N->m * -vn;
+                    TREE_LOCK();
+                    Building *bd = &w->bld[B->bld];
+                    bd->damage += J; bd->hitImp += J; bd->hitQuiet = 0;
+                    bd->hitP = vadd(bd->hitP, vscale(p, J)); bd->hitN = vadd(bd->hitN, vscale(n, J));
+                    TREE_UNLOCK();
+                }
                 contact_resolve(N, n, d[best], 0.4f);
             } else {
                 Tree *t = &w->tree[it - MAX_BOXES];
@@ -871,8 +929,10 @@ static void collide_static(World *w, Car *c) {
                 V3 vin = N->v;
                 float vn = vdot(vin, n);
                 contact_resolve(N, n, t->r - d, 0.3f);
+                TREE_LOCK();                                  // trees are shared between cars; collide_static can run on several threads
                 if (vn < 0) t->imp += N->m * -vn;
-                if (t->breakImp > 0 && t->imp > t->breakImp) break_tree(w, t, vin, n);
+                if (t->breakImp > 0 && t->imp > t->breakImp && !t->broken) break_tree(w, t, vin, n);
+                TREE_UNLOCK();
             }
         }
     }
@@ -1508,38 +1568,108 @@ int airframe_damaged_beams(const Airframe *A) {
     return n;
 }
 
+// ---- parallel per-car work -------------------------------------------------------------------------
+// Within one substep the cars only interact in collide_cars (and with the airframes), so the per-car
+// force pass and the per-car integrate + static-collision pass can run on all cores. The substeps
+// themselves stay sequential. Falls back to a plain loop where Grand Central Dispatch is missing, and
+// for very few active cars, where waking worker threads costs more than it saves.
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#define PAR_MIN_CARS 3
+#endif
+typedef struct { World *w; float h; int idx[MAX_CARS]; } ParJob;
+
+static void car_force_pass(World *w, Car *c, float h) {
+    car_update_frame(c);
+    float sp = vlen(c->vel);
+    for (int i = 0; i < c->nn; i++) {
+        Node *N = &c->n[i];
+        N->f = v3(0, -GRAV * N->m, 0);
+        N->f = vadd(N->f, vscale(N->v, -c->def->cdA * sp * N->m / c->def->mass));   // aero drag, spread by mass
+    }
+    beam_forces(c);
+    wheel_forces(c, h);
+}
+static void car_integrate_pass(World *w, Car *c, float h) {
+    for (int i = 0; i < c->nn; i++) {
+        Node *N = &c->n[i];
+        N->v = vadd(N->v, vscale(N->f, h / N->m));
+        N->p = vadd(N->p, vscale(N->v, h));
+        if (!(fabsf(N->v.x) + fabsf(N->v.y) + fabsf(N->v.z) < 400.0f)) c->exploded = 1;  // also catches NaN
+        water_node(N, h);
+    }
+    collide_static(w, c);
+}
+static void par_force(void *ctx, size_t k) { ParJob *j = ctx; car_force_pass(j->w, &j->w->cars[j->idx[k]], j->h); }
+static void par_integrate(void *ctx, size_t k) { ParJob *j = ctx; car_integrate_pass(j->w, &j->w->cars[j->idx[k]], j->h); }
+
+// Run fn over the active cars, in parallel when there are enough of them.
+static void for_active_cars(World *w, float h, void (*fn)(void *, size_t), void (*serial)(World *, Car *, float)) {
+    ParJob job = {w, h, {0}};
+    int n = 0;
+    for (int ci = 0; ci < w->ncars; ci++) if (w->cars[ci].active) job.idx[n++] = ci;
+#ifdef __APPLE__
+    static int serialOnly = -1;
+    if (serialOnly < 0) serialOnly = getenv("BEAMLITE_SERIAL") != NULL;     // A/B switch for profiling
+    if (!serialOnly && n >= PAR_MIN_CARS) { dispatch_apply_f((size_t)n, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), &job, fn); return; }
+#endif
+    (void)fn;
+    for (int k = 0; k < n; k++) serial(w, &w->cars[job.idx[k]], h);
+}
+
+// ---- buildings: breaches and collapse -----------------------------------------------------------
+static void bld_event(World *w, BldEvent e) { if (w->nbev < MAX_BLD_EVENTS) w->bev[w->nbev++] = e; }
+
+// Hand the gathered impact over as one breach (one per crash, unless it is a very big one).
+static void bld_flush_hit(World *w, int bi) {
+    Building *B = &w->bld[bi];
+    if (B->hitImp >= 400.0f) {
+        V3 n = B->hitN, an = v3(fabsf(n.x), fabsf(n.y), fabsf(n.z));
+        n = an.x >= an.y && an.x >= an.z ? v3(n.x > 0 ? 1.0f : -1.0f, 0, 0) : an.z >= an.y ? v3(0, 0, n.z > 0 ? 1.0f : -1.0f) : v3(0, n.y > 0 ? 1.0f : -1.0f, 0);
+        bld_event(w, (BldEvent){bi, vscale(B->hitP, 1.0f / B->hitImp), n, B->hitImp, 0});
+        if (n.y == 0) B->fallDir = vscale(n, -1.0f);
+    }
+    B->hitImp = 0; B->hitP = B->hitN = v3(0, 0, 0); B->hitQuiet = 0;
+}
+
+static void world_update_buildings(World *w, float h) {
+    for (int bi = 0; bi < w->nbld; bi++) {
+        Building *B = &w->bld[bi];
+        if (B->collapsed) {
+            if (B->collapseT < 1.0f) {
+                float Hb = B->mx.y - B->ground;
+                B->collapseT = fminf(1.0f, B->collapseT + h / clampf(1.8f + 0.025f * Hb, 1.8f, 5.0f));
+                float t = B->collapseT;
+                for (int m = 0; m < g_nmound; m++) if (g_moundOf[m] == bi) g_mound[m].k = t * t * (3.0f - 2.0f * t);
+            }
+            continue;
+        }
+        if (B->hitImp > 0.0f) {
+            B->hitQuiet += h;
+            if (B->hitQuiet > 0.05f || B->hitImp > 0.5f * B->strength) bld_flush_hit(w, bi);
+        }
+        if (B->damage >= B->strength) {             // it goes: no more wall, a pile rising where it stood
+            if (B->hitImp > 0.0f) bld_flush_hit(w, bi);
+            B->collapsed = 1; B->collapseT = 0.0f;
+            if (vlen(B->fallDir) < 0.5f) B->fallDir = v3(1, 0, 0);
+            w->box[B->box].dead = 1;
+            w->bldDown++;
+            if (g_nmound < MAX_BLD) { make_mound(B, &g_mound[g_nmound]); g_mound[g_nmound].k = 0.0f; g_moundOf[g_nmound++] = bi; }
+            bld_event(w, (BldEvent){bi, vscale(vadd(B->mn, B->mx), 0.5f), B->fallDir, B->damage, 1});
+        }
+    }
+}
+
 void world_substep(World *w, float h) {
     update_trees(w, h);
-    for (int ci = 0; ci < w->ncars; ci++) {
-        Car *c = &w->cars[ci];
-        if (!c->active) continue;
-        car_update_frame(c);
-        float sp = vlen(c->vel);
-        for (int i = 0; i < c->nn; i++) {
-            Node *N = &c->n[i];
-            N->f = v3(0, -GRAV * N->m, 0);
-            N->f = vadd(N->f, vscale(N->v, -c->def->cdA * sp * N->m / c->def->mass));   // aero drag, spread by mass
-        }
-        beam_forces(c);
-        wheel_forces(c, h);
-    }
+    for_active_cars(w, h, par_force, car_force_pass);
     for (int a = 0; a < w->ncars; a++)
         for (int b = a + 1; b < w->ncars; b++)
             if (w->cars[a].active && w->cars[b].active) collide_cars(&w->cars[a], &w->cars[b]);
     if (w->nplanes) airframes_substep(w, h, 0);
-    for (int ci = 0; ci < w->ncars; ci++) {
-        Car *c = &w->cars[ci];
-        if (!c->active) continue;
-        for (int i = 0; i < c->nn; i++) {
-            Node *N = &c->n[i];
-            N->v = vadd(N->v, vscale(N->f, h / N->m));
-            N->p = vadd(N->p, vscale(N->v, h));
-            if (!(fabsf(N->v.x) + fabsf(N->v.y) + fabsf(N->v.z) < 400.0f)) c->exploded = 1;  // also catches NaN
-            water_node(N, h);
-        }
-        collide_static(w, c);
-    }
+    for_active_cars(w, h, par_integrate, car_integrate_pass);
     if (w->nplanes) airframes_substep(w, h, 1);
+    world_update_buildings(w, h);
 }
 
 // ------------------------------------------------------------- the maps ---
@@ -1649,6 +1779,7 @@ static float frange(float a, float b) { return a + (b - a) * frnd(); }
 static int add_box(World *w, V3 mn, V3 mx) {
     if (w->nbox >= MAX_BOXES) return -1;
     w->box[w->nbox].mn = mn; w->box[w->nbox].mx = mx;
+    w->box[w->nbox].bld = -1; w->box[w->nbox].dead = 0;
     return w->nbox++;
 }
 
@@ -1710,7 +1841,16 @@ static void add_building(World *w, Rect r, int kind, float height, int front) {
     B->kind = kind; B->front = front;
     B->roof = kind == BLD_HOUSE ? frange(2.4f, 3.4f) : kind == BLD_WAREHOUSE ? 1.4f : kind == BLD_HANGAR ? 4.5f : 0.0f;
     B->seed = (unsigned)(frnd() * 4294967040.0f);
-    if (add_box(w, B->mn, B->mx) >= 0) w->nbld++;
+    // Strength grows with size (about the wall area that has to give way); sheds and hangars are light,
+    // the control tower is stocky concrete. A 1.4 t hatch at ~120 km/h takes down a house; a tower
+    // needs the airliner (or a lot of trucks).
+    float H = B->mx.y - B->ground;
+    float vol = (r.x1 - r.x0) * (r.z1 - r.z0) * fmaxf(H, 2.0f);
+    float kk = kind == BLD_WAREHOUSE ? 0.6f : kind == BLD_HANGAR ? 0.5f : kind == BLD_ATC ? 1.5f : (kind == BLD_TOWER || kind == BLD_WEDGE) ? 1.1f : 1.0f;
+    B->strength = BLD_STRENGTH_K * kk * powf(vol, 2.0f / 3.0f);
+    B->moundH = clampf(0.13f * H + (B->roof > 0 ? 0.3f : 0.0f), 1.0f, 6.0f);
+    int bi = add_box(w, B->mn, B->mx);
+    if (bi >= 0) { B->box = bi; w->box[bi].bld = w->nbld; w->nbld++; }
 }
 
 typedef struct { Rect r; int zone; } Block;   // zone 0 downtown, 1 mixed, 2 suburb
@@ -1836,7 +1976,7 @@ int world_point_solid(const World *w, V3 p) {
         int it = w->gridItem[k];
         if (it < MAX_BOXES) {
             const Box *B = &w->box[it];
-            if (p.x > B->mn.x && p.x < B->mx.x && p.y > B->mn.y && p.y < B->mx.y && p.z > B->mn.z && p.z < B->mx.z) return 1;
+            if (!B->dead && p.x > B->mn.x && p.x < B->mx.x && p.y > B->mn.y && p.y < B->mx.y && p.z > B->mn.z && p.z < B->mx.z) return 1;
         } else {
             const Tree *t = &w->tree[it - MAX_BOXES];
             float dx = p.x - t->x, dz = p.z - t->z;
@@ -1918,6 +2058,7 @@ static void build_airport(World *w) {
 
 void world_init(World *w, int map) {
     memset(w, 0, sizeof *w);
+    g_nmound = 0;
     w->flyable = -1;
     w->map = g_map = (map < 0 || map >= MAP_COUNT) ? MAP_DEFAULT : map;
     rng_state = 20240611u;
