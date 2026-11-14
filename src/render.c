@@ -815,8 +815,7 @@ void post_present(const Env *e, float time, float wet, float rain) {
     Vector2 zero = {0, 0};
     for (int i = 0; i < 3; i++) {
         if (i > 0) { SetShaderValue(shBlur, locBlurStep, &zero, SHADER_UNIFORM_VEC2); blit(bl[i][0], shBlur, bl[i - 1][0].texture); }
-        blur_pass(bl[i][0], bl[i][1], 1.5f, 1.5f);
-        blur_pass(bl[i][0], bl[i][1], 1.5f, 1.5f);
+        blur_pass(bl[i][0], bl[i][1], 2.1f, 2.1f);       // one pass at sqrt(2) the step = two passes at 1.5, half the draw calls
     }
 
     // 5. Present to the screen.

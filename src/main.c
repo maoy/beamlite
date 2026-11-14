@@ -10,6 +10,14 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
+#ifdef __APPLE__
+#include <OpenGL/gl3.h>
+#endif
+
+// ---- optional profiler: BEAMLITE_PROF=<seconds> prints a per-phase breakdown and exits
+static double prof_acc[2][8]; static int prof_frames[2]; static int prof_sel;   // [0] on the ground, [1] airborne
+static const char *PROF_NAMES[8] = {"input+traffic", "physics", "camera+fx", "shadow pass", "scene draw (CPU)", "GPU wait (scene)", "present+HUD (CPU)", "swap/vsync wait"};
 
 static Vector3 RV(V3 a) { return (Vector3){a.x, a.y, a.z}; }
 static V3 SUN, AMB, SUNC;   // baked lighting: sun direction, ambient and sun multipliers
@@ -1580,6 +1588,23 @@ static void draw_gauges(const Car *c) {
     }
 }
 
+// Panel-edge lines are queued and drawn in one run after the triangles. Interleaving DrawLine3D with
+// DrawTriangle3D flips the rlgl batch between line and triangle mode, and every flip is a new draw call.
+typedef struct { V3 a, b; Color col; } EdgeSeg;
+static EdgeSeg edgeBuf[MAX_TRIS * 3]; static int edgeN;
+static void edge_push(V3 a, V3 b, Color col) { if (edgeN < MAX_TRIS * 3) edgeBuf[edgeN++] = (EdgeSeg){a, b, col}; }
+static void edge_flush(void) {
+    if (!edgeN) return;
+    rlBegin(RL_LINES);
+    for (int i = 0; i < edgeN; i++) {
+        rlColor4ub(edgeBuf[i].col.r, edgeBuf[i].col.g, edgeBuf[i].col.b, edgeBuf[i].col.a);
+        rlVertex3f(edgeBuf[i].a.x, edgeBuf[i].a.y, edgeBuf[i].a.z);
+        rlVertex3f(edgeBuf[i].b.x, edgeBuf[i].b.y, edgeBuf[i].b.z);
+    }
+    rlEnd();
+    edgeN = 0;
+}
+
 static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
     Color body = {(unsigned char)(c->color.x * 255), (unsigned char)(c->color.y * 255), (unsigned char)(c->color.z * 255), 255};
     Color glass = {34, 46, 60, 255}, under = {35, 35, 38, 255}, tonneau = {52, 54, 58, 255}, trim = {30, 31, 33, 255};
@@ -1640,7 +1665,7 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
                     for (int e = 0; e < 3; e++)
                         if (t->edges >> e & 1) {
                             int a = t->v[e], b = t->v[(e + 1) % 3];
-                            DrawLine3D(RV(vadd(c->n[a].p, vscale(nodeN[a], 0.006f))), RV(vadd(c->n[b].p, vscale(nodeN[b], 0.006f))), edge);
+                            edge_push(vadd(c->n[a].p, vscale(nodeN[a], 0.006f)), vadd(c->n[b].p, vscale(nodeN[b], 0.006f)), edge);
                         }
                 }
                 continue;
@@ -1692,9 +1717,10 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
                 Color edge = c->def->smooth ? (Color){20, 20, 22, 255} : lit(base, nrm, 0.45f);
                 V3 lift = vscale(nrm, c->def->smooth ? 0.006f : 0.0f);
                 for (int e = 0; e < 3; e++)
-                    if (t->edges >> e & 1) DrawLine3D(RV(vadd(p[e], lift)), RV(vadd(p[(e + 1) % 3], lift)), edge);
+                    if (t->edges >> e & 1) edge_push(vadd(p[e], lift), vadd(p[(e + 1) % 3], lift), edge);
             }
         }
+        edge_flush();
     } else {
         for (int i = 0; i < c->nb; i++) {
             const Beam *B = &c->b[i];
@@ -1757,33 +1783,60 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
 }
 
 // Light bars, drawn in the emissive pass so they bloom.
-static void draw_car_lights(const Car *c, int on) {
+// Car lights are drawn grouped by emissive intensity: every post_emissive_begin/end is a shader switch
+// and a draw call, so doing it per light strip per car cost more than the car bodies. Each car exposes
+// its lights as numbered items with an intensity (< 0: skip); the caller makes one pass per distinct intensity.
+static int car_light_count(const Car *c) { return c->def->lightStyle == 2 ? 3 : c->nlights; }
+static float car_light_intensity(const Car *c, int on, int item) {
     float front = on ? 3.2f : 0.9f, rear = (on ? 2.2f : 1.4f) * (c->ctl.brake > 0.1f ? 2.0f : 1.0f);
+    if (c->def->lightStyle == 2) return item == 0 ? front : item == 1 ? (on ? 2.4f : 0.8f) : rear;
+    const LightStrip *L = &c->lights[item];
+    if (L->rear && c->tailgate == TG_GONE && c->def->hasTailgate) return -1.0f;   // went with the tailgate
+    return L->rear ? rear : front;
+}
+static void car_light_draw(const Car *c, int item) {
     if (c->def->lightStyle == 2) {                  // the semi: twin headlamps each side, amber roof markers, tail lamps
-        post_emissive_begin(front);
-        for (int sd = -1; sd <= 1; sd += 2)
-            for (int k = 0; k < 2; k++) {
-                float z = sd * (0.80f + 0.22f * k);
-                int nd = RN(0, sd < 0 ? 2 : 7);
-                pcyl(part(c, nd, 3.800f, 0.73f, z), part(c, nd, 3.812f, 0.73f, z), 0.088f, 0.088f, 14, (Color){235, 242, 255, 255}, MAT_UNLIT, 2);
+        if (item == 0) {
+            for (int sd = -1; sd <= 1; sd += 2)
+                for (int k = 0; k < 2; k++) {
+                    float z = sd * (0.80f + 0.22f * k);
+                    int nd = RN(0, sd < 0 ? 2 : 7);
+                    pcyl(part(c, nd, 3.800f, 0.73f, z), part(c, nd, 3.812f, 0.73f, z), 0.088f, 0.088f, 14, (Color){235, 242, 255, 255}, MAT_UNLIT, 2);
+                }
+        } else if (item == 1) {
+            for (int k = 0; k < 5; k++) {
+                float z = -0.76f + k * 0.38f;
+                lbox(c, RN(8, k < 2 ? 4 : 5), 1.335f, 1.36f, 2.445f, 2.495f, z - 0.035f, z + 0.035f, (Color){255, 150, 30, 255}, MAT_UNLIT);
             }
-        post_emissive_end();
-        post_emissive_begin(on ? 2.4f : 0.8f);
-        for (int k = 0; k < 5; k++) {
-            float z = -0.76f + k * 0.38f;
-            lbox(c, RN(8, k < 2 ? 4 : 5), 1.335f, 1.36f, 2.445f, 2.495f, z - 0.035f, z + 0.035f, (Color){255, 150, 30, 255}, MAT_UNLIT);
+        } else {
+            for (int sd = -1; sd <= 1; sd += 2) lbox(c, RN(19, 0), -4.475f, -4.45f, 0.22f, 0.36f, sd * 0.50f - 0.10f, sd * 0.50f + 0.10f, (Color){255, 26, 20, 255}, MAT_UNLIT);
         }
-        post_emissive_end();
-        post_emissive_begin(rear);
-        for (int sd = -1; sd <= 1; sd += 2) lbox(c, RN(19, 0), -4.475f, -4.45f, 0.22f, 0.36f, sd * 0.50f - 0.10f, sd * 0.50f + 0.10f, (Color){255, 26, 20, 255}, MAT_UNLIT);
-        post_emissive_end();
         return;
     }
-    for (int i = 0; i < c->nlights; i++) {
-        const LightStrip *L = &c->lights[i];
-        if (L->rear && c->tailgate == TG_GONE && c->def->hasTailgate) continue;   // went with the tailgate
-        post_emissive_begin(L->rear ? rear : front);
-        draw_lightbar(c, L, L->rear ? (Color){255, 26, 20, 255} : (Color){235, 242, 255, 255});
+    const LightStrip *L = &c->lights[item];
+    draw_lightbar(c, L, L->rear ? (Color){255, 26, 20, 255} : (Color){235, 242, 255, 255});
+}
+static void draw_all_car_lights(const World *w, int lightsOn) {
+    float uniq[16]; int nu = 0;
+    for (int i = 0; i < w->ncars; i++) {
+        const Car *c = &w->cars[i];
+        if (!c->active) continue;
+        int on = lightsOn && (i == 0 || traffic_is_ai(i));
+        for (int k = 0; k < car_light_count(c); k++) {
+            float u = car_light_intensity(c, on, k); int f = u < 0;
+            for (int q = 0; q < nu && !f; q++) f = uniq[q] == u;
+            if (!f && nu < 16) uniq[nu++] = u;
+        }
+    }
+    for (int q = 0; q < nu; q++) {
+        post_emissive_begin(uniq[q]);
+        for (int i = 0; i < w->ncars; i++) {
+            const Car *c = &w->cars[i];
+            if (!c->active) continue;
+            int on = lightsOn && (i == 0 || traffic_is_ai(i));
+            for (int k = 0; k < car_light_count(c); k++)
+                if (car_light_intensity(c, on, k) == uniq[q]) car_light_draw(c, k);
+        }
         post_emissive_end();
     }
 }
@@ -2415,7 +2468,7 @@ static float wrap_pi(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a +=
 
 int main(void) {
     set_env(0);
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | (getenv("BEAMLITE_PROF") ? 0 : FLAG_VSYNC_HINT));
     InitWindow(1440, 900, "BeamLite — soft-body driving");
     SetExitKey(KEY_NULL);
     SetTargetFPS(120);
@@ -2439,8 +2492,17 @@ int main(void) {
     const float H = 1.0f / SIM_HZ;
     float acc = 0;
 
+    const char *profEnv = getenv("BEAMLITE_PROF");
+    double profEnd = profEnv ? atof(profEnv) : 0, profT0 = GetTime(), pt = 0;
+    #define PMARK(i) do { if (profEnv) { double n_ = GetTime(); if (pt) prof_acc[prof_sel][i] += n_ - pt; pt = n_; } } while (0)
+    int profFly = profEnv && getenv("BEAMLITE_PROF_FLY");
+    if (profFly) { load_map(&world, MAP_AIRPORT, &nextSlot); if (world.flyable >= 0) { flying = 1; world.air[world.flyable].pilot = 1; world.air[world.flyable].flaps = 0.5f; } }
+    if (profEnv) SetTargetFPS(0);   // uncapped; vsync is off via config in profile runs
+
     while (!WindowShouldClose()) {
+        if (profEnv) { pt = GetTime(); prof_frames[prof_sel]++; if (pt - profT0 > profEnd) break; }
         float dt = fminf(GetFrameTime(), 1.0f / 20.0f);
+        if (profEnv) dt = 1.0f / 60.0f;
         Car *pc = &world.cars[0];
         Airframe *ap = world.flyable >= 0 ? &world.air[world.flyable] : NULL;
         if (!ap) flying = 0;
@@ -2515,6 +2577,7 @@ int main(void) {
         int right = IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT);
         float vF = vdot(pc->vel, pc->fwd);
         Controls ctl = {0, 0, (float)(left - right), IsKeyDown(KEY_SPACE)};
+        if (profEnv) { ctl.throttle = 0.5f; ctl.steer = 0.3f * sinf((prof_frames[0] + prof_frames[1]) / 60.0f); }
         if (up) { if (vF < -1.0f) ctl.brake = 1; else ctl.throttle = 1; }
         if (down) { if (vF > 1.0f) ctl.brake = 1; else ctl.throttle = -1; }
         if (pickerOpen) ctl = (Controls){0, 0, 0, 1};
@@ -2527,12 +2590,15 @@ int main(void) {
             ap->thr = fminf(fmaxf(ap->thr + 0.5f * dt * (float)((IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) - (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL))), 0.0f), 1.0f);
             if (IsKeyPressed(KEY_F)) ap->flaps = ap->flaps < 0.25f ? 0.5f : ap->flaps < 0.75f ? 1.0f : 0.0f;
             ap->brake = IsKeyDown(KEY_SPACE) ? 1.0f : 0.0f;
+            if (profFly) { ap->thr = 1; ap->pitch = ap->airspeed > 72.0f ? -0.35f : 0; ap->brake = 0; }
+            if (profFly) prof_sel = ap->agl > 2.0f;
             if (ap->c.exploded) { world_respawn_plane(&world); ap->thr = 0; }
         }
         pc->ctl = ctl;
 
         traffic_update(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f), pc->pos);
 
+        PMARK(0);
         // ---- physics (fixed substeps)
         if (!paused) acc += dt * (slowmo ? 0.2f : 1.0f);
         int steps = 0;
@@ -2563,6 +2629,7 @@ int main(void) {
             update_fx(sdt);
         }
 
+        PMARK(1);
         // ---- camera
         Vector2 md = GetMouseDelta();
         int dragging = IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
@@ -2626,6 +2693,7 @@ int main(void) {
         }
         cam.fovy = camMode ? 72.0f : 62.0f;
 
+        PMARK(2);
         // ---- sun shadow map: the casters, seen from the sun
         post_set_quality(fancy, fancy);
         if (post_shadow_begin(flying ? RV(ap->pos) : RV(pc->pos), ENV, RV(AMB), RV(SUNC))) {
@@ -2639,6 +2707,7 @@ int main(void) {
             post_shadow_end();
         }
 
+        PMARK(3);
         // ---- draw the world into the HDR buffer
         post_begin_scene();
         BeginMode3D(cam);
@@ -2692,7 +2761,7 @@ int main(void) {
         // Things that glow, then additive light pools (no depth writes so they don't occlude).
         int lightsOn = ENV->lights > 0.01f;
         if (lightsOn) { post_set_emissive(0.6f + 2.2f * ENV->lights); DrawModel(cityGlow, (Vector3){0, 0, 0}, 1.0f, WHITE); }
-        if (!beamView) for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car_lights(&world.cars[i], lightsOn && (i == 0 || traffic_is_ai(i)));
+        if (!beamView) draw_all_car_lights(&world, lightsOn);
         if (camMode && !beamView) { post_emissive_begin(0.6f + 1.4f * ENV->lights); draw_gauges(pc); post_emissive_end(); }
         post_emissive_begin(3.5f); draw_signal_lamps(1); post_emissive_end();
         if (world.flyable >= 0 && !beamView) draw_airliner_lights(&world.air[world.flyable], (float)GetTime(), lightsOn || flying);
@@ -2712,6 +2781,10 @@ int main(void) {
         rlEnableBackfaceCulling();
         EndMode3D();
         post_end_scene();
+        PMARK(4);
+#ifdef __APPLE__
+        if (profEnv) { glFinish(); PMARK(5); }
+#endif
 
         // ---- grade it onto the screen, then the HUD
         BeginDrawing();
@@ -2727,10 +2800,26 @@ int main(void) {
             env.fogDensity *= 2.2f;
         }
         post_present(&env, (float)GetTime(), weather_wet(), weather_rain());
+#ifdef __APPLE__
+        if (profEnv && getenv("BEAMLITE_PROF_GPU")) { PMARK(6); glFinish(); PMARK(5); }   // GPU time of the post chain is booked with the GPU wait
+#endif
         if (flying) draw_flight_hud(ap, &world, slowmo, paused, help);
         else draw_hud(pc, &world, vF, pickerOpen ? (Controls){0} : ctl, slowmo, paused, help);
         if (pickerOpen) draw_picker();
+        PMARK(6);
         EndDrawing();
+        PMARK(7);
+        if (profEnv && getenv("BEAMLITE_SHOT") && prof_frames[0] + prof_frames[1] == 120) { Image im = LoadImageFromScreen(); ExportImage(im, getenv("BEAMLITE_SHOT")); UnloadImage(im); }
+    }
+    if (profEnv) {
+        for (int k = 0; k < 2; k++) {
+            if (!prof_frames[k]) continue;
+            double tot = 0; for (int i = 0; i < 8; i++) tot += prof_acc[k][i];
+            printf("[%s] frames %d, avg frame %.2f ms (%.0f fps), %d cars, %d planes\n", k ? "airborne" : "ground", prof_frames[k], 1000 * tot / prof_frames[k], prof_frames[k] / tot, world.ncars, world.nplanes);
+            for (int i = 0; i < 8; i++) printf("  %-22s %6.2f ms  %4.1f%%\n", PROF_NAMES[i], 1000 * prof_acc[k][i] / prof_frames[k], 100 * prof_acc[k][i] / tot);
+        }
+        if (world.flyable >= 0) printf("plane end state: airspeed %.0f m/s, agl %.0f m, x %.0f\n", world.air[world.flyable].airspeed, world.air[world.flyable].agl, world.air[world.flyable].pos.x);
+        fflush(stdout);
     }
 
     for (int i = 0; i < CH_N * CH_N; i++) UnloadModel(chunks[i]);
