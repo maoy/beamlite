@@ -16,7 +16,7 @@
 #include <stddef.h>
 
 #define NEAR_PLANE 0.1
-#define FAR_PLANE 1500.0
+#define FAR_PLANE 9000.0
 
 #define GLSL "#version 330\nin vec2 fragTexCoord;\nin vec4 fragColor;\nuniform sampler2D texture0;\nuniform vec4 colDiffuse;\nout vec4 finalColor;\n"
 
@@ -194,12 +194,38 @@ static const char *PAINT_FS = GLSL SKY_GLSL
     "  finalColor = vec4(pow(max(lin, 0.0), vec3(1.0 / 2.2)), 1.0);\n"
     "}\n";
 
+// The bay: a flat sheet whose normal is rippled by scrolling noise. Fresnel blend between deep water
+// and the reflected sky, plus sun glitter. Ripples flatten with distance so the far water doesn't shimmer.
+static const char *WATER_FS = GLSL SKY_GLSL
+    "in vec3 fragPos; in vec3 fragNormal;\n"
+    "uniform vec3 waterCol;\n"
+    "float wave(vec2 p) { return noise(p * 0.22 + vec2(time * 0.30, time * 0.17)) + 0.5 * noise(p * 0.71 - vec2(time * 0.42, time * 0.26)); }\n"
+    "vec3 skyLite(vec3 r) {\n"                                 // the sky without its clouds: cheap enough for a whole sea
+    "  float sd = max(dot(r, sunDir), 0.0);\n"
+    "  return mix(horizonCol(r), zenith, pow(clamp(r.y, 0.0, 1.0), 0.5)) + sunCol * (pow(sd, 6.0) * 0.30 + pow(sd, 90.0) * 0.9); }\n"
+    "void main() {\n"
+    "  vec3 V = camPos - fragPos; float dist = length(V); V /= dist;\n"
+    "  vec2 p = fragPos.xz;\n"
+    "  float e = 0.4, amp = 1.1 / (1.0 + dist * 0.006);\n"
+    "  float h0 = 0.75; vec3 N = vec3(0.0, 1.0, 0.0);\n"
+    "  if (dist < 1800.0) {\n"                                 // ripples only where they can be seen
+    "    h0 = wave(p);\n"
+    "    N = normalize(vec3((h0 - wave(p + vec2(e, 0.0))) * amp, e, (h0 - wave(p + vec2(0.0, e))) * amp));\n"
+    "    h0 = mix(h0, 0.75, smoothstep(1200.0, 1800.0, dist));\n"
+    "  }\n"
+    "  vec3 R = reflect(-V, N); R.y = abs(R.y) + 0.02; R = normalize(R);\n"
+    "  float F = 0.03 + 0.97 * pow(1.0 - max(dot(N, V), 0.0), 5.0);\n"
+    "  vec3 col = mix(waterCol * (0.7 + 0.6 * h0), skyLite(R), F);\n"
+    "  col += sunCol * pow(max(dot(R, sunDir), 0.0), 220.0) * 3.0;\n"
+    "  finalColor = vec4(pow(max(col, 0.0), vec3(1.0 / 2.2)), 1.0);\n"
+    "}\n";
+
 // Shadow-map depth pass: any colour will do.
 static const char *DEPTH_FS = "#version 330\nout vec4 finalColor;\nvoid main() { finalColor = vec4(1.0); }\n";
 
 // Ambient occlusion from the depth buffer (half resolution, blurred afterwards).
 static const char *AO_FS = GLSL SKY_GLSL
-    "float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * 0.1 * 1500.0 / (1500.1 - z * 1499.9); }\n"
+    "float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * 0.1 * 9000.0 / (9000.1 - z * 8999.9); }\n"
     "void main() {\n"
     "  vec2 uv = fragTexCoord;\n"
     "  float d = texture(depthTex, uv).r;\n"
@@ -287,7 +313,7 @@ static const char *SSR_FS = GLSL SKY_GLSL
     "uniform int nRoads, nHighway;\n"
     "uniform vec4 broadway;\n"                                   // x0 at z0, dx/dz, horizontal half-width, z0 ...
     "uniform vec2 broadwayZ;\n"                                  // ... and its z range (empty range = none)
-    "float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * 0.1 * 1500.0 / (1500.1 - z * 1499.9); }\n"
+    "float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * 0.1 * 9000.0 / (9000.1 - z * 8999.9); }\n"
     "float surface(vec2 p) {\n"      // 1 asphalt, 0.6 pavement, 0.22 anything else
     "  float s = 0.10;\n"
     "  if (p.y > broadwayZ.x && p.y < broadwayZ.y && abs(p.x - broadway.x - broadway.y * (p.y - broadway.w)) < broadway.z) return 0.9;\n"
@@ -421,7 +447,8 @@ static Shader shEmissive, shAtmos, shSSR, shComposite, shBright, shBlur, shFinal
 static int locIntensity, locAtmos[U_COUNT], locSSR[U_COUNT], locWet, locRain, locRoads, locNRoads, locNHighway, locRefl;
 static int locBrightTexel, locBrightThr, locBlurStep, locFinal[6];
 static RenderTexture2D scene, hdr, hdr2, refl[2], bl[3][2], aoRT[2];
-static Shader shPaint, shDepth, shAO;
+static Shader shPaint, shDepth, shAO, shWater;
+static int locWater[U_COUNT], locWaterCol;
 static int locPaint[U_COUNT], locPaintAmb, locPaintSun, locPaintGround, locPaintLamp, locAO[U_COUNT];
 static int locShMap, locShVP, locShAmb, locShSun, locShOn, locShTexel, locAoTex, locAoOn;
 #define SHADOW_RES 2048
@@ -505,6 +532,9 @@ void post_init(void) {
     shPaint = LoadShaderFromMemory(PAINT_VS, PAINT_FS);
     shDepth = LoadShaderFromMemory(NULL, DEPTH_FS);
     shAO = LoadShaderFromMemory(NULL, AO_FS);
+    shWater = LoadShaderFromMemory(PAINT_VS, WATER_FS);
+    locWaterCol = GetShaderLocation(shWater, "waterCol");
+    for (int i = 0; i < U_COUNT; i++) locWater[i] = GetShaderLocation(shWater, SKY_UNIFORMS[i]);
     locPaintAmb = GetShaderLocation(shPaint, "bakeAmb");
     locPaintSun = GetShaderLocation(shPaint, "bakeSun");
     locPaintGround = GetShaderLocation(shPaint, "groundCol");
@@ -642,6 +672,18 @@ void post_paint_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time
 }
 void post_paint_end(void) { EndShaderMode(); }
 
+// Water: draw the sea surface (world-space vertices) between these.
+void post_water_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time) {
+    BeginShaderMode(shWater);
+    set_sky_uniforms(shWater, locWater, e, time);
+    Vector3 sd = Vector3Normalize(e->sunDir);
+    float up = sd.y > 0 ? sd.y : 0;
+    float k = bakeAmb.y + bakeSun.y * up;
+    Vector3 wc = {0.010f * k, 0.060f * k, 0.085f * k};
+    SetShaderValue(shWater, locWaterCol, &wc, SHADER_UNIFORM_VEC3);
+}
+void post_water_end(void) { EndShaderMode(); }
+
 // Sun shadow map: draw the shadow casters between these two. The map is an orthographic view down the
 // sun's rays, SHADOW_HALF metres either side of `focus`, snapped to whole texels so it doesn't shimmer.
 int post_shadow_begin(Vector3 focus, const Env *e, Vector3 bakeAmb, Vector3 bakeSun) {
@@ -667,6 +709,7 @@ int post_shadow_begin(Vector3 focus, const Env *e, Vector3 bakeAmb, Vector3 bake
     lc.projection = CAMERA_ORTHOGRAPHIC;
     BeginTextureMode(shadowRT);
     ClearBackground(WHITE);
+    rlSetClipPlanes(1.0, 1500.0);                       // a short depth range keeps the shadow map precise
     BeginMode3D(lc);
     lightVP = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
     rlDisableBackfaceCulling();
@@ -679,6 +722,7 @@ void post_shadow_end(void) {
     rlEnableBackfaceCulling();
     EndMode3D();
     EndTextureMode();
+    rlSetClipPlanes(NEAR_PLANE, FAR_PLANE);
 }
 int post_shadow_active(void) { return shadowDrawn; }
 Shader post_depth_shader(void) { return shDepth; }
@@ -791,6 +835,6 @@ void post_shutdown(void) {
     free_targets();
     UnloadShader(shEmissive); UnloadShader(shBillboard); UnloadShader(shAtmos); UnloadShader(shSSR); UnloadShader(shComposite);
     UnloadShader(shBright); UnloadShader(shBlur); UnloadShader(shFinal);
-    UnloadShader(shPaint); UnloadShader(shDepth); UnloadShader(shAO);
+    UnloadShader(shPaint); UnloadShader(shDepth); UnloadShader(shAO); UnloadShader(shWater);
     if (shadowReady) UnloadRenderTexture(shadowRT);
 }

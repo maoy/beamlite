@@ -74,6 +74,10 @@ static Color terrain_color(float x, float z, float y, V3 n) {
     else if (map_has_broadway() && fabsf(x) < CITY_X + 4 && z > CITY_Z0 + 1 && z < CITY_Z1 + 4) {
         r = 0.46f + 0.03f * noise; g = 0.45f + 0.03f * noise; b = 0.43f; cover = 0.85f;           // Midtown: paved kerb to kerb
     }
+    else if (sea_dist(x, z) > -7.0f) {                                                           // beach, then seabed
+        float wet = fminf(fmaxf((AP_SEA_Y + 0.5f - y) / 2.5f, 0), 1);
+        r = 0.74f - 0.44f * wet + 0.04f * noise; g = 0.69f - 0.36f * wet + 0.04f * noise; b = 0.53f - 0.22f * wet; cover = 0.5f;
+    }
     else {                                                                                       // grass / hills
         r = 0.26f + 0.10f * noise; g = 0.47f + 0.12f * noise; b = 0.20f;
         float rock = fminf(fmaxf((1.0f - n.y) * 4.0f, 0), 1);
@@ -82,19 +86,30 @@ static Color terrain_color(float x, float z, float y, V3 n) {
         (void)y;
     }
     int gx = (int)lroundf(x / CELL), gz = (int)lroundf(z / CELL);
-    if (gx % 5 == 0 || gz % 5 == 0) { r *= 0.93f; g *= 0.93f; b *= 0.93f; }  // 10 m grid for speed sense
+    if ((gx % 5 == 0 || gz % 5 == 0) && fabsf(x) < 1500 && fabsf(z) < 320) { r *= 0.93f; g *= 0.93f; b *= 0.93f; }  // 10 m grid for speed sense
     Color base = {(unsigned char)fminf(255, r * 255), (unsigned char)fminf(255, g * 255), (unsigned char)fminf(255, b * 255), 255};
     base = snow_over(base, snowCover * cover * (0.92f + 0.08f * noise));
     return lit(base, n, 1.0f);
 }
 
-static Model build_chunk(int cx, int cz) {
-    const int V = CH_CELLS + 1;
-    float x0 = -CH_N * CH_CELLS * CELL * 0.5f + cx * CH_CELLS * CELL;
-    float z0 = -CH_N * CH_CELLS * CELL * 0.5f + cz * CH_CELLS * CELL;
+// The airport map reaches far beyond the 600 m detailed square: fine chunks carry on along the
+// runway causeway, and one coarse sheet covers everything else out to AP_FAR.
+#define EXT_X0 300.0f
+#define EXT_X1 1400.0f
+#define EXT_Z0 100.0f
+#define EXT_Z1 300.0f
+#define FAR_CELL 50.0f
+static int fine_terrain(float x, float z, float m) {      // inside the finely meshed area (shrunk by m)?
+    const float half = CH_N * CH_CELLS * CELL * 0.5f;
+    if (fabsf(x) <= half - m && fabsf(z) <= half - m) return 1;
+    return x >= EXT_X0 - 1 && x <= EXT_X1 - m && z >= EXT_Z0 + m && z <= EXT_Z1 - m;
+}
+
+static Model build_terrain(float x0, float z0, int cells, float cell, int coarse) {
+    const int V = cells + 1;
     Mesh m = {0};
     m.vertexCount = V * V;
-    m.triangleCount = CH_CELLS * CH_CELLS * 2;
+    m.triangleCount = cells * cells * 2;
     m.vertices = MemAlloc(m.vertexCount * 3 * sizeof(float));
     m.normals = MemAlloc(m.vertexCount * 3 * sizeof(float));
     m.colors = MemAlloc(m.vertexCount * 4);
@@ -102,16 +117,18 @@ static Model build_chunk(int cx, int cz) {
     for (int j = 0; j < V; j++)
     for (int i = 0; i < V; i++) {
         int v = j * V + i;
-        float x = x0 + i * CELL, z = z0 + j * CELL, y = terrain_height(x, z);
+        float x = x0 + i * cell, z = z0 + j * cell, y = terrain_height(x, z);
         V3 n = terrain_normal(x, z);
         Color c = terrain_color(x, z, y, n);
+        // The coarse sheet ducks under the fine mesh, and sits a touch low along the seam.
+        if (coarse) y -= fine_terrain(x, z, 1.0f) ? 6.0f : fine_terrain(x, z, -1.0f) ? 0.4f : 0.0f;
         m.vertices[v * 3] = x; m.vertices[v * 3 + 1] = y; m.vertices[v * 3 + 2] = z;
         m.normals[v * 3] = n.x; m.normals[v * 3 + 1] = n.y; m.normals[v * 3 + 2] = n.z;
         m.colors[v * 4] = c.r; m.colors[v * 4 + 1] = c.g; m.colors[v * 4 + 2] = c.b; m.colors[v * 4 + 3] = 255;
     }
     int t = 0;
-    for (int j = 0; j < CH_CELLS; j++)
-    for (int i = 0; i < CH_CELLS; i++) {
+    for (int j = 0; j < cells; j++)
+    for (int i = 0; i < cells; i++) {
         unsigned short a = j * V + i, b = a + 1, c = a + V, d = c + 1;
         m.indices[t++] = a; m.indices[t++] = c; m.indices[t++] = b;   // CCW seen from above
         m.indices[t++] = b; m.indices[t++] = c; m.indices[t++] = d;
@@ -119,6 +136,13 @@ static Model build_chunk(int cx, int cz) {
     UploadMesh(&m, false);
     return LoadModelFromMesh(m);
 }
+static Model build_chunk(int cx, int cz) {
+    const float half = CH_N * CH_CELLS * CELL * 0.5f;
+    return build_terrain(-half + cx * CH_CELLS * CELL, -half + cz * CH_CELLS * CELL, CH_CELLS, CELL, 0);
+}
+#define EXT_MAX 24
+static Model extChunk[EXT_MAX], farTerrain;
+static int nExt, hasFar;
 
 // ------------------------------------------------- static mesh builder ----
 // Flat-shaded, vertex-coloured triangles with lighting baked in (like the terrain).
@@ -488,68 +512,6 @@ static void window(MeshB *m, const Building *B, int s, float u, float y, float w
 
 static const Color LIVERY[] = {{200, 30, 40, 255}, {20, 50, 120, 255}, {0, 130, 140, 255}, {230, 110, 20, 255}, {40, 120, 60, 255}, {110, 40, 140, 255}};
 
-// An airliner (~36 m narrow-body) with its nose at `nose`, fuselage running toward `tail` (unit, horizontal).
-// Axis-aligned orientations only (the gear uses axis-aligned boxes). Livery colour from `seed`.
-static void build_airliner(MeshB *m, V3 nose, V3 tail, unsigned seed) {
-    Color white = {236, 237, 240, 255}, belly = {200, 202, 206, 255}, glass = {50, 62, 78, 255}, wingc = {205, 207, 212, 255};
-    Color liv = LIVERY[seed % 6], dark = {40, 40, 44, 255};
-    V3 up = v3(0, 1, 0), right = v3(tail.z, 0, -tail.x);                  // perpendicular, horizontal
-    #define AP(s, y, l) vadd(vadd(nose, vscale(tail, (s))), vadd(vscale(up, (y)), vscale(right, (l))))
-    // Fuselage: octagonal rings along the station s (metres back from the nose).
-    static const float ST[][3] = {{0.0f, 0.15f, 3.35f}, {0.9f, 1.0f, 3.40f}, {2.2f, 1.6f, 3.50f}, {4.0f, 1.95f, 3.55f}, {28.0f, 1.95f, 3.6f},
-                                  {31.0f, 1.5f, 3.95f}, {34.0f, 0.8f, 4.5f}, {36.0f, 0.2f, 4.9f}};
-    const int NS = (int)(sizeof ST / sizeof ST[0]);
-    for (int i = 0; i + 1 < NS; i++)
-        for (int k = 0; k < 8; k++) {
-            float a0 = (k + 0.5f) * 0.7854f, a1 = (k + 1.5f) * 0.7854f;
-            V3 p0 = AP(ST[i][0], ST[i][2] + ST[i][1] * sinf(a0), ST[i][1] * cosf(a0)), p1 = AP(ST[i][0], ST[i][2] + ST[i][1] * sinf(a1), ST[i][1] * cosf(a1));
-            V3 q0 = AP(ST[i + 1][0], ST[i + 1][2] + ST[i + 1][1] * sinf(a0), ST[i + 1][1] * cosf(a0)), q1 = AP(ST[i + 1][0], ST[i + 1][2] + ST[i + 1][1] * sinf(a1), ST[i + 1][1] * cosf(a1));
-            Color c = white;
-            if (k == 4 || k == 5 || k == 6) c = belly;                    // underside
-            if ((k == 7 || k == 3) && i == 3) c = liv;                    // cheatline along the lower flanks
-            if ((k == 0 || k == 2) && i == 3) c = (Color){226, 228, 232, 255};
-            if (i == 1 && k <= 3 && k >= 0) c = glass;                    // cockpit windows
-            V3 ctr = AP(0.5f * (ST[i][0] + ST[i + 1][0]), 0.5f * (ST[i][2] + ST[i + 1][2]), 0);
-            mb_quad(m, p0, p1, q1, q0, c, ctr);
-        }
-    for (int side = -1; side <= 1; side += 2) {                          // passenger window strip
-        V3 a = AP(5.0f, 3.95f, side * 1.86f), b = AP(27.0f, 3.95f, side * 1.86f);
-        mb_quad(m, a, b, vadd(b, v3(0, 0.35f, 0)), vadd(a, v3(0, 0.35f, 0)), glass, AP(16, 3.95f, 0));
-    }
-    // Wings (low-mounted, swept), with a little thickness.
-    for (int side = -1; side <= 1; side += 2) {
-        V3 r0 = AP(14.0f, 2.4f, side * 1.9f), r1 = AP(21.0f, 2.4f, side * 1.9f), t0 = AP(22.5f, 3.3f, side * 17.0f), t1 = AP(25.0f, 3.3f, side * 17.0f);
-        V3 d = v3(0, -0.25f, 0);
-        mb_quad(m, r0, t0, t1, r1, wingc, vadd(AP(19, 0, side * 8), v3(0, -10, 0)));
-        mb_quad(m, vadd(r0, d), vadd(t0, d), vadd(t1, d), vadd(r1, d), belly, vadd(AP(19, 0, side * 8), v3(0, 10, 0)));
-        mb_quad(m, r0, t0, vadd(t0, d), vadd(r0, d), wingc, AP(30, 3, side * 8));       // leading edge
-        // Engine nacelle under the wing.
-        for (int k = 0; k < 8; k++) {
-            float a0 = k * 0.7854f, a1 = (k + 1) * 0.7854f;
-            V3 e0 = AP(12.5f, 1.95f + 1.0f * sinf(a0), side * 6.5f + 1.0f * cosf(a0)), e1 = AP(12.5f, 1.95f + 1.0f * sinf(a1), side * 6.5f + 1.0f * cosf(a1));
-            V3 f0 = AP(17.0f, 1.95f + 0.8f * sinf(a0), side * 6.5f + 0.8f * cosf(a0)), f1 = AP(17.0f, 1.95f + 0.8f * sinf(a1), side * 6.5f + 0.8f * cosf(a1));
-            mb_quad(m, e0, e1, f1, f0, (Color){180, 182, 188, 255}, AP(14.7f, 1.95f, side * 6.5f));
-            mb_tri(m, e0, e1, AP(12.5f, 1.95f, side * 6.5f), dark, AP(20.0f, 1.95f, side * 6.5f));   // intake
-        }
-        mb_quad(m, AP(14.5f, 2.4f, side * 6.5f), AP(17.0f, 2.4f, side * 6.5f), AP(17.0f, 2.85f, side * 6.5f), AP(14.5f, 2.85f, side * 6.5f), belly, AP(15, 2.6f, 0));   // pylon
-        // Horizontal stabiliser.
-        mb_quad(m, AP(31.0f, 4.6f, side * 0.8f), AP(34.0f, 4.9f, side * 6.5f), AP(35.5f, 4.9f, side * 6.5f), AP(34.5f, 4.6f, side * 0.8f), wingc, AP(33, -5, side * 3));
-    }
-    // Fin in the livery colour, lit on both sides.
-    V3 f0 = AP(27.5f, 5.3f, 0), f1 = AP(35.0f, 5.3f, 0), f2 = AP(36.0f, 11.0f, 0), f3 = AP(33.0f, 11.0f, 0);
-    mb_quad(m, f0, f1, f2, f3, liv, AP(32, 8, -5));
-    mb_quad(m, f0, f1, f2, f3, liv, AP(32, 8, 5));
-    // Landing gear: struts and wheels.
-    V3 ng = AP(3.0f, 0, 0), mg[2] = {AP(18.5f, 0, -2.8f), AP(18.5f, 0, 2.8f)};
-    box_shell(m, v3(ng.x - 0.12f, 0.5f + ng.y, ng.z - 0.12f), v3(ng.x + 0.12f, 2.0f + ng.y, ng.z + 0.12f), (Color){150, 150, 155, 255}, dark);
-    box_shell(m, v3(ng.x - 0.4f, ng.y, ng.z - 0.4f), v3(ng.x + 0.4f, 0.7f + ng.y, ng.z + 0.4f), dark, dark);
-    for (int i = 0; i < 2; i++) {
-        box_shell(m, v3(mg[i].x - 0.15f, 0.8f + mg[i].y, mg[i].z - 0.15f), v3(mg[i].x + 0.15f, 2.4f + mg[i].y, mg[i].z + 0.15f), (Color){150, 150, 155, 255}, dark);
-        box_shell(m, v3(mg[i].x - 0.7f, mg[i].y, mg[i].z - 0.7f), v3(mg[i].x + 0.7f, 1.1f + mg[i].y, mg[i].z + 0.7f), dark, dark);
-    }
-    #undef AP
-}
-
 // Terminal: pale walls, a glass curtain on both long faces, a canopy over the forecourt kerb.
 static void build_terminal(MeshB *m, const Building *B) {
     bseed = B->seed;
@@ -733,51 +695,6 @@ static void build_markings_airport(MeshB *m) {
         }
 }
 
-// The airliner that lines up, rolls and climbs out to the east, over and over (visual only).
-static Model planeModel; static int hasPlane;
-static float apT, apX, apY, apV, apPitch; static int apPhase;
-static void plane_reset(void) { apT = 0; apPhase = 0; apX = AP_RWY_X0 + 26.0f; apY = 0; apV = 0; apPitch = 0; }
-static void build_plane_model(void) {
-    if (hasPlane) UnloadModel(planeModel);
-    MeshB m = {0};
-    build_airliner(&m, v3(18.5f, 0, 0), v3(-1, 0, 0), 3u);  // origin at the main gear, nose toward +x
-    planeModel = mb_model(&m);
-    hasPlane = 1;
-}
-static void plane_update(float dt) {
-    apT += dt;
-    if (apPhase == 0) { if (apT > 12.0f) apPhase = 1; }        // holding on the runway
-    else if (apPhase == 1) {                                    // take-off roll
-        apV += 4.5f * dt; apX += apV * dt;
-        if (apV > 48.0f) apPhase = 2;
-    } else {                                                    // rotate and climb out
-        apV = fminf(apV + 2.0f * dt, 75.0f);
-        apPitch = fminf(apPitch + 3.0f * DEG2RAD * dt, 11.0f * DEG2RAD);
-        apX += apV * cosf(apPitch) * dt;
-        if (apPitch > 6.0f * DEG2RAD) apY += apV * sinf(apPitch - 3.0f * DEG2RAD) * dt;
-        if (apX > 460.0f) plane_reset();
-    }
-}
-static V3 plane_world(V3 l) {                                  // plane-local point -> world
-    float c = cosf(apPitch), s = sinf(apPitch);
-    float zc = (AP_RWY_Z0 + AP_RWY_Z1) * 0.5f;
-    return v3(apX + l.x * c - l.y * s, terrain_height(apX, zc) * (apY < 0.1f ? 1.0f : 1.0f) + apY + l.x * s + l.y * c, zc + l.z);
-}
-static void draw_plane(void) {
-    float zc = (AP_RWY_Z0 + AP_RWY_Z1) * 0.5f;
-    Vector3 p = {apX, terrain_height(apX, zc) + apY, zc};
-    DrawModelEx(planeModel, p, (Vector3){0, 0, 1}, apPitch * RAD2DEG, (Vector3){1, 1, 1}, WHITE);
-}
-static void draw_plane_lights(float time) {                    // emissive pass: landing light, nav lights, strobes, beacon
-    V3 land = plane_world(v3(15.5f, 1.2f, 0)), wl = plane_world(v3(-6.5f, 3.3f, -17.0f)), wr = plane_world(v3(-6.5f, 3.3f, 17.0f));
-    V3 beacon = plane_world(v3(4.0f, 5.6f, 0)), tailw = plane_world(v3(-17.5f, 4.9f, 0));
-    DrawCube(RV(land), 0.5f, 0.5f, 0.5f, (Color){255, 250, 235, 255});
-    DrawCube(RV(wl), 0.35f, 0.35f, 0.35f, (Color){60, 255, 100, 255});
-    DrawCube(RV(wr), 0.35f, 0.35f, 0.35f, (Color){255, 40, 30, 255});
-    DrawCube(RV(tailw), 0.3f, 0.3f, 0.3f, (Color){255, 255, 255, 255});
-    if (fmodf(time, 1.0f) < 0.08f) { DrawCube(RV(wl), 0.6f, 0.6f, 0.6f, WHITE); DrawCube(RV(wr), 0.6f, 0.6f, 0.6f, WHITE); }
-    if (fmodf(time + 0.5f, 1.2f) < 0.15f) DrawCube(RV(beacon), 0.45f, 0.45f, 0.45f, (Color){255, 30, 20, 255});
-}
 
 static void build_building(MeshB *m, const Building *B) {
     if (B->kind == BLD_STEPS) { build_steps(m, B); return; }
@@ -1419,6 +1336,18 @@ static void draw_wheel(const Car *c, int i) {
 
 // A soft-body airliner, drawn from its current node positions so dents and bends show.
 static V3 afN[MAX_NODES];
+// Skin whose frame has pulled apart is gone: don't stretch a triangle across the gap.
+static int af_torn(const Car *c, const Tri *t) {
+    for (int e = 0; e < 3; e++) {
+        V3 d = vsub(c->n[t->v[e]].p, c->n[t->v[(e + 1) % 3]].p);
+        if (vdot(d, d) > 2.1f * t->e0[e] * t->e0[e]) return 1;       // an edge 45% longer than built
+    }
+    return 0;
+}
+static int af_split(const Car *c, int a, int b) {                   // have two nodes moved well apart?
+    V3 d = vsub(c->n[a].p, c->n[b].p), r = vsub(c->rest[a], c->rest[b]);
+    return vdot(d, d) > 2.1f * vdot(r, r);
+}
 static V3 af_lerp_out(const Airframe *A, int a, int b, float t, float out) {
     V3 p = vlerp(A->c.n[a].p, A->c.n[b].p, t);
     return vadd(p, vscale(vnorm(vlerp(afN[a], afN[b], t)), out));
@@ -1440,7 +1369,7 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
     rlDrawRenderBatchActive();
     rlDisableDepthMask();
     for (int i = 0; i < c->nt && !post_shadow_active() && !depthOnly; i++) {
-        if (A->paint[i] != 1) continue;
+        if (A->paint[i] != 1 || af_torn(c, &c->t[i])) continue;
         const Tri *t = &c->t[i];
         Vector3 p[3];
         for (int k = 0; k < 3; k++) { V3 v = c->n[t->v[k]].p; p[k] = (Vector3){v.x, terrain_height(v.x, v.z) + 0.05f, v.z}; }
@@ -1460,6 +1389,7 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
     rlBegin(RL_TRIANGLES);
     for (int i = 0; i < A->nFusTris; i++) {
         const Tri *t = &c->t[i];
+        if (af_torn(c, t)) continue;
         Color base = pal[A->paint[i]];
         float gloss = A->paint[i] == 3 ? 1.0f : 0.55f;
         for (int k = 0; k < 3; k++) {
@@ -1473,6 +1403,7 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
     // Wings, engines and tail: flat-shaded, both faces of the thin parts.
     for (int i = A->nFusTris; i < c->nt; i++) {
         const Tri *t = &c->t[i];
+        if (af_torn(c, t)) continue;
         V3 p[3] = {c->n[t->v[0]].p, c->n[t->v[1]].p, c->n[t->v[2]].p};
         V3 nrm = vnorm(vcross(vsub(p[1], p[0]), vsub(p[2], p[0])));
         Color col = A->paint[i] == 6 ? (pbrOn ? pbr(pal[6], nrm, MAT_MATTE) : pal[6]) : A->paint[i] == 5 && pbrOn ? pbr(pal[5], nrm, MAT_STEEL) : shade_paint(pal[A->paint[i]], nrm, p[0], eye, 0.6f);
@@ -1484,6 +1415,7 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
         int wl = side ? 5 : 0, wh = side ? 4 : 1, cl = side ? 6 : 9, ch = side ? 5 : 0;
         for (int i = 2; i < 13; i++) {
             const int *r0 = A->ring[i], *r1 = A->ring[i + 1];
+            if (af_split(c, r0[wl], r1[wl]) || af_split(c, r0[wh], r1[wh]) || af_split(c, r0[cl], r1[cl]) || af_split(c, r0[wl], r0[wh]) || af_split(c, r1[wl], r1[wh]) || af_split(c, r0[cl], r0[ch])) continue;
             V3 a0 = af_lerp_out(A, r0[wl], r0[wh], 0.30f, 0.02f), a1 = af_lerp_out(A, r0[wl], r0[wh], 0.52f, 0.02f);
             V3 b0 = af_lerp_out(A, r1[wl], r1[wh], 0.30f, 0.02f), b1 = af_lerp_out(A, r1[wl], r1[wh], 0.52f, 0.02f);
             Color g = shade_paint(pal[3], afN[r0[wl]], a0, eye, 1.0f);
@@ -1501,6 +1433,7 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
     Color strut = {150, 150, 156, 255}, tyre = {30, 30, 32, 255};
     for (int g = 0; g < 3; g++) {
         V3 w0 = c->n[A->gearWheel[g][0]].p, w1 = c->n[A->gearWheel[g][1]].p, top = c->n[A->gear[g][1]].p;
+        if (af_split(c, A->gearWheel[g][0], A->gear[g][1]) || af_split(c, A->gearWheel[g][0], A->gearWheel[g][1])) continue;   // leg torn off
         float r = g ? 0.55f : 0.4f;
         V3 hub = vadd(vscale(vadd(w0, w1), 0.5f), v3(0, r, 0));
         pcyl(hub, top, 0.14f, 0.14f, 8, strut, MAT_STEEL, 0);
@@ -1512,6 +1445,32 @@ static void draw_airframe(const Airframe *A, int beamView, V3 eye) {
                 pcyl(vsub(cc, vscale(ax, 0.17f)), vadd(cc, vscale(ax, 0.17f)), r, r, 14, tyre, MAT_MATTE, 3);
             }
         }
+    }
+}
+
+static int flying;                              // the player is flying the airliner (Tab on the airport map)
+
+// Navigation lights on the flyable airliner (emissive pass): green right tip, red left tip, white tail,
+// a flashing red beacon, strobes, and landing lights at the wing roots when it's dark or you're flying.
+static void draw_airliner_lights(const Airframe *A, float time, int landing) {
+    const Car *c = &A->c;
+    V3 rt = vadd(c->n[A->wing[0][3][0]].p, vscale(A->right, 0.15f)), lt = vsub(c->n[A->wing[1][3][0]].p, vscale(A->right, 0.15f));
+    V3 tail = vsub(c->n[A->tailNode].p, vscale(A->fwd, 0.1f));
+    V3 top = vadd(vscale(vadd(c->n[A->ring[6][2]].p, c->n[A->ring[6][3]].p), 0.5f), vscale(A->up, 0.12f));
+    post_emissive_begin(3.0f);
+    DrawCube(RV(rt), 0.3f, 0.3f, 0.3f, (Color){60, 255, 100, 255});
+    DrawCube(RV(lt), 0.3f, 0.3f, 0.3f, (Color){255, 40, 30, 255});
+    DrawCube(RV(tail), 0.25f, 0.25f, 0.25f, WHITE);
+    if (fmodf(time, 1.0f) < 0.07f) { DrawCube(RV(rt), 0.55f, 0.55f, 0.55f, WHITE); DrawCube(RV(lt), 0.55f, 0.55f, 0.55f, WHITE); }
+    if (fmodf(time + 0.5f, 1.2f) < 0.15f) DrawCube(RV(top), 0.4f, 0.4f, 0.4f, (Color){255, 30, 20, 255});
+    post_emissive_end();
+    if (landing) {
+        post_emissive_begin(5.0f);
+        for (int sd = 0; sd < 2; sd++) {
+            V3 p = vadd(c->n[A->wing[sd][0][1]].p, vscale(A->fwd, 0.25f));
+            DrawCube(RV(p), 0.35f, 0.35f, 0.35f, (Color){255, 250, 235, 255});
+        }
+        post_emissive_end();
     }
 }
 
@@ -2027,6 +1986,119 @@ static void draw_spray(Camera3D cam) {
     }
 }
 
+// ---------------------------------------------------------- crash effects ----
+// Dust and sparks where wreckage scrapes the ground, spray where it hits the water, and a fuel fire
+// with smoke once an airliner has broken up on land.
+enum { FX_DUST, FX_SPLASH, FX_SMOKE, FX_FIRE, FX_SPARK };
+typedef struct { V3 p, v; float life, max, size; unsigned char kind; } Fx;
+#define MAX_FX 4000
+static Fx fx[MAX_FX];
+static int fxHead;
+static float fireT[MAX_PLANES];
+static int wasWrecked[MAX_PLANES];
+
+static void fx_emit(int kind, V3 p, V3 v, float life, float size) {
+    Fx *f = &fx[fxHead];
+    fxHead = (fxHead + 1) % MAX_FX;
+    f->kind = (unsigned char)kind; f->p = p; f->v = v; f->life = f->max = life; f->size = size;
+}
+static V3 frand3(float s) { return v3((frand() - 0.5f) * 2 * s, (frand() - 0.5f) * 2 * s, (frand() - 0.5f) * 2 * s); }
+static void fx_clear(void) { for (int i = 0; i < MAX_FX; i++) fx[i].life = 0; for (int i = 0; i < MAX_PLANES; i++) { fireT[i] = 0; wasWrecked[i] = 0; } }
+
+static void emit_crash_fx(World *w, float dt) {
+    if (dt <= 0) return;
+    for (int ai = 0; ai < w->nplanes; ai++) {
+        Airframe *A = &w->air[ai];
+        const Car *c = &A->c;
+        if (!A->wrecked) { wasWrecked[ai] = 0; fireT[ai] = 0; }
+        if (A->asleep) continue;
+        int onLand = 0, touching = 0;
+        for (int i = 0; i < c->nn; i++) {
+            const Node *N = &c->n[i];
+            float sp = vlen(N->v);
+            if (sp < 4.0f) continue;
+            float g = terrain_height(N->p.x, N->p.z);
+            int sea = g < AP_SEA_Y - 0.2f && w->map == MAP_AIRPORT;
+            if (sea) {
+                if (N->p.y > AP_SEA_Y + 0.5f || N->p.y < AP_SEA_Y - 2.5f) continue;
+                touching++;
+                float n = sp * 0.5f * dt;
+                for (int k = (int)n + (frand() < n - (int)n); k > 0; k--)
+                    fx_emit(FX_SPLASH, v3(N->p.x, AP_SEA_Y + 0.1f, N->p.z), vadd(v3(N->v.x * 0.25f, 3.0f + sp * (0.10f + 0.22f * frand()), N->v.z * 0.25f), frand3(2.0f + sp * 0.05f)), 1.2f + 1.3f * frand(), 0.8f + 1.6f * frand());
+            } else {
+                if (N->p.y > g + 0.3f) continue;
+                touching++; onLand++;
+                float n = sp * 0.22f * dt;
+                for (int k = (int)n + (frand() < n - (int)n); k > 0; k--)
+                    fx_emit(FX_DUST, v3(N->p.x, g + 0.2f, N->p.z), vadd(v3(N->v.x * 0.2f, 1.0f + 2.5f * frand(), N->v.z * 0.2f), frand3(1.5f)), 1.5f + 2.0f * frand(), 1.2f + 1.5f * frand());
+                n = sp * 0.30f * dt;
+                for (int k = (int)n + (frand() < n - (int)n); k > 0; k--)
+                    fx_emit(FX_SPARK, v3(N->p.x, g + 0.1f, N->p.z), vadd(v3(N->v.x * 0.5f, 2.0f + 5.0f * frand(), N->v.z * 0.5f), frand3(4.0f)), 0.4f + 0.6f * frand(), 0.10f + 0.10f * frand());
+            }
+        }
+        // Breaking up starts a fuel fire (not if it went gently into the water).
+        if (A->wrecked && !wasWrecked[ai]) {
+            wasWrecked[ai] = 1;
+            if (onLand || A->nbroken > 60) {
+                fireT[ai] = 75.0f;
+                for (int k = 0; k < 90; k++) fx_emit(FX_FIRE, vadd(A->pos, frand3(6.0f)), vadd(vscale(A->vel, 0.3f), vadd(frand3(9.0f), v3(0, 7, 0))), 0.7f + 0.9f * frand(), 3.0f + 4.0f * frand());
+                for (int k = 0; k < 50; k++) fx_emit(FX_SMOKE, vadd(A->pos, frand3(7.0f)), vadd(vscale(A->vel, 0.2f), vadd(frand3(5.0f), v3(0, 6, 0))), 4.0f + 4.0f * frand(), 4.0f + 4.0f * frand());
+            }
+        }
+        if (fireT[ai] > 0) {
+            fireT[ai] -= dt;
+            float k = fminf(fireT[ai] / 20.0f, 1.0f);                    // dies down over the last 20 s
+            const int hot[6] = {A->eng[0][0][1], A->eng[1][0][1], A->wing[0][0][0], A->wing[1][0][0], A->wing[0][1][2], A->wing[1][1][2]};
+            for (int q = 0; q < 6; q++) {
+                V3 p = c->n[hot[q]].p;
+                if (p.y < AP_SEA_Y + 0.2f && terrain_height(p.x, p.z) < AP_SEA_Y) continue;    // under water: out
+                float n = 26.0f * k * dt;
+                for (int j = (int)n + (frand() < n - (int)n); j > 0; j--)
+                    fx_emit(FX_FIRE, vadd(p, frand3(1.2f)), vadd(vscale(c->n[hot[q]].v, 0.5f), v3((frand() - 0.5f) * 1.5f, 2.5f + 2.5f * frand(), (frand() - 0.5f) * 1.5f)), 0.5f + 0.6f * frand(), 1.6f + 1.8f * frand());
+                n = 7.0f * (0.4f + 0.6f * k) * dt;
+                for (int j = (int)n + (frand() < n - (int)n); j > 0; j--)
+                    fx_emit(FX_SMOKE, vadd(p, v3((frand() - 0.5f) * 1.5f, 1.5f, (frand() - 0.5f) * 1.5f)), v3(1.2f + frand(), 3.5f + 2.0f * frand(), 0.6f * frand()), 6.0f + 5.0f * frand(), 2.0f + 1.5f * frand());
+            }
+        }
+        (void)touching;
+    }
+}
+
+static void update_fx(float dt) {
+    for (int i = 0; i < MAX_FX; i++) {
+        Fx *f = &fx[i];
+        if (f->life <= 0) continue;
+        f->life -= dt;
+        switch (f->kind) {
+        case FX_DUST:   f->v = vscale(f->v, 1.0f - fminf(dt * 1.8f, 0.9f)); f->v.y += 0.4f * dt; f->size += 2.2f * dt; break;
+        case FX_SPLASH: f->v.y -= 9.81f * dt; f->v = vscale(f->v, 1.0f - fminf(dt * 0.5f, 0.9f)); f->size += 1.5f * dt;
+                        if (f->p.y < AP_SEA_Y - 0.2f && f->v.y < 0) f->life = 0; break;
+        case FX_SMOKE:  f->v = vscale(f->v, 1.0f - fminf(dt * 0.6f, 0.9f)); f->v.y += 1.2f * dt; f->v.x += 0.5f * dt; f->size += 1.9f * dt; break;
+        case FX_FIRE:   f->v = vscale(f->v, 1.0f - fminf(dt * 1.5f, 0.9f)); f->v.y += 6.0f * dt; f->size *= 1.0f - fminf(dt * 0.7f, 0.9f); break;
+        default:        f->v.y -= 9.81f * dt;
+                        { float g = terrain_height(f->p.x, f->p.z) + 0.03f; if (f->p.y < g) { f->p.y = g; f->v.y = fabsf(f->v.y) * 0.4f; } } break;
+        }
+        f->p = vadd(f->p, vscale(f->v, dt));
+    }
+}
+
+// Soft sprites: dust, spray and smoke with ordinary blending; flames and sparks added on top (so they bloom).
+static void draw_fx(Camera3D cam, int glow) {
+    for (int i = 0; i < MAX_FX; i++) {
+        const Fx *f = &fx[i];
+        if (f->life <= 0) continue;
+        float a = f->life / f->max;
+        if (!glow) {
+            if (f->kind == FX_DUST) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){150, 134, 110, (unsigned char)(120 * a)});
+            else if (f->kind == FX_SPLASH) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){236, 242, 248, (unsigned char)(170 * a)});
+            else if (f->kind == FX_SMOKE) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){26, 25, 25, (unsigned char)(190 * fminf(a * 1.6f, 1.0f) * fminf((1.0f - a) * 8.0f + 0.25f, 1.0f))});
+        } else {
+            if (f->kind == FX_FIRE) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){255, (unsigned char)(90 + 130 * a), (unsigned char)(20 + 60 * a * a), (unsigned char)(200 * fminf(a * 2.0f, 1.0f))});
+            else if (f->kind == FX_SPARK) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){255, 200, 110, (unsigned char)(255 * a)});
+        }
+    }
+}
+
 // ---------------------------------------------------------- world meshes ----
 
 static Model city, cityGlow, cityPool;
@@ -2039,9 +2111,17 @@ static void build_world_meshes(const World *w) {
         UnloadModel(treeModel[0]); UnloadModel(treeModel[1]); UnloadModel(stumpModel);
     }
     for (int z = 0; z < CH_N; z++) for (int x = 0; x < CH_N; x++) chunks[z * CH_N + x] = build_chunk(x, z);
+    for (int i = 0; i < nExt; i++) UnloadModel(extChunk[i]);
+    if (hasFar) UnloadModel(farTerrain);
+    nExt = 0; hasFar = 0;
+    if (w->map == MAP_AIRPORT) {
+        for (float z = EXT_Z0; z < EXT_Z1; z += CH_CELLS * CELL)
+            for (float x = EXT_X0; x < EXT_X1 && nExt < EXT_MAX; x += CH_CELLS * CELL) extChunk[nExt++] = build_terrain(x, z, CH_CELLS, CELL, 0);
+        farTerrain = build_terrain(-AP_FAR, -AP_FAR, (int)(2 * AP_FAR / FAR_CELL), FAR_CELL, 1);
+        hasFar = 1;
+    }
     city = build_city(w, &cityGlow, &cityPool);
     build_markings(w);
-    if (w->map == MAP_AIRPORT) { build_plane_model(); plane_reset(); }
     cityGlow.materials[0].shader = post_emissive_shader();
     cityPool.materials[0].shader = post_emissive_shader();
     build_trees();
@@ -2144,12 +2224,68 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
             "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
             "M  map: Default / New York / Airport      J  traffic",
+            "TAB  fly the airliner on the runway (Airport map)",
             "F2  sun shadows + ambient occlusion on / off",
             "", "Ramp ahead, crash wall behind you, warehouses to the", "right, forest on the hills. Default: towns to the left.",
             "New York: Times Square up 7th Avenue, straight ahead."};
         int n = sizeof lines / sizeof lines[0];
         hud_panel(16, 66, 420, 20 + n * 21);
-        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 9 ? RAYWHITE : HUD_DIM);
+        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 11 ? RAYWHITE : HUD_DIM);
+    }
+}
+
+// Flight instruments while you fly the airliner.
+static void draw_flight_hud(const Airframe *A, const World *w, int slowmo, int paused, int help) {
+    float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+    const char *zn = sea_dist(A->pos.x, A->pos.z) > 0 ? "OVER THE BAY" : A->agl > 30 ? "AIRBORNE" : zone_name(A->pos, w->map);
+    hud_panel(16, 16, 74 + txtw(zn, 20), 40);
+    slash(26, 26, 5, 20, HUD_ORANGE); slash(35, 26, 5, 20, HUD_ORANGE);
+    txt(zn, 58, 26, 20, RAYWHITE);
+    const char *tr = TextFormat("%s [M]   %s [L]   %s [O]     %d FPS", map_name(w->map), ENV->name, WEATHER_NAME[weather], GetFPS());
+    txt(tr, sw - 22 - txtw(tr, 15), 22, 15, HUD_DIM);
+
+    float px = 16, py = sh - 116, pw = 560, ph = 100;
+    txt("AIRLINER   [Tab] back to the car   [R] reset to the runway", px + 2, py - 22, 15, HUD_DIM);
+    hud_panel(px, py, pw, ph);
+    slash(px + 12, py + 16, 4, 26, HUD_ORANGE);
+    float hdg = atan2f(A->fwd.z, A->fwd.x) * RAD2DEG + 90.0f;          // runway 09 points east (+x)
+    while (hdg < 0) hdg += 360;
+    while (hdg >= 360) hdg -= 360;
+    int dmg = (int)(100.0f * airframe_damaged_beams(A) / (float)A->c.nb + 0.5f);
+    const char *lab[8] = {"ALT", "V/S", "HDG", "AOA", "THR", "FLAPS", "GEAR", "DAMAGE"};
+    char val[8][24];
+    snprintf(val[0], 24, "%.0f ft", (A->pos.y - AP_SEA_Y - 3.0f) * 3.281f);
+    snprintf(val[1], 24, "%+.0f fpm", A->vel.y * 196.85f);
+    snprintf(val[2], 24, "%03.0f", hdg);
+    snprintf(val[3], 24, "%.1f deg", A->aoa * RAD2DEG);
+    snprintf(val[4], 24, "%.0f%%", A->thr * 100);
+    snprintf(val[5], 24, "%s", A->flaps < 0.25f ? "UP" : A->flaps < 0.75f ? "TAKEOFF" : "FULL");
+    snprintf(val[6], 24, "%s", A->onGround ? (A->brake > 0.5f ? "BRAKES" : "ROLLING") : "DOWN");
+    snprintf(val[7], 24, "%d%%", dmg);
+    for (int i = 0; i < 8; i++) {
+        float x = px + 30 + (i / 4) * 265, y = py + 10 + (i % 4) * 21;
+        txt(lab[i], x, y, 17, HUD_DIM);
+        txt(val[i], x + 90, y, 17, (i == 7 && dmg > 3) ? (Color){240, 60, 50, 255} : HUD_ORANGE);
+    }
+    float bw = 230, bx = sw - bw - 16, by = sh - 84;
+    hud_panel(bx, by, bw, 68);
+    slash(bx + 14, by + 14, 5, 40, HUD_ORANGE);
+    char spd[16];
+    snprintf(spd, sizeof spd, "%.0f", A->airspeed * 1.944f);
+    txt(spd, bx + bw - 76 - txtw(spd, 48), by + 10, 48, RAYWHITE);
+    txt("kt", bx + bw - 62, by + 32, 20, HUD_DIM);
+    char st[64];
+    snprintf(st, sizeof st, "%s%s%s", slowmo ? "SLOW-MO  " : "", paused ? "PAUSED  " : "", A->wrecked ? "WRECKED - R to reset" : A->stall ? "STALL" : "");
+    if (st[0]) txt(st, sw - 16 - txtw(st, 18), by - 26, 18, (A->stall || A->wrecked) ? (Color){240, 60, 50, 255} : HUD_ORANGE);
+    if (help) {
+        const char *lines[] = {
+            "SHIFT / CTRL  throttle up / down", "S / W  pitch up / down (pull back to climb)", "A / D  roll left / right", "Q / E  rudder, and nose-wheel steering on the ground",
+            "F  flaps: up / take-off / full      SPACE  wheel brakes", "C  nose camera      B  beam view      R  reset to the runway", "TAB  back to the car      H  help",
+            "", "Take-off: flaps to TAKEOFF, full throttle, hold the", "centreline with Q/E, pull back gently at 135 kt.",
+            "Landing: flaps FULL, about 140 kt, idle and brake."};
+        int n = sizeof lines / sizeof lines[0];
+        hud_panel(16, 66, 440, 20 + n * 21);
+        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 7 ? RAYWHITE : HUD_DIM);
     }
 }
 
@@ -2253,6 +2389,7 @@ static void load_map(World *w, int map, int *nextSlot) {
     for (int i = 0; i < MAX_CARS; i++) skids_forget(i);
     skidCount = skidHead = 0; shardCount = 0; dropsInit = 0;
     for (int i = 0; i < MAX_SPRAY; i++) spray[i].life = 0;
+    fx_clear();
     spawn_player(w);
     if (map == MAP_AIRPORT) {                           // cabs waiting at the departures kerb
         w->ncars = 4;
@@ -2305,16 +2442,24 @@ int main(void) {
     while (!WindowShouldClose()) {
         float dt = fminf(GetFrameTime(), 1.0f / 20.0f);
         Car *pc = &world.cars[0];
+        Airframe *ap = world.flyable >= 0 ? &world.air[world.flyable] : NULL;
+        if (!ap) flying = 0;
 
         // ---- input
-        if (IsKeyPressed(KEY_R)) spawn_player(&world);
-        if (IsKeyPressed(KEY_Q)) {       // recover: upright where you are, keep heading, fresh car
+        if (IsKeyPressed(KEY_TAB) && ap && !pickerOpen) {      // hop between the car and the airliner on the runway
+            flying = !flying;
+            ap->pilot = flying;
+            if (!flying) { ap->thr = 0; ap->pitch = ap->roll = ap->yaw = 0; ap->brake = 1; }
+            camYawOff = 0;
+        }
+        if (IsKeyPressed(KEY_R)) { if (flying) { world_respawn_plane(&world); ap->thr = 0; } else spawn_player(&world); }
+        if (IsKeyPressed(KEY_Q) && !flying) {       // recover: upright where you are, keep heading, fresh car
             float hdg = atan2f(pc->fwd.z, pc->fwd.x);
             V3 p = pc->pos;
             skids_forget(0);
             car_build_vehicle(pc, playerType, v3(p.x, terrain_height(p.x, p.z) + vehicle_def(playerType)->spawnH + 0.2f, p.z), -hdg, player_paint());
         }
-        if (IsKeyPressed(KEY_N)) {       // drop a parked truck ahead, side-on (unless that's inside a building)
+        if (IsKeyPressed(KEY_N) && !flying) {       // drop a parked truck ahead, side-on (unless that's inside a building)
             float hdg = atan2f(pc->fwd.z, pc->fwd.x);
             V3 p = vadd(pc->pos, vscale(vnorm(v3(pc->fwd.x, 0, pc->fwd.z)), 20.0f));
             p.y = terrain_height(p.x, p.z);
@@ -2334,7 +2479,7 @@ int main(void) {
             if (trafficOn) traffic_init(&world, TRAFFIC_CARS, pc->pos); else traffic_clear(&world);
             nextSlot = world.ncars;
         }
-        if (IsKeyPressed(KEY_M)) load_map(&world, (world.map + 1) % MAP_COUNT, &nextSlot);
+        if (IsKeyPressed(KEY_M)) { flying = 0; load_map(&world, (world.map + 1) % MAP_COUNT, &nextSlot); ap = world.flyable >= 0 ? &world.air[world.flyable] : NULL; }
         if (IsKeyPressed(KEY_B)) beamView = !beamView;
         if (IsKeyPressed(KEY_C)) camMode = !camMode;
         if (IsKeyPressed(KEY_P)) paused = !paused;
@@ -2342,14 +2487,14 @@ int main(void) {
         if (IsKeyPressed(KEY_H) || IsKeyPressed(KEY_F1)) help = !help;
         if (IsKeyPressed(KEY_F2)) fancy = !fancy;           // sun shadows + ambient occlusion
         if (IsKeyPressed(KEY_K)) { skidCount = 0; skidHead = 0; }
-        if (IsKeyPressed(KEY_G)) car_pop_tailgate(pc);
+        if (IsKeyPressed(KEY_G) && !flying) car_pop_tailgate(pc);
         if (IsKeyPressed(KEY_O)) {
             int was = weather == 3;
             weather = (weather + 1) % WEATHER_COUNT;
             dropsInit = 0;                               // reseed precipitation for the new weather
             if ((weather == 3) != was) { snowCover = weather == 3 ? 1.0f : 0.0f; build_world_meshes(&world); }
         }
-        if (IsKeyPressed(KEY_V)) { pickerOpen = !pickerOpen; pickerSel = playerType; }
+        if (IsKeyPressed(KEY_V) && !flying) { pickerOpen = !pickerOpen; pickerSel = playerType; }
         else if (pickerOpen) {
             if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) pickerSel = (pickerSel + VEH_COUNT - 1) % VEH_COUNT;
             if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) pickerSel = (pickerSel + 1) % VEH_COUNT;
@@ -2373,10 +2518,20 @@ int main(void) {
         if (up) { if (vF < -1.0f) ctl.brake = 1; else ctl.throttle = 1; }
         if (down) { if (vF > 1.0f) ctl.brake = 1; else ctl.throttle = -1; }
         if (pickerOpen) ctl = (Controls){0, 0, 0, 1};
+        if (flying) {
+            // Stick, rudder, throttle lever, flaps and brakes go to the airframe; the car waits with its handbrake on.
+            ctl = (Controls){0, 0, 0, 1};
+            ap->pitch = (float)(down - up);
+            ap->roll = (float)(right - left);
+            ap->yaw = (float)(IsKeyDown(KEY_E) - IsKeyDown(KEY_Q));
+            ap->thr = fminf(fmaxf(ap->thr + 0.5f * dt * (float)((IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) - (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL))), 0.0f), 1.0f);
+            if (IsKeyPressed(KEY_F)) ap->flaps = ap->flaps < 0.25f ? 0.5f : ap->flaps < 0.75f ? 1.0f : 0.0f;
+            ap->brake = IsKeyDown(KEY_SPACE) ? 1.0f : 0.0f;
+            if (ap->c.exploded) { world_respawn_plane(&world); ap->thr = 0; }
+        }
         pc->ctl = ctl;
 
         traffic_update(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f), pc->pos);
-        if (world.map == MAP_AIRPORT) plane_update(paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
 
         // ---- physics (fixed substeps)
         if (!paused) acc += dt * (slowmo ? 0.2f : 1.0f);
@@ -2404,6 +2559,8 @@ int main(void) {
             if (weather >= 2) update_rain(v3(camPos.x, camPos.y, camPos.z), sdt);
             emit_spray(&world, sdt);
             update_spray(sdt);
+            emit_crash_fx(&world, sdt);
+            update_fx(sdt);
         }
 
         // ---- camera
@@ -2416,8 +2573,31 @@ int main(void) {
         V3 tgt = vadd(pc->pos, v3(0, 0.8f, 0));
         float hdg = atan2f(pc->fwd.z, pc->fwd.x);
         float hRate = fminf(1.0f, dt * (2.0f + fabsf(vF) * 0.08f));
+        if (flying) {
+            airframe_update_frame(ap);
+            tgt = vadd(ap->pos, v3(0, 2.5f, 0));
+            hdg = atan2f(ap->fwd.z, ap->fwd.x);
+            hRate = fminf(1.0f, dt * 3.0f);
+        }
         camHeading += wrap_pi(hdg - camHeading) * hRate;
-        if (camMode == 0) {
+        if (flying && camMode) {                         // nose camera
+            V3 eye = vadd(ap->c.n[ap->noseNode].p, vadd(vscale(ap->up, 1.3f), vscale(ap->fwd, 0.4f)));
+            V3 look = vrot(ap->fwd, ap->up, camYawOff);
+            look = vrot(look, vnorm(vcross(look, ap->up)), -(camPitch - 0.28f) * 0.8f);
+            cam.position = RV(eye);
+            cam.target = RV(vadd(eye, vscale(look, 10.0f)));
+            cam.up = RV(ap->up);
+            camPos = cam.position;
+        } else if (flying) {                             // chase: well back, rigidly behind (no lag at 250 kt)
+            float a = camHeading + PI + camYawOff, dist = camDist * 4.6f;
+            V3 want = vadd(tgt, v3(cosf(a) * cosf(camPitch) * dist, sinf(camPitch) * dist, sinf(a) * cosf(camPitch) * dist));
+            float gh = fmaxf(terrain_height(want.x, want.z), AP_SEA_Y) + 1.0f;
+            if (want.y < gh) want.y = gh;
+            camPos = RV(want);
+            cam.position = camPos;
+            cam.target = RV(tgt);
+            cam.up = (Vector3){0, 1, 0};
+        } else if (camMode == 0) {
             float a = camHeading + PI + camYawOff;
             V3 want = vadd(tgt, v3(cosf(a) * cosf(camPitch) * camDist, sinf(camPitch) * camDist + 0.8f, sinf(a) * cosf(camPitch) * camDist));
             float gh = terrain_height(want.x, want.z) + 0.5f;
@@ -2448,10 +2628,9 @@ int main(void) {
 
         // ---- sun shadow map: the casters, seen from the sun
         post_set_quality(fancy, fancy);
-        if (post_shadow_begin(RV(pc->pos), ENV, RV(AMB), RV(SUNC))) {
+        if (post_shadow_begin(flying ? RV(ap->pos) : RV(pc->pos), ENV, RV(AMB), RV(SUNC))) {
             depthOnly = 1;
             DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
-            if (world.map == MAP_AIRPORT && hasPlane) draw_plane();
             draw_trees(&world, cam.position);
             V3 eyeS = v3(cam.position.x, cam.position.y, cam.position.z);
             for (int i = 0; i < world.nplanes; i++) draw_airframe(&world.air[i], 0, eyeS);
@@ -2465,11 +2644,22 @@ int main(void) {
         BeginMode3D(cam);
         post_capture_camera(cam);
         for (int i = 0; i < CH_N * CH_N; i++) DrawModel(chunks[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
+        for (int i = 0; i < nExt; i++) DrawModel(extChunk[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
+        if (hasFar) DrawModel(farTerrain, (Vector3){0, 0, 0}, 1.0f, WHITE);
         if (hasMarkings) DrawModel(markings, (Vector3){0, 0, 0}, 1.0f, WHITE);
         rlDisableBackfaceCulling();
         post_begin_objects();
+        if (hasFar) {                                    // the bay
+            post_water_begin(ENV, RV(AMB), RV(SUNC), (float)GetTime());
+            const float E = AP_FAR * 1.5f;
+            rlBegin(RL_TRIANGLES);
+            rlColor4ub(255, 255, 255, 255); rlNormal3f(0, 1, 0);
+            rlVertex3f(-E, AP_SEA_Y, -E); rlVertex3f(-E, AP_SEA_Y, E); rlVertex3f(E, AP_SEA_Y, E);
+            rlVertex3f(-E, AP_SEA_Y, -E); rlVertex3f(E, AP_SEA_Y, E); rlVertex3f(E, AP_SEA_Y, -E);
+            rlEnd();
+            post_water_end();
+        }
         DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
-        if (world.map == MAP_AIRPORT && hasPlane) draw_plane();
         if (hasScreens) { post_set_billboards((float)GetTime(), 1.4f + 1.6f * ENV->lights); DrawModel(screens, (Vector3){0, 0, 0}, 1.0f, WHITE); }
         draw_trees(&world, cam.position);
         post_end_objects();
@@ -2491,6 +2681,10 @@ int main(void) {
         rlDrawRenderBatchActive();
         rlDisableDepthMask();
         draw_spray(cam);
+        draw_fx(cam, 0);
+        BeginBlendMode(BLEND_ADDITIVE);
+        draw_fx(cam, 1); draw_fx(cam, 1);                 // twice over: bright enough to bloom
+        EndBlendMode();
         if (weather == 2) draw_rain(v3(cam.position.x, cam.position.y, cam.position.z));
         if (weather == 3) draw_snow(cam);
         rlDrawRenderBatchActive();
@@ -2501,7 +2695,7 @@ int main(void) {
         if (!beamView) for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car_lights(&world.cars[i], lightsOn && (i == 0 || traffic_is_ai(i)));
         if (camMode && !beamView) { post_emissive_begin(0.6f + 1.4f * ENV->lights); draw_gauges(pc); post_emissive_end(); }
         post_emissive_begin(3.5f); draw_signal_lamps(1); post_emissive_end();
-        if (world.map == MAP_AIRPORT && hasPlane) { post_emissive_begin(2.5f + 2.0f * ENV->lights); draw_plane_lights((float)GetTime()); post_emissive_end(); }
+        if (world.flyable >= 0 && !beamView) draw_airliner_lights(&world.air[world.flyable], (float)GetTime(), lightsOn || flying);
         post_emissive_begin(0.5f); draw_signal_lamps(0); post_emissive_end();
         if (lightsOn) {
             rlDrawRenderBatchActive();
@@ -2533,7 +2727,8 @@ int main(void) {
             env.fogDensity *= 2.2f;
         }
         post_present(&env, (float)GetTime(), weather_wet(), weather_rain());
-        draw_hud(pc, &world, vF, pickerOpen ? (Controls){0} : ctl, slowmo, paused, help);
+        if (flying) draw_flight_hud(ap, &world, slowmo, paused, help);
+        else draw_hud(pc, &world, vF, pickerOpen ? (Controls){0} : ctl, slowmo, paused, help);
         if (pickerOpen) draw_picker();
         EndDrawing();
     }

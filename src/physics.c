@@ -43,16 +43,37 @@ static float wash_z0(void) { return g_map == MAP_NEWYORK ? -150.0f : g_map == MA
 static float wash_z1(void) { return g_map == MAP_NEWYORK ? -90.0f : g_map == MAP_AIRPORT ? 0.0f : 140.0f; }
 int dirt_at(float x, float z) { return fabsf(x) < 8.0f && z > wash_z0() && z < wash_z1(); }
 
+// Airport map: the bay. North of the field for its whole width; east of it the shore swings south,
+// and the runway carries on out into the water on a causeway. Returns metres seaward of the nearest
+// shore (negative on land).
+float sea_dist(float x, float z) {
+    if (g_map != MAP_AIRPORT) return -1e9f;
+    float shore = 252.0f - 190.0f * smooth01(300.0f, 420.0f, x) + 14.0f * sinf(x * 0.013f) + 5.0f * sinf(x * 0.041f + 1.0f);
+    float ds = z - shore;
+    float dc = fmaxf(x - (AP_RWY_X1 + 75.0f), fmaxf(116.0f - z, z - 216.0f));   // outside the causeway
+    return fminf(ds, dc);
+}
+
 float terrain_height(float x, float z) {
     float r = sqrtf(x * x + z * z);
     float hills = smooth01(90.0f, 170.0f, r);
-    if (g_map == MAP_AIRPORT && z > -20.0f) {          // the airfield is graded flat
-        float ox = fmaxf(0.0f, fabsf(x) - 262.0f), oz = fmaxf(0.0f, z - 218.0f);
-        hills *= smooth01(0.0f, 60.0f, fmaxf(ox, oz));
+    float far = 0.0f;
+    if (g_map == MAP_AIRPORT) {
+        float d = 1e9f;                                  // distance outside the graded airfield and causeway
+        if (z > -20.0f) d = fmaxf(fmaxf(0.0f, fabsf(x) - 262.0f), fmaxf(0.0f, z - 218.0f));
+        if (x > 200.0f) d = fminf(d, fmaxf(fmaxf(0.0f, x - (AP_RWY_X1 + 70.0f)), fmaxf(0.0f, fmaxf(118.0f - z, z - 214.0f))));
+        if (d < 1e8f) hills *= smooth01(0.0f, 60.0f, d);
+        // Coastal hills well away from the field, for something to fly around.
+        if (r > 600.0f) far = smooth01(600.0f, 2000.0f, r) * smooth01(0.0f, 500.0f, fminf(d, 500.0f)) * smooth01(10.0f, 700.0f, -sea_dist(x, z)) *
+                              (55.0f + 70.0f * sinf(x * 0.0017f + 0.6f) * cosf(z * 0.0013f) + 35.0f * sinf(x * 0.0041f - z * 0.0037f));
     }
     float h = hills * (7.0f * sinf(x * 0.019f) * cosf(z * 0.016f) +
                        3.0f * sinf(x * 0.047f + z * 0.031f + 1.3f) +
-                       1.2f * sinf(z * 0.11f - x * 0.05f));
+                       1.2f * sinf(z * 0.11f - x * 0.05f)) + far;
+    if (g_map == MAP_AIRPORT) {
+        float sd = sea_dist(x, z);
+        if (sd > 0.0f) h = lerpf(h, -4.5f - 40.0f * smooth01(40.0f, 600.0f, sd), smooth01(0.0f, 16.0f, sd));   // beach, then the seabed
+    }
     // Launch ramp straight ahead of spawn.
     if (x > 40.0f && x < 58.0f) {
         float wmask = smooth01(6.5f, 5.0f, fabsf(z));
@@ -943,6 +964,171 @@ static void af_shape(float s, float *r, float *y) {
     *y = AF_ST[i][2] + (AF_ST[i + 1][2] - AF_ST[i][2]) * t;
 }
 
+// ---- flight
+//
+// The airframe flies the way BeamNG's aircraft do: there is no rigid-body flight model, only forces
+// on nodes. Each lifting surface (three panels per wing, the centre section, the two stabilisers and
+// the fin) is a quad of nodes: every substep it reads its own velocity through the air and its own
+// angle of attack, and pushes along its normal, at its quarter-chord. Control inputs change a
+// panel's effective angle (ailerons on the outer wing, flaps inboard, elevator, rudder). Engines push
+// on their own nodes, so thrust, lift and weight all reach the fuselage through the beams - and bend
+// or break them if you overdo it. Wheels roll freely along the fuselage axis and grip sideways.
+#define AIR_RHO 1.225f
+#define ENGINE_THRUST 80000.0f                  // N per engine, static
+
+static void af_surf(Airframe *A, int n0, int n1, int n2, int n3, int m0, int m1, int m2, int m3, V3 ref, float a0, float slope, int ctl, float gain, float flap) {
+    if (A->nsurf >= 12) return;
+    int i = A->nsurf++;
+    A->surf[i].n[0] = n0; A->surf[i].n[1] = n1; A->surf[i].n[2] = n2; A->surf[i].n[3] = n3;
+    A->surf[i].m[0] = m0; A->surf[i].m[1] = m1; A->surf[i].m[2] = m2; A->surf[i].m[3] = m3;
+    A->surf[i].a0 = a0; A->surf[i].slope = slope; A->surf[i].ctl = (unsigned char)ctl; A->surf[i].gain = gain; A->surf[i].flap = flap;
+    V3 n = vcross(vsub(L[n1], L[n0]), vsub(L[n3], L[n0]));
+    A->surf[i].flip = vdot(n, ref) < 0 ? -1 : 1;
+    // The panel's nodes are wherever the structure put them, so the quad itself may sit at an angle
+    // to the fuselage axis. Measure that and fold it into a0, so a0 is the true rigging angle.
+    V3 c1 = vcross(vsub(L[n1], L[n0]), vsub(L[n2], L[n0])), c2 = vcross(vsub(L[n2], L[n0]), vsub(L[n3], L[n0]));
+    V3 nn = vscale(vnorm(vadd(c1, c2)), (float)A->surf[i].flip);
+    V3 chord = vnorm(vsub(vadd(L[n0], L[n1]), vadd(L[n2], L[n3])));
+    V3 fwd = vnorm(vsub(L[A->noseNode], L[A->tailNode]));
+    fwd.y = 0; fwd = vnorm(fwd);
+    A->surf[i].a0 = a0 - atan2f(-vdot(fwd, nn), vdot(fwd, chord));
+}
+
+static V3 af_centre(const Car *c, const int *ids, int n) {
+    V3 s = v3(0, 0, 0);
+    for (int i = 0; i < n; i++) s = vadd(s, c->n[ids[i]].p);
+    return vscale(s, 1.0f / n);
+}
+
+void airframe_update_frame(Airframe *A) {
+    Car *c = &A->c;
+    V3 p = v3(0, 0, 0), v = v3(0, 0, 0); float M = 0;
+    for (int i = 0; i < c->nn; i++) { float m = c->n[i].m; p = vadd(p, vscale(c->n[i].p, m)); v = vadd(v, vscale(c->n[i].v, m)); M += m; }
+    A->pos = vscale(p, 1.0f / M); A->vel = vscale(v, 1.0f / M);
+    c->pos = A->pos; c->vel = A->vel;
+    V3 f = vnorm(vsub(af_centre(c, A->ring[2], AF_RN), af_centre(c, A->ring[12], AF_RN)));
+    V3 r = vnorm(vsub(c->n[A->ring[8][0]].p, c->n[A->ring[8][AF_RN / 2]].p));
+    A->up = vnorm(vcross(r, f));
+    A->right = vnorm(vcross(f, A->up));
+    A->fwd = f;
+    c->fwd = f; c->up = A->up; c->right = A->right;
+    A->airspeed = vlen(A->vel);
+    A->aoa = A->airspeed > 3.0f ? atan2f(-vdot(A->vel, A->up), vdot(A->vel, f)) : 0.0f;
+    float agl = 1e9f;
+    for (int g = 0; g < 3; g++) for (int k = 0; k < 2; k++) {
+        V3 q = c->n[A->gearWheel[g][k]].p;
+        agl = fminf(agl, q.y - fmaxf(terrain_height(q.x, q.z), g_map == MAP_AIRPORT ? AP_SEA_Y : -1e9f));
+    }
+    A->agl = agl;
+}
+
+static void airframe_aero(Airframe *A, float h) {
+    Car *c = &A->c;
+    airframe_update_frame(A);
+    float V = A->airspeed;
+    // Controls: rate-limited, and scaled back with dynamic pressure so full stick stays flyable at speed.
+    float auth = clampf((70.0f / fmaxf(V, 35.0f)) * (70.0f / fmaxf(V, 35.0f)), 0.10f, 1.0f);
+    if (A->pilot) {
+        // Pitch trim: with the stick centred, wind in whatever elevator stops the nose moving.
+        float len = vlen(vsub(c->n[A->noseNode].p, c->n[A->tailNode].p));
+        float rate = vdot(vsub(c->n[A->noseNode].v, c->n[A->tailNode].v), A->up) / fmaxf(len, 1.0f);
+        if (!A->onGround && fabsf(A->pitch) < 0.05f && V > 40.0f) A->trim = clampf(A->trim - rate * 1.6f * h, -0.7f, 0.7f);
+        if (A->onGround) A->trim *= 1.0f - 0.5f * h;
+    }
+    if (A->wrecked) auth = 0;
+    float te = clampf(A->pitch * auth + A->trim, -1, 1), ta = clampf(A->roll * auth, -1, 1), tr = clampf(A->yaw * auth + A->roll * auth * 0.25f, -1, 1);
+    // Fly-by-wire wing leveller: with the roll keys released, ease the bank back toward level.
+    if (A->pilot && !A->onGround && fabsf(A->roll) < 0.05f) ta = clampf(-1.2f * asinf(clampf(-A->right.y, -1, 1)), -0.4f, 0.4f) * fminf(1.0f, auth * 3.0f);
+    A->elev += clampf(te - A->elev, -2.5f * h, 2.5f * h);
+    A->ail += clampf(ta - A->ail, -3.0f * h, 3.0f * h);
+    A->rud += clampf(tr - A->rud, -2.5f * h, 2.5f * h);
+    A->stall = 0;
+    for (int i = 0; i < A->nsurf; i++) {
+        Node *n0 = &c->n[A->surf[i].n[0]], *n1 = &c->n[A->surf[i].n[1]], *n2 = &c->n[A->surf[i].n[2]], *n3 = &c->n[A->surf[i].n[3]];
+        V3 v = vscale(vadd(vadd(n0->v, n1->v), vadd(n2->v, n3->v)), 0.25f);
+        float sp = vlen(v);
+        if (sp < 2.0f) continue;
+        V3 c1 = vcross(vsub(n1->p, n0->p), vsub(n2->p, n0->p)), c2 = vcross(vsub(n2->p, n0->p), vsub(n3->p, n0->p));
+        float area = 0.5f * (vlen(c1) + vlen(c2));
+        V3 n = vnorm(vadd(c1, c2));
+        n = vscale(n, (float)A->surf[i].flip);          // the side that was up (or right, for the fin) when built
+        V3 chord = vnorm(vsub(vadd(n0->p, n1->p), vadd(n2->p, n3->p)));
+        float alpha = atan2f(-vdot(v, n), vdot(v, chord)) + A->surf[i].a0 + A->surf[i].flap * A->flaps;
+        float d = A->surf[i].ctl == 1 ? A->ail : A->surf[i].ctl == 2 ? A->elev : A->surf[i].ctl == 3 ? A->rud : 0.0f;
+        alpha += A->surf[i].gain * d;
+        while (alpha > 3.14159f) alpha -= 6.28318f;
+        while (alpha < -3.14159f) alpha += 6.28318f;
+        // Attached flow: lift grows with the angle; past ~15 degrees it breaks away and the panel is just a plate.
+        float sa = sinf(alpha), st = smooth01(0.24f, 0.40f, fabsf(alpha));
+        float cn = lerpf(A->surf[i].slope * sa, (sa >= 0 ? 1.0f : -1.0f) * (0.65f + 0.6f * fabsf(sa)), st);
+        if (i < 7 && st > 0.3f && sp > 20.0f) A->stall = 1;
+        if (A->wrecked) cn *= 0.2f;                     // torn, buckled panels don't fly
+        float F = 0.5f * AIR_RHO * sp * sp * area * cn;
+        V3 fl = vscale(n, F * 0.1875f), ft = vscale(n, F * 0.0625f);    // acts at the quarter-chord, shared by both skins
+        add_force(n0, fl); add_force(n1, fl); add_force(n2, ft); add_force(n3, ft);
+        add_force(&c->n[A->surf[i].m[0]], fl); add_force(&c->n[A->surf[i].m[1]], fl);
+        add_force(&c->n[A->surf[i].m[2]], ft); add_force(&c->n[A->surf[i].m[3]], ft);
+    }
+    // Engines.
+    float lapse = clampf(1.0f - V / 300.0f, 0.15f, 1.0f);
+    for (int sd = 0; sd < 2; sd++) {
+        V3 dir = vnorm(vsub(af_centre(c, A->eng[sd][0], AF_EN), af_centre(c, A->eng[sd][1], AF_EN)));
+        V3 f = vscale(dir, A->wrecked ? 0.0f : (0.03f + 0.97f * A->thr) * ENGINE_THRUST * lapse / (2.0f * AF_EN));
+        for (int e = 0; e < 2; e++) for (int k = 0; k < AF_EN; k++) add_force(&c->n[A->eng[sd][e][k]], f);
+    }
+    // Drag: skin friction on everything (more with flaps down), and the fuselage's resistance to going sideways.
+    float M = 0;
+    for (int i = 0; i < c->nn; i++) M += c->n[i].m;
+    float kd = (1.5f + 1.6f * A->flaps + (A->wrecked ? 30.0f : 0.0f)) / M;
+    for (int i = 0; i < c->nn; i++) {
+        Node *N = &c->n[i];
+        float sp = vlen(N->v);
+        add_force(N, vscale(N->v, -kd * sp * N->m));
+    }
+    const float kc = 0.5f * AIR_RHO * 0.9f * 130.0f / (AF_RINGS * AF_RN);
+    for (int r = 0; r < AF_RINGS; r++) for (int k = 0; k < AF_RN; k++) {
+        Node *N = &c->n[A->ring[r][k]];
+        V3 vp = vsub(N->v, vscale(A->fwd, vdot(N->v, A->fwd)));
+        add_force(N, vscale(vp, -kc * vlen(vp)));
+    }
+}
+
+// Wheels: rolling along the fuselage axis (the nose leg steers), gripping sideways, braking on the mains.
+static void airframe_wheels(Airframe *A) {
+    Car *c = &A->c;
+    A->onGround = 0;
+    float steer = A->yaw * 0.55f * clampf(1.0f - A->airspeed / 60.0f, 0.12f, 1.0f);
+    for (int g = 0; g < 3; g++) for (int k = 0; k < 2; k++) {
+        Node *N = &c->n[A->gearWheel[g][k]];
+        float gh = terrain_height(N->p.x, N->p.z);
+        if (N->p.y >= gh) continue;
+        V3 n = terrain_normal(N->p.x, N->p.z);
+        N->p.y = gh + 1e-4f;
+        A->onGround = 1;
+        float vn = vdot(N->v, n);
+        if (vn >= 0) continue;
+        N->v = vsub(N->v, vscale(n, vn));
+        float dv = -vn;
+        V3 roll = g == 0 ? vrot(A->fwd, A->up, -steer) : A->fwd;
+        roll = vnorm(vsub(roll, vscale(n, vdot(roll, n))));
+        V3 lat = vcross(n, roll);
+        float vl = vdot(N->v, lat), vr = vdot(N->v, roll);
+        float ml = 0.9f * dv, mr = (0.012f + (g ? 0.55f * A->brake : 0.0f)) * dv;
+        N->v = vsub(N->v, vscale(lat, clampf(vl, -ml, ml)));
+        N->v = vsub(N->v, vscale(roll, clampf(vr, -mr, mr)));
+    }
+}
+
+// Anything that ends up in the bay floats low and is dragged to a stop.
+static void water_node(Node *N, float h) {
+    if (N->p.y >= AP_SEA_Y || g_map != MAP_AIRPORT) return;
+    if (terrain_height(N->p.x, N->p.z) > AP_SEA_Y - 0.2f) return;
+    float k = fminf((AP_SEA_Y - N->p.y) / 0.8f, 1.0f);
+    // Drag grows with speed: at flying speed water stops a node almost dead, which is what tears airframes apart.
+    N->v = vscale(N->v, 1.0f - fminf((3.5f + 0.30f * vlen(N->v)) * k * h, 0.5f));
+    N->v.y += GRAV * 1.5f * k * h;
+}
+
 static void airframe_bounds(Airframe *A) {
     Car *c = &A->c;
     V3 mn = c->n[0].p, mx = c->n[0].p;
@@ -983,9 +1169,10 @@ static void airframe_build(Airframe *A, V3 nose, V3 tail, unsigned seed) {
     for (int i = 0; i < AF_RINGS; i++)
         for (int k = 0; k < AF_RN; k++) {
             int a = A->ring[i][k], b = A->ring[i][(k + 1) % AF_RN];
-            af_beam(c, a, b, Yr);                                       // frame
-            af_beam(c, a, A->ring[i][(k + 3) % AF_RN], Yr);             // frame bracing (keeps the section round)
-            if (k < AF_RN / 2) af_beam(c, a, A->ring[i][k + AF_RN / 2], Yr);
+            float Yf = (i >= 6 && i <= 10) ? Ys : Yr;                   // heavier frames where the wing box goes through
+            af_beam(c, a, b, Yf);                                       // frame
+            af_beam(c, a, A->ring[i][(k + 3) % AF_RN], Yf);             // frame bracing (keeps the section round)
+            if (k < AF_RN / 2) af_beam(c, a, A->ring[i][k + AF_RN / 2], Yf);
             if (i + 1 < AF_RINGS) {
                 af_beam(c, a, A->ring[i + 1][k], Ys);                   // stringer
                 af_beam(c, a, A->ring[i + 1][(k + 1) % AF_RN], Yr);     // skin shear
@@ -1024,7 +1211,7 @@ static void airframe_build(Airframe *A, V3 nose, V3 tail, unsigned seed) {
             A->wing[side][j][1] = af_node(c, AFP(sLE, y - th * 0.5f, sg * span[j]), m);
             A->wing[side][j][2] = af_node(c, AFP(sTE, y + th * 0.3f, sg * span[j]), m * 0.8f);
             A->wing[side][j][3] = af_node(c, AFP(sTE, y - th * 0.3f, sg * span[j]), m * 0.8f);
-            af_brace(c, A->wing[side][j], 4, Ys);
+            af_brace(c, A->wing[side][j], 4, 0.06f);
             if (j) {
                 for (int p = 0; p < 4; p++) for (int q = 0; q < 4; q++) af_beam(c, A->wing[side][j - 1][p], A->wing[side][j][q], p == q ? Ys : Yr);
             }
@@ -1058,6 +1245,13 @@ static void airframe_build(Airframe *A, V3 nose, V3 tail, unsigned seed) {
             af_quad(A, W[j][2], W[j + 1][2], W[j + 1][3], W[j][3], 1, ahead);
         }
         af_quad(A, A->wing[side][3][0], A->wing[side][3][2], A->wing[side][3][3], A->wing[side][3][1], 4, ctrRef);
+        // Lifting panels: flaps on the inner two, aileron on the outer one (+roll = right wing down).
+        for (int j = 0; j + 1 < 4; j++)
+            af_surf(A, A->wing[side][j][0], A->wing[side][j + 1][0], A->wing[side][j + 1][2], A->wing[side][j][2],
+                    A->wing[side][j][1], A->wing[side][j + 1][1], A->wing[side][j + 1][3], A->wing[side][j][3], up, 0.052f, 4.4f,
+                    j == 2, j == 2 ? (side ? 0.20f : -0.20f) : 0.0f, j < 2 ? 0.17f : 0.0f);
+        if (side) af_surf(A, A->wing[0][0][0], A->wing[1][0][0], A->wing[1][0][2], A->wing[0][0][2],
+                          A->wing[0][0][1], A->wing[1][0][1], A->wing[1][0][3], A->wing[0][0][3], up, 0.052f, 4.4f, 0, 0, 0.17f);   // centre section
 
         // ---- engine: front ring (intake) and rear ring, on a pylon under station 1
         for (int e = 0; e < 2; e++)
@@ -1071,9 +1265,11 @@ static void airframe_build(Airframe *A, V3 nose, V3 tail, unsigned seed) {
         // Pylon: the top nodes of each ring (k = 1 is the top at 90 degrees) into the wing's lower surface.
         for (int e = 0; e < 2; e++) {
             int t = A->eng[side][e][1], tl = A->eng[side][e][0], tr = A->eng[side][e][2];
-            af_beam(c, t, A->wing[side][1][1], Yr); af_beam(c, t, A->wing[side][1][3], Yr);
-            af_beam(c, tl, A->wing[side][1][1], Yr); af_beam(c, tr, A->wing[side][1][1], Yr);
-            af_beam(c, t, A->wing[side][0][1], Yr); af_beam(c, t, A->wing[side][2][1], Yr);
+            const float Yp = 0.035f;                                   // pylons carry the thrust
+            af_beam(c, t, A->wing[side][1][1], Yp); af_beam(c, t, A->wing[side][1][3], Yp);
+            af_beam(c, tl, A->wing[side][1][1], Yp); af_beam(c, tr, A->wing[side][1][1], Yp);
+            af_beam(c, tl, A->wing[side][1][3], Yp); af_beam(c, tr, A->wing[side][1][3], Yp);
+            af_beam(c, t, A->wing[side][0][1], Yp); af_beam(c, t, A->wing[side][2][1], Yp);
         }
         V3 ec = AFP(14.7f, 1.95f, sg * 6.5f);
         for (int k = 0; k < AF_EN; k++) {
@@ -1089,26 +1285,28 @@ static void airframe_build(Airframe *A, V3 nose, V3 tail, unsigned seed) {
         int hs[4];
         hs[0] = af_node(c, AFP(33.6f, 4.95f, sg * 6.5f), 40.0f); hs[1] = af_node(c, AFP(33.6f, 4.75f, sg * 6.5f), 40.0f);
         hs[2] = af_node(c, AFP(35.4f, 4.9f, sg * 6.5f), 35.0f); hs[3] = af_node(c, AFP(35.4f, 4.8f, sg * 6.5f), 35.0f);
-        af_brace(c, hs, 4, Ys);
+        af_brace(c, hs, 4, 0.06f);
         int rk = side ? 5 : 0;                                         // the fuselage's side nodes at the tail
         int root[4] = {A->ring[14][rk], A->ring[15][rk], A->ring[16][rk], A->ring[15][side ? 6 : 9]};
         for (int p = 0; p < 4; p++) for (int q = 0; q < 4; q++) af_beam(c, hs[p], root[q], Ys);
         af_beam(c, hs[0], A->ring[15][side ? 4 : 1], Ys);
         af_quad(A, A->ring[14][rk], hs[0], hs[2], A->ring[16][rk], 4, vsub(c->n[hs[0]].p, v3(0, 3, 0)));
         af_quad(A, A->ring[14][rk], hs[1], hs[3], A->ring[16][rk], 1, vadd(c->n[hs[0]].p, v3(0, 3, 0)));
+        af_surf(A, A->ring[14][rk], hs[0], hs[2], A->ring[16][rk], A->ring[14][rk], hs[1], hs[3], A->ring[16][rk], up, -0.035f, 3.6f, 2, -0.32f, 0);    // elevator (+pitch = nose up)
     }
 
     // ---- fin
     int fn[4];
     fn[0] = af_node(c, AFP(33.0f, 11.0f, 0.15f), 30.0f); fn[1] = af_node(c, AFP(33.0f, 11.0f, -0.15f), 30.0f);
     fn[2] = af_node(c, AFP(36.0f, 11.0f, 0.1f), 25.0f);  fn[3] = af_node(c, AFP(36.0f, 11.0f, -0.1f), 25.0f);
-    af_brace(c, fn, 4, Ys);
+    af_brace(c, fn, 4, 0.06f);
     int top[4] = {A->ring[12][2], A->ring[13][2], A->ring[15][2], tipT};
     int topL[4] = {A->ring[12][3], A->ring[13][3], A->ring[15][3], A->ring[16][2]};
     for (int p = 0; p < 4; p++) for (int q = 0; q < 4; q++) { af_beam(c, fn[p], top[q], Ys); af_beam(c, fn[p], topL[q], Ys); }
     af_quad(A, A->ring[12][2], tipT, fn[2], fn[0], 2, AFP(32, 8, -5));
     af_quad(A, A->ring[12][3], tipT, fn[3], fn[1], 2, AFP(32, 8, 5));
     af_tri(A, fn[0], fn[1], A->ring[12][2], 2, AFP(40, 8, 0));
+    af_surf(A, A->ring[12][2], fn[0], fn[2], tipT, A->ring[12][3], fn[1], fn[3], tipT, right, 0.0f, 3.0f, 3, -0.35f, 0);                    // rudder (+yaw = nose right)
 
     // ---- landing gear: struts from the structure down to wheel nodes on the ground
     const float Yg = 0.05f;
@@ -1147,7 +1345,9 @@ static void airframe_build(Airframe *A, V3 nose, V3 tail, unsigned seed) {
             if (f < 1.0f) { B->k *= f; B->c *= f; }
         }
     }
+    for (int i = 0; i < c->nn; i++) c->rest[i] = L[i];
     airframe_bounds(A);
+    airframe_update_frame(A);
 }
 
 // Let a freshly built airframe settle onto its gear, then put it to sleep with that as its
@@ -1163,11 +1363,15 @@ static void airframe_integrate(World *w, Airframe *A, float h) {
     for (int i = 0; i < c->nn; i++) {
         Node *N = &c->n[i];
         N->v = vadd(N->v, vscale(N->f, h / N->m));
-        N->v = vscale(N->v, 0.9998f);                                 // structural damping
+        N->v = vadd(A->vel, vscale(vsub(N->v, A->vel), 0.9999f));     // structural damping (relative to the airframe's own motion)
         N->p = vadd(N->p, vscale(N->v, h));
-        vmax = fmaxf(vmax, fabsf(N->v.x) + fabsf(N->v.y) + fabsf(N->v.z));
+        float sp = fabsf(N->v.x) + fabsf(N->v.y) + fabsf(N->v.z);
+        if (sp > 400.0f) N->v = vscale(N->v, 400.0f / sp);            // wreckage can be violent; keep it finite
+        vmax = fmaxf(vmax, sp);
+        water_node(N, h);
     }
-    if (!(vmax < 400.0f)) c->exploded = 1;
+    if (!(vmax < 1e7f)) c->exploded = 1;                              // NaN
+    airframe_wheels(A);
     collide_static(w, c);
     airframe_bounds(A);
     A->vmax = vmax;
@@ -1178,6 +1382,17 @@ static void airframe_settle(World *w, Airframe *A) {
     for (int i = 0; i < A->c.nn; i++) A->c.n[i].v = v3(0, 0, 0);
     for (int i = 0; i < A->c.nb; i++) A->c.b[i].rest0 = A->c.b[i].rest;   // the settled shape is "undamaged"
     A->asleep = 1;
+    airframe_update_frame(A);
+}
+
+void world_respawn_plane(World *w) {
+    if (w->flyable < 0) return;
+    Airframe *A = &w->air[w->flyable];
+    const Plane *P = &w->planes[w->flyable];
+    int pilot = A->pilot;
+    airframe_build(A, v3(P->x, terrain_height(P->x, P->z), P->z), v3(P->dx, 0, P->dz), P->seed);
+    airframe_settle(w, A);
+    A->pilot = pilot;
 }
 
 // A car node against the airframe's skin: one-sided contact with each triangle, so a node can't slip
@@ -1246,9 +1461,10 @@ static void airframes_substep(World *w, float h, int phase) {
                 near = !(c->bmax.x + m < A->c.bmin.x || A->c.bmax.x + m < c->bmin.x || c->bmax.y + m < A->c.bmin.y ||
                          A->c.bmax.y + m < c->bmin.y || c->bmax.z + m < A->c.bmin.z || A->c.bmax.z + m < c->bmin.z);
             }
-            if (near) { A->asleep = 0; A->quiet = 0; }
+            if (near || A->pilot) { A->asleep = 0; A->quiet = 0; }
             if (A->asleep) continue;
             airframe_forces(A);
+            airframe_aero(A, h);
             for (int ci = 0; ci < w->ncars; ci++) {
                 Car *c = &w->cars[ci];
                 if (!c->active) continue;
@@ -1257,6 +1473,21 @@ static void airframes_substep(World *w, float h, int phase) {
             }
         } else if (!A->asleep) {
             airframe_integrate(w, A, h);
+            // Fracture: thin aluminium doesn't fold far before it lets go. A beam crushed or stretched
+            // permanently past these limits snaps, so a hard crash breaks the airframe into pieces
+            // rather than bouncing it or folding it like a concertina.
+            static unsigned tick;
+            if ((tick++ & 7) == 0) {
+                int broken = 0, bent = 0;
+                for (int i = 0; i < A->c.nb; i++) {
+                    Beam *B = &A->c.b[i];
+                    if (!B->broken && (B->rest < 0.80f * B->rest0 || B->rest > 1.12f * B->rest0)) B->broken = 1;
+                    broken += B->broken;
+                    bent += fabsf(B->rest - B->rest0) > 0.03f * B->rest0;
+                }
+                A->nbroken = broken;
+                if (broken > 30 || bent > 160) A->wrecked = 1;
+            }
             int touching = 0;
             for (int ci = 0; ci < w->ncars && !touching; ci++) {
                 const Car *c = &w->cars[ci];
@@ -1304,6 +1535,7 @@ void world_substep(World *w, float h) {
             N->v = vadd(N->v, vscale(N->f, h / N->m));
             N->p = vadd(N->p, vscale(N->v, h));
             if (!(fabsf(N->v.x) + fabsf(N->v.y) + fabsf(N->v.z) < 400.0f)) c->exploded = 1;  // also catches NaN
+            water_node(N, h);
         }
         collide_static(w, c);
     }
@@ -1344,7 +1576,8 @@ static const Rect AP_STREETS[] = {
 typedef struct { Rect r; int type; } Area;
 static const Area AP_AREAS[] = {
     {{AP_RWY_X0, AP_RWY_X1, AP_RWY_Z0, AP_RWY_Z1}, 4},                    // runway 09/27
-    {{-AP_TWY_X, AP_TWY_X, AP_TWY_Z0, AP_TWY_Z1}, 4},                     // parallel taxiway
+    {{-AP_TWY_X, AP_TWY_X1, AP_TWY_Z0, AP_TWY_Z1}, 4},                    // parallel taxiway
+    {{594, 606, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{1228, 1240, AP_TWY_Z1, AP_RWY_Z0}, 4},   // connectors out on the causeway
     {{-110, 112, AP_APRON_Z0, AP_APRON_Z1}, 5},                           // apron
     {{-212, -110, 122, AP_APRON_Z1}, 5},                                  // hangar apron
     {{-241, -229, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{-6, 6, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{229, 241, AP_TWY_Z1, AP_RWY_Z0}, 4},   // connectors
@@ -1458,6 +1691,7 @@ int world_add_tree(World *w, float x, float z, float h, int kind) {
 
 static void try_tree(World *w, float x, float z, float h, int kind, float spacing) {
     Rect r = {x, x, z, z};
+    if (sea_dist(x, z) > -6.0f) return;               // not on the beach or in the bay
     if (area_free(w, r, spacing)) world_add_tree(w, x, z, h, kind);
 }
 
@@ -1676,12 +1910,15 @@ static void build_airport(World *w) {
     add_building(w, (Rect){-205, -160, 70, 120}, BLD_HANGAR, 18.0f, 2);
     add_building(w, (Rect){-150, -114, 76, 120}, BLD_HANGAR, 15.0f, 2);
     add_plane(w, -128.0f, 130.0f, -1, 0);                                   // outside the hangars
+    w->flyable = w->nplanes;
+    add_plane(w, AP_RWY_X0 + 46.0f, 0.5f * (AP_RWY_Z0 + AP_RWY_Z1), -1, 0);  // lined up on runway 09: the one you can fly
     Block ind = {{34, 74, -38, -14}, 3};                                     // warehouses (shared proving ground)
     fill_block(w, &ind);
 }
 
 void world_init(World *w, int map) {
     memset(w, 0, sizeof *w);
+    w->flyable = -1;
     w->map = g_map = (map < 0 || map >= MAP_COUNT) ? MAP_DEFAULT : map;
     rng_state = 20240611u;
     // Crash-test wall behind the spawn point.

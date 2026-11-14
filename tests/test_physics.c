@@ -251,6 +251,30 @@ int main(void) {
         printf("airliner crash 100 km/h into an engine: truck %.1f km/h after, damage %.0f%%; airliner woke %d, deformed beams %d, engine pushed %.2f m, exploded %d\n",
                vlen(W.cars[0].vel) * 3.6f, W.cars[0].damage, !A->asleep, airframe_damaged_beams(A), vlen(vsub(A->c.n[A->eng[0][0][0]].p, e0)), A->c.exploded);
     }
+    {   // Flying the airliner on the runway: full throttle, take-off flaps, rotate at 62 m/s, climb out;
+        // then a steep dive into the bay, which should wreck it without the simulation blowing up.
+        world_init(&W, MAP_AIRPORT); W.ncars = 0;
+        Airframe *A = &W.air[W.flyable];
+        A->pilot = 1; A->thr = 1; A->flaps = 0.5f;
+        float x0 = A->pos.x, liftoff = -1, vmax = 0;
+        int t = 0;
+        for (; t < (int)(40 * SIM_HZ); t++) {
+            float pitch = asinf(A->fwd.y);
+            A->pitch = A->airspeed > 62 ? fminf(fmaxf((0.14f - pitch) * 6.0f, -1), 1) : 0;
+            world_substep(&W, H);
+            if (liftoff < 0 && A->agl > 2.0f) liftoff = A->pos.x - x0;
+            if (A->airspeed > vmax) vmax = A->airspeed;
+        }
+        printf("airliner flight: lift-off after %.0f m; 40 s in: %.0f m up, %.0f m/s, climbing %.1f m/s, bent beams %d, wrecked %d\n",
+               liftoff, A->pos.y, A->airspeed, A->vel.y, airframe_damaged_beams(A), A->wrecked);
+        for (t = 0; t < (int)(25 * SIM_HZ) && !A->c.exploded; t++) {
+            float pitch = asinf(A->fwd.y);
+            A->thr = 0.3f; A->pitch = fminf(fmaxf((-0.9f - pitch) * 6.0f, -1), 1);
+            world_substep(&W, H);
+        }
+        printf("airliner dive into the bay: wrecked %d, snapped beams %d, speed now %.1f m/s, lowest point %.1f m, exploded %d\n",
+               A->wrecked, A->nbroken, A->airspeed, A->c.bmin.y, A->c.exploded);
+    }
     {   // The generated map: buildings and trees exist and the test routes above are clear of them.
         world_init(&W, MAP_DEFAULT);
         printf("map: %d buildings, %d trees\n", W.nbld, W.ntree);

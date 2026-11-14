@@ -198,8 +198,20 @@ typedef struct {
     unsigned seed;
     int asleep;                 // not simulated until a car comes near
     float quiet, vmax;
+    // ---- flight (see physics.c): lifting surfaces, engines, wheels, and the pilot's controls
+    struct { int n[4], m[4]; float a0, slope, gain, flap; unsigned char ctl; signed char flip; } surf[12];   // LE in, LE out, TE out, TE in (m: the same corners on the other skin)
+    int nsurf;
+    int pilot;                  // flown by the player: never sleeps, controls below apply
+    float thr, pitch, roll, yaw, flaps, brake;   // inputs: throttle 0..1, stick/pedals -1..1, flaps 0..1, wheel brakes 0..1
+    float elev, ail, rud, trim; // control deflections after rate limits and speed scaling; pitch trim
+    V3 pos, vel, fwd, up, right;    // centre of mass and body axes
+    float airspeed, aoa, agl;   // m/s, wing angle of attack (rad), height of the wheels above the ground
+    int onGround, stall;
+    int wrecked;                // too broken to fly: engines and controls are dead, the wings no longer lift
+    int nbroken;                // snapped beams (updated as it breaks up)
 } Airframe;
 int airframe_damaged_beams(const Airframe *A);
+void airframe_update_frame(Airframe *A);
 
 typedef struct {
     int map;                    // MAP_*
@@ -210,12 +222,15 @@ typedef struct {
     int treesDown;
     Plane planes[MAX_PLANES]; int nplanes;
     Airframe air[MAX_PLANES];   // one per plane
+    int flyable;                // the airliner on the runway the player can fly, or -1
     // Uniform grid (CSR) of static obstacles: item < MAX_BOXES is a box, otherwise a tree.
     int gridStart[GRID_N * GRID_N + 1];
     int gridItem[MAX_GRID_ITEMS];
 } World;
 
 float terrain_height(float x, float z);
+float sea_dist(float x, float z);       // airport map: metres out to sea from the shore (negative on land); elsewhere far inland
+void world_respawn_plane(World *w);     // put the flyable airliner back on the runway threshold
 V3 terrain_normal(float x, float z);
 
 // New York map: a Midtown street grid north of the highway with Broadway cutting across 7th Avenue on a
@@ -234,7 +249,10 @@ float broadway_dist(float x, float z);  // perpendicular distance from the centr
 
 // Airport map: runway 09/27 along x north of the terminal, parallel taxiway, apron with gates.
 #define AP_RWY_X0 -245.0f
-#define AP_RWY_X1 245.0f
+#define AP_RWY_X1 1250.0f       // the runway runs out into the bay on a causeway
+#define AP_TWY_X1 1240.0f
+#define AP_SEA_Y -1.2f           // sea level of the bay
+#define AP_FAR 6000.0f           // the airport map's land and sea reach this far from the origin
 #define AP_RWY_Z0 168.0f
 #define AP_RWY_Z1 198.0f
 #define AP_TWY_Z0 140.0f

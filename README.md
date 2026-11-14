@@ -34,6 +34,24 @@ xcode-select --install        # once, if you don't have the command line tools
 | J | traffic on / off |
 | L | lighting: dusk / day |
 | F2 | sun shadows + ambient occlusion on / off |
+| Tab | Airport map: fly the airliner on the runway / back to the car |
+
+Flying (after **Tab** on the Airport map):
+
+| Key | Action |
+|---|---|
+| Shift / Ctrl | throttle up / down |
+| S / W (or ↓ / ↑) | pitch up / down: pull back to climb |
+| A / D (or ← / →) | roll left / right |
+| Q / E | rudder, and nose-wheel steering on the ground |
+| F | flaps: up / take-off / full |
+| Space | wheel brakes |
+| C | nose camera |
+| R | put the airliner back on the runway |
+
+To take off: flaps to take-off, full throttle, keep it on the centreline with Q/E, and pull back
+gently at about 135 kt. It lifts off after roughly 580 m. Let go of the keys and it holds wings
+level and its pitch attitude. To land: flaps full, about 140 kt, throttle to idle, brake.
 | O | weather: dry / wet / rain / snow |
 | Q | recover (fresh car, upright, in place) |
 | R | reset to start |
@@ -58,11 +76,13 @@ trunks stop you dead.
 - **Airport**: you start on the access road heading north toward a glass terminal, with a
   departures forecourt under a canopy, taxis at the kerb, and two car parks. Past the terminal,
   airliners sit nose-in at the gates with jet bridges, a control tower glows over the apron, and
-  floodlight masts light it. Further north are two hangars (one with an airliner outside) and a
-  490 m runway (09/27), with piano keys, touchdown bars, numbers, edge and threshold lights and
-  approach lights. A blue-lit taxiway runs alongside. Every so often an airliner lines up on the
-  runway, rolls and climbs out to the east. It is scenery and has no collision. The parked airliners are
-  soft bodies (see below), and the buildings are solid. The land around the airfield is flattened, and this map has no washboard.
+  floodlight masts light it. Further north are two hangars (one with an airliner outside) and
+  runway 09/27. Like the runways at SFO, it runs 1.5 km out into a bay on a causeway, with piano keys,
+  touchdown bars, numbers, edge and threshold lights and approach lights. A blue-lit taxiway runs
+  alongside. The bay lies north and east of the field. To the south and west the land rises into
+  coastal hills. The map reaches 6 km from the field in every direction, so there is room to fly.
+  An airliner waits lined up on runway 09: press **Tab** to fly it (see below). The parked airliners
+  are soft bodies and the buildings are solid. The field is graded flat, and this map has no washboard.
 
 ## How it works
 
@@ -126,8 +146,28 @@ trunks stop you dead.
   weight (the tail droops a few centimetres) but dents, bends and yields where you hit it.
   Car nodes collide with the airframe's skin triangles as well as its nodes, so nothing slips
   through the gaps of the coarse structure. An airframe settles when the map loads, sleeps at zero
-  cost, and wakes when a car comes within a metre. The beam view (**B**) shows its structure. The
-  airliner taking off is still a rigid model.
+  cost, and wakes when a car comes within a metre. The beam view (**B**) shows its structure.
+- **Flight**: the airliner flies the way BeamNG's aircraft do. There is no rigid-body flight model,
+  only forces on nodes. Each lifting surface (three panels per wing, the centre section, both
+  stabilisers and the fin) is a quad of nodes. Every substep it reads its own velocity through the
+  air and its own angle of attack, and pushes along its normal at its quarter-chord. Lift grows
+  with the angle up to about 15 degrees, then the panel stalls. Ailerons, flaps, elevator and rudder
+  change a panel's effective angle. Each engine pushes 80 kN on its own nodes, so thrust, lift and
+  weight all reach the fuselage through the beams. The wheels roll along the fuselage axis, grip
+  sideways, steer at the nose and brake on the mains. Two assists make it flyable on a keyboard:
+  control throws shrink as speed rises, and with the keys released it levels the wings and trims
+  out pitch rate.
+- **Crashes**: an airframe beam that is permanently crushed or stretched past a limit snaps, so a
+  hard impact breaks the airliner into pieces. Past a damage threshold it is wrecked: engines and
+  controls die and the buckled wings stop lifting. Skin whose frame has pulled apart is no longer
+  drawn, so breaks show as gaps. Wreckage scraping the ground throws dust and sparks. Breaking
+  up on land, or violently on water, starts a fuel fire with smoke that burns down over about a minute.
+  In the bay, drag rises with speed, so water stops a fast node almost dead: a dive tears the
+  airframe apart in spray, while a gentle ditching leaves it whole and afloat. Flames go out
+  under water.
+- **The bay and far terrain**: outside the detailed 600 m square the airport map adds fine terrain
+  along the causeway and one coarse sheet out to 6 km. The sea is a flat sheet shaded with rippling
+  normals, a Fresnel reflection of the sky and sun glitter.
 - **Maps**: `world_init(world, map)` builds the shared proving ground plus that map's own streets,
   buildings and landmarks. Road tables, the dirt washboard's location, Broadway and the city's
   extent all belong to the map, and the terrain asks the current map for them.
