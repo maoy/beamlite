@@ -2122,6 +2122,166 @@ int road_at(float x, float z) {
     return 0;
 }
 
+// ---- building reset
+static void shift_car(Car *c, V3 d) {
+    for (int i = 0; i < c->nn; i++) c->n[i].p = vadd(c->n[i].p, d);
+    car_update_frame(c);
+}
+// Move a vehicle out of building B's footprint through the nearest side, if it is in it.
+static int evict_from(Car *c, const Building *B) {
+    if (c->nn <= 0) return 0;
+    V3 lo = c->n[0].p, hi = lo;
+    for (int i = 1; i < c->nn; i++) {
+        V3 p = c->n[i].p;
+        lo = v3(fminf(lo.x, p.x), fminf(lo.y, p.y), fminf(lo.z, p.z));
+        hi = v3(fmaxf(hi.x, p.x), fmaxf(hi.y, p.y), fmaxf(hi.z, p.z));
+    }
+    const float gap = 0.8f;
+    if (hi.x < B->mn.x - gap || lo.x > B->mx.x + gap || hi.z < B->mn.z - gap || lo.z > B->mx.z + gap || lo.y > B->mx.y) return 0;
+    float px = B->mx.x + gap - lo.x, nx = hi.x - (B->mn.x - gap), pz = B->mx.z + gap - lo.z, nz = hi.z - (B->mn.z - gap);
+    float m = fminf(fminf(px, nx), fminf(pz, nz));
+    V3 d = m == px ? v3(px, 0, 0) : m == nx ? v3(-nx, 0, 0) : m == pz ? v3(0, 0, pz) : v3(0, 0, -nz);
+    // Rest it on the ground there, not hanging where the rubble was (or buried under a slope).
+    float clear = c->def ? c->def->spawnH + 0.2f : 0.3f;       // a car's lowest node is its floor, above the wheels
+    d.y = terrain_base(0.5f * (lo.x + hi.x) + d.x, 0.5f * (lo.z + hi.z) + d.z) + clear - lo.y;
+    shift_car(c, d);
+    for (int i = 0; i < c->nn; i++) c->n[i].v = v3(0, 0, 0);
+    return 1;
+}
+int world_reset_buildings(World *w) {
+    int n = 0;
+    for (int bi = 0; bi < w->nbld; bi++) {
+        Building *B = &w->bld[bi];
+        int was = B->collapsed;
+        B->damage = 0; B->hitImp = 0; B->hitP = B->hitN = v3(0, 0, 0); B->hitQuiet = 0;
+        B->collapsed = 0; B->collapseT = 0; B->fallDir = v3(0, 0, 0);
+        w->box[B->box].dead = 0;
+        if (!was) continue;
+        n++;
+        g_nmound = 0;                           // the piles go before anything is placed back on the ground
+        for (int i = 0; i < w->ncars; i++) if (w->cars[i].active) evict_from(&w->cars[i], B);
+        for (int i = 0; i < w->nplanes; i++) if (evict_from(&w->air[i].c, B)) { w->air[i].asleep = 0; airframe_update_frame(&w->air[i]); }
+    }
+    g_nmound = 0;
+    w->bldDown = 0; w->nbev = 0;
+    return n;
+}
+
+// ---- rubber ducks
+static unsigned duck_rng;
+static float dkrnd(void) { duck_rng = duck_rng * 1664525u + 1013904223u; return (duck_rng >> 8) / 16777216.0f; }
+static float dkrange(float a, float b) { return a + (b - a) * dkrnd(); }
+
+static int duck_spot_ok(const World *w, V3 p, int onGround) {
+    if (fabsf(p.x) > 285.0f || fabsf(p.z) > 285.0f) return 0;
+    if (p.x * p.x + p.z * p.z < 18.0f * 18.0f) return 0;               // not right where you start
+    for (int k = 0; k < 5; k++) {                                       // clear of walls and trunks all round
+        V3 q = v3(p.x + (k == 1 ? 0.5f : k == 2 ? -0.5f : 0), p.y + 0.2f, p.z + (k == 3 ? 0.5f : k == 4 ? -0.5f : 0));
+        if (world_point_solid(w, q)) return 0;
+    }
+    if (onGround) {
+        if (sea_dist(p.x, p.z) > -2.0f || p.y < AP_SEA_Y + 0.3f) return 0;
+        V3 n = terrain_normal(p.x, p.z);
+        if (n.y < 0.9f) return 0;
+        for (int i = 0; i < w->nplanes; i++) {                          // not under a parked aircraft
+            float dx = p.x - w->planes[i].x, dz = p.z - w->planes[i].z, r = w->planes[i].kind == AC_HELI ? 14.0f : 45.0f;
+            if (dx * dx + dz * dz < r * r) return 0;
+        }
+    }
+    for (int i = 0; i < w->nduck; i++) {
+        float dx = p.x - w->duck[i].p.x, dz = p.z - w->duck[i].p.z;
+        if (dx * dx + dz * dz < 22.0f * 22.0f) return 0;
+    }
+    return 1;
+}
+static void add_duck(World *w, V3 p, int bld, int water) {
+    if (w->nduck >= MAX_DUCKS) return;
+    w->duck[w->nduck++] = (Duck){p, dkrange(0, 6.2831853f), bld, water, 0};
+}
+
+static void place_ducks(World *w) {
+    duck_rng = 0x0D0C0u + 7919u * (unsigned)w->map;
+    w->nduck = 0;
+    int airport = w->map == MAP_AIRPORT;
+    // Tucked behind buildings, near a back corner, off the street.
+    for (int t = 0, got = 0; t < 600 && got < 8 && w->nbld > 0; t++) {
+        const Building *B = &w->bld[(int)(dkrnd() * w->nbld) % w->nbld];
+        int f = (int)(dkrnd() * 4) & 3;
+        if (f == B->front) continue;
+        float u = dkrnd() < 0.5f ? dkrange(0.06f, 0.2f) : dkrange(0.8f, 0.94f), out = 0.75f;
+        float x, z;
+        if (f < 2) { x = f == 0 ? B->mx.x + out : B->mn.x - out; z = lerpf(B->mn.z, B->mx.z, u); }
+        else { z = f == 2 ? B->mx.z + out : B->mn.z - out; x = lerpf(B->mn.x, B->mx.x, u); }
+        V3 p = v3(x, terrain_height(x, z), z);
+        if (road_at(x, z) || !duck_spot_ok(w, p, 1)) continue;
+        add_duck(w, p, -1, 0); got++;
+    }
+    // At the foot of a tree.
+    for (int t = 0, got = 0; t < 400 && got < 5 && w->ntree > 0; t++) {
+        const Tree *T = &w->tree[(int)(dkrnd() * w->ntree) % w->ntree];
+        float a = dkrange(0, 6.2831853f), r = T->r + 0.7f;
+        float x = T->x + r * cosf(a), z = T->z + r * sinf(a);
+        V3 p = v3(x, terrain_height(x, z), z);
+        if (road_at(x, z) || !duck_spot_ok(w, p, 1)) continue;
+        add_duck(w, p, -1, 0); got++;
+    }
+    // On flat roofs low enough to knock down with a car (anything at the airport: there is a helicopter).
+    for (int t = 0, got = 0; t < 600 && got < 3 && w->nbld > 0; t++) {
+        int bi = (int)(dkrnd() * w->nbld) % w->nbld;
+        const Building *B = &w->bld[bi];
+        if (B->roof > 0.0f || B->kind == BLD_WEDGE || B->kind == BLD_STEPS) continue;
+        if (!airport && B->mx.y - B->ground > 22.0f) continue;
+        if (B->mx.x - B->mn.x < 5.0f || B->mx.z - B->mn.z < 5.0f) continue;
+        V3 p = v3(dkrange(B->mn.x + 1.5f, B->mx.x - 1.5f), B->mx.y, dkrange(B->mn.z + 1.5f, B->mx.z - 1.5f));
+        if (!duck_spot_ok(w, p, 0)) continue;
+        add_duck(w, p, bi, 0); got++;
+    }
+    // Afloat in the bay, not far out.
+    for (int t = 0, got = 0; airport && t < 2000 && got < 2; t++) {
+        float x = dkrange(-250, 280), z = dkrange(120, 284);
+        float s = sea_dist(x, z);
+        if (s < 6.0f || s > 30.0f) continue;
+        V3 p = v3(x, AP_SEA_Y, z);
+        if (!duck_spot_ok(w, p, 0)) continue;
+        add_duck(w, p, -1, 1); got++;
+    }
+    // The rest out in the open: fields, forest, the odd corner.
+    for (int t = 0; t < 6000 && w->nduck < MAX_DUCKS; t++) {
+        float x = dkrange(-270, 270), z = dkrange(-270, 270);
+        V3 p = v3(x, terrain_height(x, z), z);
+        if (road_at(x, z) || !duck_spot_ok(w, p, 1)) continue;
+        add_duck(w, p, -1, 0);
+    }
+}
+
+V3 duck_pos(const World *w, const Duck *d, float time) {
+    V3 p = d->p;
+    if (d->bld >= 0 && w->bld[d->bld].collapsed) {      // the roof comes down with the building, onto the pile
+        float t = w->bld[d->bld].collapseT, k = t * t * (3.0f - 2.0f * t);
+        p.y += (terrain_height(p.x, p.z) - p.y) * k;
+    }
+    if (d->water) p.y = AP_SEA_Y + 0.06f * sinf(time * 1.7f + p.x * 0.3f) + 0.03f * sinf(time * 2.9f + p.z * 0.5f);
+    return p;
+}
+
+int duck_touch(World *w, const Car *c) {
+    if (c->nn <= 0) return -1;
+    V3 ref = c->n[0].p;
+    for (int i = 0; i < w->nduck; i++) {
+        Duck *d = &w->duck[i];
+        if (d->found) continue;
+        V3 q = duck_pos(w, d, 0);
+        q.y += 0.2f;
+        V3 r = vsub(q, ref);
+        if (vdot(r, r) > 60.0f * 60.0f) continue;
+        for (int k = 0; k < c->nn; k++) {
+            V3 e = vsub(c->n[k].p, q);
+            if (vdot(e, e) < 1.5f * 1.5f) { d->found = 1; return i; }
+        }
+    }
+    return -1;
+}
+
 int road_rects(float (*out)[4], int max, int *nHighway) {
     int n = 0;
     for (int i = 0; i < NROADS && n < max; i++, n++) { out[n][0] = ROADSM[i].x0; out[n][1] = ROADSM[i].x1; out[n][2] = ROADSM[i].z0; out[n][3] = ROADSM[i].z1; }
@@ -2472,4 +2632,5 @@ void world_init(World *w, int map) {
         else airframe_build(&w->air[i], v3(P->x, terrain_height(P->x, P->z), P->z), v3(P->dx, 0, P->dz), P->seed);
         airframe_settle(w, &w->air[i]);
     }
+    place_ducks(w);
 }

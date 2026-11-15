@@ -240,6 +240,17 @@ typedef struct {
 int airframe_damaged_beams(const Airframe *A);
 void airframe_update_frame(Airframe *A);
 
+// Rubber ducks hidden around the map: behind buildings, under trees, out in the fields, on low roofs
+// (knock the building down, or land on it), afloat in the bay. Touch one with your vehicle to find it.
+#define MAX_DUCKS 24
+typedef struct {
+    V3 p;                       // where it sits (on a roof: the roof top; afloat: the sea surface)
+    float yaw;
+    int bld;                    // the building whose roof it is on, or -1
+    int water;                  // afloat: bobs on the waves
+    int found;
+} Duck;
+
 typedef struct {
     int map;                    // MAP_*
     Car cars[MAX_CARS]; int ncars;
@@ -253,6 +264,7 @@ typedef struct {
     Airframe air[MAX_PLANES];   // one per plane
     int flyable;                // the airliner on the runway the player can fly, or -1
     int heli;                   // the helicopter on the helipad, or -1
+    Duck duck[MAX_DUCKS]; int nduck;
     // Uniform grid (CSR) of static obstacles: item < MAX_BOXES is a box, otherwise a tree.
     int gridStart[GRID_N * GRID_N + 1];
     int gridItem[MAX_GRID_ITEMS];
@@ -264,6 +276,12 @@ void world_respawn_plane(World *w);     // put the flyable airliner back on the 
 void world_respawn_heli(World *w);      // put the helicopter back on its pad, rotor stopped
 V3 terrain_normal(float x, float z);
 float building_mound(const World *w, int b, float x, float z);   // full height of building b's rubble pile above the ground at (x, z)
+// Stand every knocked-down building back up and clear the rubble. Vehicles caught inside a footprint
+// are moved out to the nearest side. Returns how many buildings came back.
+int world_reset_buildings(World *w);
+V3 duck_pos(const World *w, const Duck *d, float time);   // where to draw it now (rides a collapsing roof down, bobs afloat)
+// The player's vehicle touching an unfound duck: marks it found and returns its index, else -1.
+int duck_touch(World *w, const Car *c);
 
 // New York map: a Midtown street grid north of the highway with Broadway cutting across 7th Avenue on a
 // diagonal; the "bowtie" where they cross is centred on (TS_X, TS_Z). Broadway is pedestrian plaza

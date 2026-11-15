@@ -347,6 +347,40 @@ int main(void) {
             printf("helicopter landing at %.0f m/s: deformed beams %d, snapped %d\n", sink[k], airframe_damaged_beams(A), A->nbroken);
         }
     }
+    {   // Rebuilding: knock a building down, park a car on the rubble, stand it back up.
+        world_init(&W, MAP_DEFAULT); W.ncars = 1;
+        int b = -1;
+        for (int i = 0; i < W.nbld && b < 0; i++) if (W.bld[i].kind == BLD_HOUSE) b = i;
+        Building *B = &W.bld[b];
+        float cx = 0.5f * (B->mn.x + B->mx.x), cz = 0.5f * (B->mn.z + B->mx.z), g0 = terrain_height(cx, cz);
+        B->damage = B->strength * 1.1f;
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(-30, vehicle_def(VEH_HATCH)->spawnH, 0), 0, v3(1, 0, 0));
+        run(6.0f, idle);
+        float gm = terrain_height(cx, cz);
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(cx, gm + vehicle_def(VEH_HATCH)->spawnH + 0.3f, cz), 0, v3(1, 0, 0));
+        run(2.0f, idle);
+        int down = W.bldDown, n = world_reset_buildings(&W);
+        run(3.0f, idle);
+        V3 p = W.cars[0].pos;
+        int inside = p.x > B->mn.x && p.x < B->mx.x && p.z > B->mn.z && p.z < B->mx.z;
+        printf("rebuild: %d down, %d rebuilt; mound %.1f m -> %.1f m; standing %d, solid %d; car on the pile moved out %d, damage %.0f%%\n",
+               down, n, gm - g0, terrain_height(cx, cz) - g0, !B->collapsed, world_point_solid(&W, v3(cx, B->ground + 1, cz)), !inside, W.cars[0].damage);
+    }
+    {   // Rubber ducks: hidden on every map, and found by touching one.
+        for (int m = 0; m < MAP_COUNT; m++) {
+            world_init(&W, m); W.ncars = 1;
+            int roof = 0, water = 0, solid = 0;
+            for (int i = 0; i < W.nduck; i++) { roof += W.duck[i].bld >= 0; water += W.duck[i].water; solid += world_point_solid(&W, vadd(W.duck[i].p, v3(0, 0.2f, 0))); }
+            int gi = -1;
+            for (int i = 0; i < W.nduck && gi < 0; i++) if (W.duck[i].bld < 0 && !W.duck[i].water) gi = i;
+            V3 q = W.duck[gi].p;
+            car_build_vehicle(&W.cars[0], VEH_HATCH, v3(q.x - 6, q.y + vehicle_def(VEH_HATCH)->spawnH + 0.2f, q.z), 0, v3(1, 0, 0));
+            int before = duck_touch(&W, &W.cars[0]), got = -1;
+            for (int k = 0; k < 60 && got < 0; k++) { run(0.05f, (Controls){0.5f, 0, 0, 0}); got = duck_touch(&W, &W.cars[0]); }
+            printf("ducks on %-8s %d (%d on roofs, %d afloat, %d inside something); drove into #%d: found %d (none before %d)\n",
+                   map_name(m), W.nduck, roof, water, solid, gi, got == gi, before < 0);
+        }
+    }
     {   // The generated map: buildings and trees exist and the test routes above are clear of them.
         world_init(&W, MAP_DEFAULT);
         printf("map: %d buildings, %d trees\n", W.nbld, W.ntree);

@@ -39,6 +39,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | R | reset to start |
 | T / P | slow-mo / pause |
 | K | clear skid marks |
+| U | rebuild every knocked-down building (clears the rubble; anything parked on it is moved out) |
 | Tab | Airport map: fly the airliner on the runway, then the helicopter on the pad, then back to the car |
 
 Flying the airliner (first **Tab** on the Airport map):
@@ -82,6 +83,13 @@ trunks stop you dead. Every building on every map can be knocked down: hard hits
 the walls and throw out masonry, and once a building has taken enough it collapses into a rubble
 pile you can drive over. A fast car takes out a house, a semi gets through warehouses and
 apartment blocks, and the towers, hangars and terminal take several big hits (or the airliner).
+Press **U** to stand them all back up.
+
+Each map hides 24 small rubber ducks: tucked behind buildings, at the foot of trees, out in the
+fields and forest, and a few on low flat roofs (knock the building down and the duck comes down
+with it, or land the helicopter on the roof). At the airport two are afloat in the bay. Touch one
+with whatever you are driving or flying to find it; the count shows at the top of the screen, and
+ducks you have found stay found when you switch maps.
 
 - **Default**: two small towns up the cross road to the left (+z), with avenues, side streets and
   pavements: houses, shops, apartment blocks, a couple of towers and warehouses, with saplings

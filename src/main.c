@@ -2775,7 +2775,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
         const char *lines[] = {
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
-            "T  slow-mo      P  pause      K  clear skids      H  help", "G  drop tailgate      L  lighting      O  weather",
+            "T  slow-mo      P  pause      K  clear skids      H  help", "U  rebuild knocked-down buildings", "G  drop tailgate      L  lighting      O  weather",
             "M  map: Default / New York / Airport      J  traffic",
             "TAB  fly: airliner, then helicopter (Airport map)",
             "F2  sun shadows + ambient occlusion on / off",
@@ -2783,7 +2783,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
             "New York: Times Square up 7th Avenue, straight ahead."};
         int n = sizeof lines / sizeof lines[0];
         hud_panel(16, 66, 420, 20 + n * 21);
-        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 11 ? RAYWHITE : HUD_DIM);
+        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 12 ? RAYWHITE : HUD_DIM);
     }
 }
 
@@ -2984,6 +2984,77 @@ static void spawn_player(World *w) {
 
 static const V3 TAXI = {0.96f, 0.74f, 0.08f};
 
+// ---------------------------------------------------------------- rubber ducks ----
+static unsigned char duckFound[MAP_COUNT][MAX_DUCKS];     // found this session, per map (survives map switches)
+
+// An ellipsoid in the duck's frame (x forward, y up, z right; yaw about y), smooth-shaded.
+static void duck_blob(V3 base, float cy, float sy, V3 c, V3 r, Color col, float gloss, V3 eye) {
+    enum { SL = 12, ST = 7 };
+    V3 P[ST + 1][SL + 1], N[ST + 1][SL + 1];
+    for (int i = 0; i <= ST; i++) {
+        float th = PI * i / ST, s = sinf(th), y = cosf(th);
+        for (int j = 0; j <= SL; j++) {
+            float ph = 2 * PI * j / SL, x = s * cosf(ph), z = s * sinf(ph);
+            V3 l = v3(c.x + r.x * x, c.y + r.y * y, c.z + r.z * z), ln = vnorm(v3(x / r.x, y / r.y, z / r.z));
+            P[i][j] = vadd(base, v3(l.x * cy - l.z * sy, l.y, l.x * sy + l.z * cy));
+            N[i][j] = v3(ln.x * cy - ln.z * sy, ln.y, ln.x * sy + ln.z * cy);
+        }
+    }
+    for (int i = 0; i < ST; i++)
+        for (int j = 0; j < SL; j++) {
+            int q[6][2] = {{i, j}, {i + 1, j}, {i + 1, j + 1}, {i, j}, {i + 1, j + 1}, {i, j + 1}};
+            for (int k = 0; k < 6; k++) {
+                V3 p = P[q[k][0]][q[k][1]];
+                Color cc = shade_paint(col, N[q[k][0]][q[k][1]], p, eye, gloss);
+                rlColor4ub(cc.r, cc.g, cc.b, cc.a);
+                rlVertex3f(p.x, p.y, p.z);
+            }
+        }
+}
+static void draw_ducks(const World *w, V3 eye, float time) {
+    const Color yel = {255, 204, 26, 255}, org = {255, 112, 18, 255}, blk = {20, 20, 22, 255};
+    rlBegin(RL_TRIANGLES);
+    for (int i = 0; i < w->nduck; i++) {
+        const Duck *d = &w->duck[i];
+        if (d->found) continue;
+        V3 b = duck_pos(w, d, time);
+        float dx = b.x - eye.x, dz = b.z - eye.z;
+        if (dx * dx + dz * dz > 160.0f * 160.0f) continue;
+        float yaw = d->yaw + (d->water ? 0.25f * sinf(time * 0.4f + (float)i) : 0.0f), cy = cosf(yaw), sy = sinf(yaw);
+        duck_blob(b, cy, sy, v3(0, 0.17f, 0), v3(0.27f, 0.15f, 0.2f), yel, 0.7f, eye);           // body
+        duck_blob(b, cy, sy, v3(-0.21f, 0.25f, 0), v3(0.09f, 0.08f, 0.1f), yel, 0.7f, eye);      // tail
+        duck_blob(b, cy, sy, v3(0.13f, 0.39f, 0), v3(0.12f, 0.12f, 0.12f), yel, 0.7f, eye);      // head
+        duck_blob(b, cy, sy, v3(0.26f, 0.365f, 0), v3(0.08f, 0.028f, 0.07f), org, 0.6f, eye);    // beak
+        for (int s = -1; s <= 1; s += 2) duck_blob(b, cy, sy, v3(0.21f, 0.43f, 0.065f * s), v3(0.025f, 0.03f, 0.025f), blk, 0.9f, eye);
+    }
+    rlEnd();
+}
+
+static char toastMsg[64];
+static float toastT;
+static void hud_toast(const char *s) { snprintf(toastMsg, sizeof toastMsg, "%s", s); toastT = 2.8f; }
+
+// Duck count (top centre, once you have found one) and the last message.
+static void draw_duck_hud(const World *w, float dt) {
+    float sw = (float)GetScreenWidth();
+    int nf = 0; for (int i = 0; i < w->nduck; i++) nf += w->duck[i].found;
+    if (nf > 0 && w->nduck > 0) {
+        const char *s = TextFormat("DUCKS  %d / %d", nf, w->nduck);
+        float tw = txtw(s, 18), pw = tw + 58, x = sw * 0.5f - pw * 0.5f;
+        hud_panel(x, 16, pw, 34);
+        DrawCircle((int)x + 22, (int)35, 8, (Color){255, 204, 26, 255});            // a little duck
+        DrawCircle((int)x + 28, (int)26, 5, (Color){255, 204, 26, 255});
+        DrawTriangle((Vector2){x + 32, 24}, (Vector2){x + 32, 29}, (Vector2){x + 37, 27}, (Color){255, 112, 18, 255});
+        txt(s, x + 44, 24, 18, nf == w->nduck ? (Color){255, 204, 26, 255} : RAYWHITE);
+    }
+    if (toastT > 0) {
+        toastT -= dt;
+        float a = fminf(1.0f, toastT / 0.5f), tw = txtw(toastMsg, 30);
+        Color c = {255, 214, 60, (unsigned char)(255 * a)};
+        txt(toastMsg, sw * 0.5f - tw * 0.5f, 64, 30, c);
+    }
+}
+
 // Build a map: world, meshes, road data for the renderer, player and parked vehicles.
 static int trafficOn = 1;
 #define TRAFFIC_CARS 8
@@ -3020,6 +3091,7 @@ static void load_map(World *w, int map, int *nextSlot) {
         car_build_vehicle(&w->cars[2], VEH_PICKUP, v3(5.8f, CAR_SPAWN_H, 30), -PI / 2, PALETTE[2]);
     }
     for (int i = 1; i < w->ncars; i++) w->cars[i].ctl = (Controls){0, 0.6f, 0, 1};
+    for (int i = 0; i < w->nduck; i++) w->duck[i].found = duckFound[map][i];   // ducks stay found for the session
     if (trafficOn) traffic_init(w, TRAFFIC_CARS, w->cars[0].pos);
     *nextSlot = w->ncars;
 }
@@ -3134,6 +3206,11 @@ int main(void) {
             nextSlot = world.ncars;
         }
         if (IsKeyPressed(KEY_M)) { flying = 0; load_map(&world, (world.map + 1) % MAP_COUNT, &nextSlot); ap = NULL; }
+        if (IsKeyPressed(KEY_U)) {                      // rebuild every knocked-down building
+            int n = world_reset_buildings(&world);
+            if (n > 0) { destruction_reset(); build_world_meshes(&world); }
+            hud_toast(n ? TextFormat("%d BUILDING%s REBUILT", n, n == 1 ? "" : "S") : "NOTHING TO REBUILD");
+        }
         if (IsKeyPressed(KEY_B)) beamView = !beamView;
         if (IsKeyPressed(KEY_C)) camMode = !camMode;
         if (IsKeyPressed(KEY_P)) paused = !paused;
@@ -3226,6 +3303,17 @@ int main(void) {
             if (world.cars[i].glassNew) { spawn_glass(&world.cars[i], world.cars[i].glassNew); world.cars[i].glassNew = 0; }
         update_destruction(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         update_debris(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
+        if (!paused) {                                  // rubber ducks: touch one with whatever you are driving or flying
+            const Car *you = flying && ap ? &ap->c : &world.cars[0];
+            int di = duck_touch(&world, you);
+            if (di >= 0) {
+                duckFound[world.map][di] = 1;
+                int nf = 0; for (int i = 0; i < world.nduck; i++) nf += world.duck[i].found;
+                V3 q = duck_pos(&world, &world.duck[di], (float)GetTime());
+                for (int k = 0; k < 24; k++) fx_emit(FX_SPARK, vadd(q, v3(0, 0.3f, 0)), vadd(frand3(3.0f), v3(0, 3.0f + 2.0f * frand(), 0)), 0.3f + 0.3f * frand(), 0.25f + 0.3f * frand());
+                hud_toast(nf == world.nduck ? TextFormat("ALL %d DUCKS FOUND!", nf) : TextFormat("RUBBER DUCK  %d / %d", nf, world.nduck));
+            }
+        }
         update_shards(paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         if (steps) update_skids(&world);
         refresh_tree_patches(&world);
@@ -3367,6 +3455,7 @@ int main(void) {
         rlTexCoord2f(0, 0);
         for (int i = 0; i < world.nplanes; i++) if (airframe_in_view(&world.air[i], cam)) draw_airframe(&world.air[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z));
         for (int i = 0; i < world.ncars; i++) if (world.cars[i].active) draw_car(&world.cars[i], beamView, v3(cam.position.x, cam.position.y, cam.position.z), camMode && i == 0);
+        draw_ducks(&world, v3(cam.position.x, cam.position.y, cam.position.z), (float)GetTime());
         if (pbrOn) { pbrOn = 0; post_paint_end(); }
         rlNormal3f(0, 0, 1);
         post_end_objects();
@@ -3431,6 +3520,7 @@ int main(void) {
         if (flying == 2) draw_heli_hud(ap, &world, slowmo, paused, help);
         else if (flying) draw_flight_hud(ap, &world, slowmo, paused, help);
         else draw_hud(pc, &world, vF, pickerOpen ? (Controls){0} : ctl, slowmo, paused, help);
+        draw_duck_hud(&world, dt);
         if (pickerOpen) draw_picker();
         PMARK(6);
         EndDrawing();
