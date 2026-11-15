@@ -1066,8 +1066,14 @@ void airframe_update_frame(Airframe *A) {
     for (int i = 0; i < c->nn; i++) { float m = c->n[i].m; p = vadd(p, vscale(c->n[i].p, m)); v = vadd(v, vscale(c->n[i].v, m)); M += m; }
     A->pos = vscale(p, 1.0f / M); A->vel = vscale(v, 1.0f / M);
     c->pos = A->pos; c->vel = A->vel;
-    V3 f = vnorm(vsub(af_centre(c, A->ring[2], AF_RN), af_centre(c, A->ring[12], AF_RN)));
-    V3 r = vnorm(vsub(c->n[A->ring[8][0]].p, c->n[A->ring[8][AF_RN / 2]].p));
+    V3 f, r;
+    if (A->kind == AC_HELI) {                   // cabin: windscreen frame to back wall, left belt to right belt
+        f = vnorm(vsub(af_centre(c, A->ring[1], 6), af_centre(c, A->ring[4], 6)));
+        r = vnorm(vsub(vadd(c->n[A->ring[2][1]].p, c->n[A->ring[3][1]].p), vadd(c->n[A->ring[2][4]].p, c->n[A->ring[3][4]].p)));
+    } else {
+        f = vnorm(vsub(af_centre(c, A->ring[2], AF_RN), af_centre(c, A->ring[12], AF_RN)));
+        r = vnorm(vsub(c->n[A->ring[8][0]].p, c->n[A->ring[8][AF_RN / 2]].p));
+    }
     A->up = vnorm(vcross(r, f));
     A->right = vnorm(vcross(f, A->up));
     A->fwd = f;
@@ -1431,7 +1437,7 @@ static void airframe_integrate(World *w, Airframe *A, float h) {
         water_node(N, h);
     }
     if (!(vmax < 1e7f)) c->exploded = 1;                              // NaN
-    airframe_wheels(A);
+    if (A->kind == AC_AIRLINER) airframe_wheels(A);                    // (a helicopter's skids are just nodes on the ground)
     collide_static(w, c);
     airframe_bounds(A);
     A->vmax = vmax;
@@ -1453,6 +1459,342 @@ void world_respawn_plane(World *w) {
     airframe_build(A, v3(P->x, terrain_height(P->x, P->z), P->z), v3(P->dx, 0, P->dz), P->seed);
     airframe_settle(w, A);
     A->pilot = pilot;
+}
+
+// ---------------------------------------------------------------- helicopter --
+//
+// A light single-engine utility helicopter, after the H125 class: ~2.1 t, a 10.7 m three-blade main
+// rotor, a cabin of five frames, a tapering tail boom with a fin, stabiliser and tail rotor, and two
+// skids on cross tubes. Like the airliner it is only nodes and beams; it flies by forces on nodes:
+//  - the main rotor's thrust acts at the rotor head along the mast. It grows with the square of rotor
+//    speed and the collective, falls off as the helicopter climbs through its own downwash (which is
+//    what makes a fixed collective settle into a steady climb or descent), and gains a little in
+//    ground effect and in forward flight (translational lift);
+//  - the cyclic and pedals go through a stability-augmentation loop, as on any modern helicopter: the
+//    stick commands a pitch and bank angle and the pedals a yaw rate. The loop's output is an angular
+//    acceleration, applied to every node as m (alpha x r), which turns the whole airframe without
+//    pushing on it. Its authority is the rotor's: nothing at rest, full only with the rotor turning
+//    and carrying the weight;
+//  - drag on the fuselage and rotor disc, more sideways and vertically than nose-first.
+// Blade tips that touch the ground, a wall, a tree or a vehicle break the rotor: the lift is gone. A
+// broken tail rotor leaves the main rotor's torque unopposed and the helicopter spins.
+#define HELI_R 5.35f                    // main rotor radius
+#define HELI_TR_R 0.82f                 // tail rotor radius
+#define HELI_TMAX 1.85f                 // rotor thrust at full collective and rpm, in weights
+
+static void heli_mesh(Car *c, const int *ids, int n, float r, float Y) {     // beam every pair closer than r
+    for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++)
+        if (vlen(vsub(L[ids[i]], L[ids[j]])) < r) af_beam(c, ids[i], ids[j], Y);
+}
+
+static void heli_build(Airframe *A, V3 at, V3 tail, unsigned seed) {
+    Car *c = &A->c;
+    memset(A, 0, sizeof *A);
+    memset(ADJ, 0, sizeof ADJ);
+    c->active = 1; c->grip = 1.0f;
+    A->seed = seed; A->kind = AC_HELI; A->strikeT = -1;
+    V3 fw = vscale(vnorm(tail), -1.0f), up = v3(0, 1, 0), rt = vcross(fw, up);   // heli-local x forward, y up, z right
+    #define HP(x, y, z) vadd(at, vadd(vadd(vscale(fw, (x)), vscale(up, (y))), vscale(rt, (z))))
+    // Cabin frames: x, floor y and half-width, belt y and half-width, roof y and half-width.
+    static const float CAB[5][7] = {
+        { 1.95f, 0.78f, 0.36f, 1.30f, 0.56f, 1.72f, 0.30f},        // nose (chin bubble)
+        { 1.30f, 0.56f, 0.66f, 1.32f, 0.82f, 2.06f, 0.56f},        // windscreen frame
+        { 0.20f, 0.50f, 0.76f, 1.34f, 0.86f, 2.16f, 0.70f},        // front doors
+        {-1.15f, 0.50f, 0.76f, 1.34f, 0.86f, 2.16f, 0.70f},        // rear doors
+        {-2.25f, 0.76f, 0.56f, 1.42f, 0.64f, 2.10f, 0.58f}};       // cabin back wall, under the engine
+    int cab[64], nc = 0;
+    for (int r = 0; r < 5; r++) {
+        const float *F = CAB[r];
+        float yk[6] = {F[1], F[3], F[5], F[5], F[3], F[1]}, zk[6] = {F[2], F[4], F[6], -F[6], -F[4], -F[2]};
+        for (int k = 0; k < 6; k++) {                           // k: floor R, belt R, roof R, roof L, belt L, floor L
+            float m = k == 0 || k == 5 ? 46.0f : 30.0f;            // seats, fuel and floor structure low down
+            A->ring[r][k] = af_node(c, HP(F[0], yk[k], zk[k]), r == 0 ? 18.0f : m);
+            cab[nc++] = A->ring[r][k];
+        }
+    }
+    int tip = af_node(c, HP(2.45f, 1.12f, 0), 16.0f);
+    cab[nc++] = tip;
+    A->noseNode = tip;
+    // Engine and gearbox deck on the roof (heavy), then the boom.
+    int deck[4] = {af_node(c, HP(0.15f, 2.52f, 0.46f), 85.0f), af_node(c, HP(0.15f, 2.52f, -0.46f), 85.0f),
+                   af_node(c, HP(-1.85f, 2.46f, 0.44f), 85.0f), af_node(c, HP(-1.85f, 2.46f, -0.44f), 85.0f)};
+    for (int i = 0; i < 4; i++) cab[nc++] = deck[i];
+    static const float BOOM[4][3] = {{-3.25f, 1.62f, 0.36f}, {-4.95f, 1.76f, 0.26f}, {-6.65f, 1.90f, 0.19f}, {-7.85f, 2.00f, 0.15f}};
+    int boom[4][3];
+    for (int r = 0; r < 4; r++) {
+        float x = BOOM[r][0], y = BOOM[r][1], s = BOOM[r][2];
+        boom[r][0] = af_node(c, HP(x, y + s, 0), 13.0f);                  // top
+        boom[r][1] = af_node(c, HP(x, y - 0.6f * s, 0.85f * s), 13.0f);   // bottom right
+        boom[r][2] = af_node(c, HP(x, y - 0.6f * s, -0.85f * s), 13.0f);  // bottom left
+        for (int k = 0; k < 3; k++) A->ring[5 + r][k] = boom[r][k];
+    }
+    int finTop = af_node(c, HP(-8.55f, 3.25f, 0), 7.0f), finLE = af_node(c, HP(-7.70f, 2.95f, 0), 7.0f);
+    int finLow = af_node(c, HP(-8.25f, 1.15f, 0), 7.0f);
+    A->tailNode = af_node(c, HP(-8.45f, 2.05f, 0), 9.0f);
+    A->trHub = af_node(c, HP(-8.25f, 2.30f, -0.38f), 10.0f);
+    int stab[4] = {af_node(c, HP(-6.05f, 1.92f, 1.15f), 6.0f), af_node(c, HP(-6.55f, 1.92f, 1.15f), 6.0f),
+                   af_node(c, HP(-6.05f, 1.92f, -1.15f), 6.0f), af_node(c, HP(-6.55f, 1.92f, -1.15f), 6.0f)};
+    A->stabTip[0] = stab[1]; A->stabTip[1] = stab[3]; A->finTop = finTop;
+    // Skids: upturned tip, front cross-tube foot, mid, rear foot, tail end; [0] right, [1] left.
+    for (int sd = 0; sd < 2; sd++) {
+        float z = sd ? -1.12f : 1.12f;
+        const float sx[5] = {2.05f, 1.05f, 0.0f, -1.10f, -1.95f}, sy[5] = {0.32f, 0.05f, 0.05f, 0.05f, 0.08f};
+        for (int i = 0; i < 5; i++) A->skid[sd][i] = af_node(c, HP(sx[i], sy[i], z), 11.0f);
+    }
+    // Mast and rotor head: placed over the centre of mass, so the rotor lifts it level.
+    V3 com = v3(0, 0, 0); float M = 0;
+    for (int i = 0; i < c->nn; i++) { com = vadd(com, vscale(L[i], c->n[i].m)); M += c->n[i].m; }
+    float cx = vdot(vsub(vscale(com, 1.0f / M), at), fw);
+    A->mast[0] = af_node(c, HP(cx, 2.70f, 0), 140.0f);
+    A->mast[1] = af_node(c, HP(cx, 3.32f, 0), 55.0f);
+    for (int k = 0; k < 4; k++) {
+        float a = k * 1.5707963f + 0.7853982f;
+        A->hub[k] = af_node(c, HP(cx + 0.42f * cosf(a), 3.30f, 0.42f * sinf(a)), 30.0f);   // hub and blade roots
+    }
+    // ---- structure
+    const float Ys = 0.035f, Yb = 0.032f;
+    heli_mesh(c, cab, nc, 2.05f, Ys);                           // cabin shell, nose and deck as one truss
+    int head[7] = {A->mast[0], A->mast[1], A->hub[0], A->hub[1], A->hub[2], A->hub[3], deck[0]};
+    af_brace(c, head, 6, 0.06f);
+    for (int i = 0; i < 4; i++) { af_beam(c, A->mast[0], deck[i], 0.05f); af_beam(c, A->mast[1], deck[i], 0.05f); }
+    for (int k = 0; k < 4; k++) for (int i = 0; i < 2; i++) af_beam(c, A->hub[k], deck[k < 2 ? i : 2 + i], 0.05f);
+    af_beam(c, A->mast[0], A->ring[2][2], Ys); af_beam(c, A->mast[0], A->ring[2][3], Ys);
+    af_beam(c, A->mast[0], A->ring[3][2], Ys); af_beam(c, A->mast[0], A->ring[3][3], Ys);
+    // Boom: rings braced, each to the next and the one after, the first into the cabin back and deck.
+    for (int r = 0; r < 4; r++) {
+        af_brace(c, boom[r], 3, Yb);
+        if (r + 1 < 4) for (int p = 0; p < 3; p++) for (int q = 0; q < 3; q++) af_beam(c, boom[r][p], boom[r + 1][q], Yb);
+        if (r + 2 < 4) for (int p = 0; p < 3; p++) af_beam(c, boom[r][p], boom[r + 2][p], Yb);
+    }
+    for (int p = 0; p < 3; p++) {
+        for (int k = 0; k < 6; k++) af_beam(c, boom[0][p], A->ring[4][k], Ys);
+        af_beam(c, boom[0][p], deck[2], Ys); af_beam(c, boom[0][p], deck[3], Ys);
+        af_beam(c, boom[1][p], A->ring[4][2], Yb); af_beam(c, boom[1][p], A->ring[4][3], Yb);
+    }
+    int tailG[7] = {finTop, finLE, finLow, A->tailNode, A->trHub, boom[3][0], boom[3][1]};
+    af_brace(c, tailG, 7, Yb);
+    for (int i = 0; i < 5; i++) { af_beam(c, tailG[i], boom[3][2], Yb); af_beam(c, tailG[i], boom[2][0], Yb); }
+    for (int s = 0; s < 4; s++) { af_beam(c, stab[s], boom[2][0], Yb); af_beam(c, stab[s], boom[2][1], Yb); af_beam(c, stab[s], boom[2][2], Yb); af_beam(c, stab[s], boom[1][0], Yb); }
+    af_beam(c, stab[0], stab[1], Yb); af_beam(c, stab[2], stab[3], Yb); af_beam(c, stab[0], stab[3], Yb); af_beam(c, stab[1], stab[2], Yb);
+    // Skids: tubes along, cross tubes up into the cabin floor and across to the other skid. They
+    // yield before the cabin does, as real ones are made to.
+    const float Yk = 0.045f;
+    for (int sd = 0; sd < 2; sd++) {
+        int *S = A->skid[sd];
+        for (int i = 0; i < 5; i++) { if (i + 1 < 5) af_beam(c, S[i], S[i + 1], Yk); if (i + 2 < 5) af_beam(c, S[i], S[i + 2], Yk); }
+        int fl = sd ? 5 : 0, bl = sd ? 4 : 1;                    // floor and belt nodes on this side
+        int feet[2] = {S[1], S[3]}, fr[2][2] = {{1, 2}, {3, 4}};
+        for (int f = 0; f < 2; f++)
+            for (int q = 0; q < 2; q++) {
+                af_beam(c, feet[f], A->ring[fr[f][q]][fl], Yk); af_beam(c, feet[f], A->ring[fr[f][q]][sd ? 0 : 5], Yk);
+                af_beam(c, feet[f], A->ring[fr[f][q]][bl], Yk);
+            }
+        af_beam(c, S[0], A->ring[1][fl], Yk); af_beam(c, S[2], A->ring[2][fl], Yk); af_beam(c, S[2], A->ring[3][fl], Yk);
+        af_beam(c, S[4], A->ring[3][fl], Yk); af_beam(c, S[4], A->ring[4][fl], Yk);
+    }
+    for (int i = 0; i < 5; i++) af_beam(c, A->skid[0][i], A->skid[1][i], Yk);
+    af_beam(c, A->skid[0][1], A->skid[1][3], Yk); af_beam(c, A->skid[1][1], A->skid[0][3], Yk);
+    // ---- skin. Paint: 0 white, 1 belly, 2 livery, 3 glass, 6 dark. The cabin and boom are smooth-shaded.
+    V3 inC = HP(-0.3f, 1.35f, 0);
+    for (int r = 0; r + 1 < 5; r++)
+        for (int k = 0; k < 6; k++) {
+            int k1 = (k + 1) % 6;
+            int paint = k == 5 ? 1 : (k == 0 || k == 4) ? 2 : 0;         // belly, livery below the belt, white above
+            if ((k == 1 || k == 3) && r <= 2) paint = 3;                  // door windows
+            if (k == 2 && r == 0) paint = 3;                              // windscreen (roof's leading edge)
+            if (k == 2 && r >= 2) paint = 0;
+            af_quad(A, A->ring[r][k], A->ring[r][k1], A->ring[r + 1][k1], A->ring[r + 1][k], paint, inC);
+        }
+    for (int k = 0; k < 6; k++) af_tri(A, tip, A->ring[0][k], A->ring[0][(k + 1) % 6], (k >= 1 && k <= 3) ? 3 : k == 5 ? 1 : 2, inC);
+    // Cabin back into the boom root: each back-wall node to the nearest boom-root node.
+    static const int BK[6] = {1, 1, 0, 0, 2, 2};
+    V3 inB = HP(-2.8f, 1.5f, 0);
+    for (int k = 0; k < 6; k++) {
+        int k1 = (k + 1) % 6;
+        af_tri(A, A->ring[4][k], A->ring[4][k1], boom[0][BK[k1]], k == 5 ? 1 : k == 0 || k == 4 ? 2 : 0, inB);
+        if (BK[k] != BK[k1]) af_tri(A, A->ring[4][k], boom[0][BK[k1]], boom[0][BK[k]], 0, inB);
+    }
+    for (int r = 0; r + 1 < 4; r++)
+        for (int k = 0; k < 3; k++) {
+            int k1 = (k + 1) % 3;
+            V3 ax = HP(0.5f * (BOOM[r][0] + BOOM[r + 1][0]), 0.5f * (BOOM[r][1] + BOOM[r + 1][1]), 0);
+            af_quad(A, boom[r][k], boom[r][k1], boom[r + 1][k1], boom[r + 1][k], k == 1 ? 1 : 2 * (r == 0), ax);
+        }
+    A->nFusTris = c->nt;
+    // Engine cowling over the deck, flat-shaded.
+    V3 inE = HP(-0.8f, 2.2f, 0);
+    af_quad(A, deck[0], deck[1], deck[3], deck[2], 0, inE);
+    af_quad(A, deck[0], deck[2], A->ring[4][2], A->ring[2][2], 0, inE); af_quad(A, deck[1], deck[3], A->ring[4][3], A->ring[2][3], 0, inE);
+    af_quad(A, deck[0], deck[1], A->ring[2][3], A->ring[2][2], 0, inE); af_quad(A, deck[2], deck[3], A->ring[4][3], A->ring[4][2], 6, inE);
+    // Fin, stabiliser and the boom's end cap.
+    af_quad(A, boom[3][0], finLE, finTop, A->tailNode, 2, HP(-8.1f, 2.4f, -1));
+    af_quad(A, boom[3][0], finLE, finTop, A->tailNode, 2, HP(-8.1f, 2.4f, 1));
+    af_tri(A, boom[3][1], finLow, A->tailNode, 2, HP(-8.1f, 1.6f, -1)); af_tri(A, boom[3][2], finLow, A->tailNode, 2, HP(-8.1f, 1.6f, 1));
+    af_tri(A, boom[3][0], boom[3][1], A->tailNode, 0, HP(-7.0f, 2.0f, 0)); af_tri(A, boom[3][0], boom[3][2], A->tailNode, 0, HP(-7.0f, 2.0f, 0));
+    af_quad(A, stab[0], stab[1], stab[3], stab[2], 2, HP(-6.3f, 0.0f, 0));
+    af_quad(A, stab[0], stab[1], stab[3], stab[2], 2, HP(-6.3f, 4.0f, 0));
+    for (int g = 0; g < 2; g++) for (int k = 0; k < 2; k++) A->gearWheel[g][k] = A->skid[g][1 + 2 * k];
+    A->gearWheel[2][0] = A->skid[0][2]; A->gearWheel[2][1] = A->skid[1][2];
+    c->nBody = c->nn;
+    #undef HP
+    const float h = 1.0f / SIM_HZ;                              // the same stiffness limiter as the airliner
+    for (int pass = 0; pass < 3; pass++) {
+        static float ks[MAX_NODES], cs[MAX_NODES];
+        memset(ks, 0, sizeof ks); memset(cs, 0, sizeof cs);
+        for (int i = 0; i < c->nb; i++) { Beam *B = &c->b[i]; ks[B->a] += B->k; ks[B->b] += B->k; cs[B->a] += B->c; cs[B->b] += B->c; }
+        for (int i = 0; i < c->nb; i++) {
+            Beam *B = &c->b[i];
+            float f = 1.0f;
+            for (int e = 0; e < 2; e++) { int n = e ? B->b : B->a; float m = c->n[n].m; f = fminf(f, fminf(0.9f * m / (ks[n] * h * h), 0.75f * m / (cs[n] * h))); }
+            if (f < 1.0f) { B->k *= f; B->c *= f; }
+        }
+    }
+    for (int i = 0; i < c->nn; i++) c->rest[i] = L[i];
+    airframe_bounds(A);
+    airframe_update_frame(A);
+}
+
+void world_respawn_heli(World *w) {
+    if (w->heli < 0) return;
+    Airframe *A = &w->air[w->heli];
+    const Plane *P = &w->planes[w->heli];
+    int pilot = A->pilot;
+    heli_build(A, v3(P->x, terrain_height(P->x, P->z), P->z), v3(P->dx, 0, P->dz), P->seed);
+    airframe_settle(w, A);
+    A->pilot = pilot;
+}
+
+// Angular velocity of the airframe as a rigid body: solve I w = sum m r x v about the centre of mass.
+static V3 heli_omega(const Airframe *A) {
+    const Car *c = &A->c;
+    float I[3][3] = {{0}}; V3 Lm = v3(0, 0, 0);
+    for (int i = 0; i < c->nn; i++) {
+        const Node *N = &c->n[i];
+        V3 r = vsub(N->p, A->pos), v = vsub(N->v, A->vel);
+        Lm = vadd(Lm, vscale(vcross(r, v), N->m));
+        float rr = vdot(r, r), q[3] = {r.x, r.y, r.z};
+        for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) I[a][b] += N->m * ((a == b ? rr : 0.0f) - q[a] * q[b]);
+    }
+    float det = I[0][0] * (I[1][1] * I[2][2] - I[1][2] * I[2][1]) - I[0][1] * (I[1][0] * I[2][2] - I[1][2] * I[2][0]) + I[0][2] * (I[1][0] * I[2][1] - I[1][1] * I[2][0]);
+    if (fabsf(det) < 1e-6f) return v3(0, 0, 0);
+    float l[3] = {Lm.x, Lm.y, Lm.z}, w[3];
+    for (int col = 0; col < 3; col++) {                         // Cramer's rule
+        float m[3][3];
+        for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) m[a][b] = b == col ? l[a] : I[a][b];
+        w[col] = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])) / det;
+    }
+    return v3(w[0], w[1], w[2]);
+}
+
+static int heli_tip_hits(const World *w, const Airframe *A, V3 p) {
+    if (p.y < terrain_height(p.x, p.z) || (g_map == MAP_AIRPORT && p.y < AP_SEA_Y)) return 1;
+    if (world_point_solid(w, p)) return 1;
+    for (int i = 0; i < w->ncars; i++) {
+        const Car *k = &w->cars[i];
+        if (k->active && p.x > k->bmin.x && p.x < k->bmax.x && p.y > k->bmin.y && p.y < k->bmax.y && p.z > k->bmin.z && p.z < k->bmax.z) return 1;
+    }
+    for (int i = 0; i < w->nplanes; i++) {                      // other aircraft: within a metre of one of their nodes
+        const Airframe *B = &w->air[i];
+        if (B == A) continue;
+        V3 lo = B->c.bmin, hi = B->c.bmax;
+        if (p.x < lo.x - 1 || p.x > hi.x + 1 || p.y < lo.y - 1 || p.y > hi.y + 1 || p.z < lo.z - 1 || p.z > hi.z + 1) continue;
+        for (int n = 0; n < B->c.nn; n++) { V3 d = vsub(B->c.n[n].p, p); if (vdot(d, d) < 1.0f) return 1; }
+    }
+    return 0;
+}
+
+static void heli_aero(World *w, Airframe *A, float h) {
+    Car *c = &A->c;
+    airframe_update_frame(A);
+    float M = 0;
+    for (int i = 0; i < c->nn; i++) M += c->n[i].m;
+    float Wt = M * GRAV;
+    // Skids on the ground?
+    A->onGround = 0;
+    for (int sd = 0; sd < 2; sd++) for (int i = 1; i < 5; i++) {
+        V3 q = c->n[A->skid[sd][i]].p;
+        if (q.y < fmaxf(terrain_height(q.x, q.z), g_map == MAP_AIRPORT ? AP_SEA_Y : -1e9f) + 0.12f) A->onGround = 1;   // (or afloat)
+    }
+    // Engine: spools the rotor up while someone is flying it (or while it is still in the air), down otherwise.
+    int engine = !A->wrecked && (A->pilot || !A->onGround);
+    float want = engine && !A->rotorBroken ? 1.0f : 0.0f;
+    A->rpm += clampf(want - A->rpm, -(A->rotorBroken ? 0.9f : 0.08f) * h, 0.16f * h);
+    A->rotorAngle = fmodf(A->rotorAngle + A->rpm * 6.2831853f * 6.6f * h, 6.2831853f);
+    if (!A->tailBroken) A->trAngle = fmodf(A->trAngle + A->rpm * 6.2831853f * 33.0f * h, 6.2831853f);
+    // Nobody at the controls in the air: slow to a hover and let it down gently at 2 m/s.
+    if (!A->pilot) {
+        A->pitch = clampf(0.06f * vdot(A->vel, A->fwd), -0.6f, 0.6f);
+        A->roll = clampf(-0.06f * vdot(A->vel, A->right), -0.6f, 0.6f);
+        A->yaw = 0;
+        if (A->onGround) A->pitch = A->roll = 0;
+        if (!A->onGround) A->thr = clampf(A->thr + (-2.0f - A->vel.y) * 0.25f * h, 0.0f, 1.0f);
+        else A->thr = fmaxf(A->thr - 0.5f * h, 0.0f);
+    }
+    // ---- main rotor thrust
+    float rpm2 = A->rpm * A->rpm;
+    V3 u = A->up;
+    float vax = A->vel.y;                                       // climbing through the downwash
+    float spd = sqrtf(A->vel.x * A->vel.x + A->vel.z * A->vel.z);
+    float T = HELI_TMAX * Wt * rpm2 * (0.04f + 0.96f * A->thr);
+    T *= clampf(1.0f - vax / 15.0f, 0.4f, 1.6f);
+    float hr = fmaxf(A->agl, 0.0f) / (2.0f * HELI_R);
+    if (hr < 1.0f) T *= 1.0f + 0.14f * (1.0f - hr) * (1.0f - hr);    // ground effect
+    T *= 1.0f + 0.12f * smooth01(4.0f, 16.0f, spd);               // translational lift
+    if (A->rotorBroken || A->wrecked) T = 0;
+    A->lift = T / Wt;
+    // Blade-tip strikes: sample the tip circle (it sweeps the whole disc between samples at any rpm).
+    if (A->rpm > 0.25f && !A->rotorBroken) {
+        V3 hubP = c->n[A->mast[1]].p, fw = A->fwd, rt = A->right;
+        for (int s = 0; s < 12 && !A->rotorBroken; s++) {
+            float a = s * 0.5235988f, rr = s & 1 ? HELI_R : 0.72f * HELI_R;
+            V3 p = vadd(hubP, vadd(vscale(fw, rr * cosf(a)), vscale(rt, rr * sinf(a))));
+            p = vsub(p, vscale(u, 0.12f * (1.0f - A->lift)));     // the blades droop when they're not carrying the weight
+            if (heli_tip_hits(w, A, p)) { A->rotorBroken = 1; A->strikeT = 0; }
+        }
+    }
+    if (A->rpm > 0.25f && !A->tailBroken) {
+        V3 trP = c->n[A->trHub].p;
+        for (int s = 0; s < 6 && !A->tailBroken; s++) {
+            float a = s * 1.0471976f;
+            V3 p = vadd(trP, vadd(vscale(A->fwd, HELI_TR_R * cosf(a)), vscale(u, HELI_TR_R * sinf(a))));
+            if (heli_tip_hits(w, A, p)) { A->tailBroken = 1; if (A->strikeT < 0) A->strikeT = 0; }
+        }
+    }
+    if (A->strikeT >= 0) A->strikeT += h;
+    if (T > 0) {
+        V3 f = vscale(u, T / 5.0f);
+        add_force(&c->n[A->mast[1]], f);
+        for (int k = 0; k < 4; k++) add_force(&c->n[A->hub[k]], f);
+    }
+    // ---- stability augmentation: stick -> attitude, pedals -> yaw rate, as angular acceleration.
+    float auth = rpm2 * (A->onGround ? smooth01(0.35f, 0.95f, A->lift) : 1.0f);
+    if (A->rotorBroken || A->wrecked) auth = 0;
+    V3 om = heli_omega(A);
+    float pitchA = asinf(clampf(A->fwd.y, -1, 1)), bankA = asinf(clampf(-A->right.y, -1, 1));
+    float qr = vdot(om, A->right), pr = vdot(om, A->fwd), yr = -vdot(om, u);        // nose-up, right-down, nose-right rates
+    // Trim: with the stick centred in the air, slowly wind out whatever pitch and bank it has settled at
+    // (the centre of mass is never exactly under the mast once it's loaded and bent).
+    if (!A->onGround && auth > 0.5f) {
+        if (fabsf(A->pitch) < 0.05f) A->trim = clampf(A->trim - pitchA * 0.4f * h, -0.08f, 0.08f);
+        if (fabsf(A->roll) < 0.05f) A->ail = clampf(A->ail - bankA * 0.4f * h, -0.08f, 0.08f);
+    }
+    float pitchT = A->pitch * 0.36f + A->trim, bankT = A->roll * 0.48f + A->ail;
+    float yawT = A->yaw * 1.0f;
+    if (spd > 12.0f && !A->onGround) yawT += smooth01(12.0f, 25.0f, spd) * GRAV * tanf(bankA) / spd;   // coordinated turn: the fin weathervanes it
+    float aq = 9.0f * (pitchT - pitchA) - 5.0f * qr, ap = 9.0f * (bankT - bankA) - 5.0f * pr, ay = A->tailBroken ? 0.0f : 5.0f * (yawT - yr);
+    V3 alpha = vscale(vadd(vadd(vscale(A->right, aq), vscale(A->fwd, ap)), vscale(u, -ay)), auth);
+    // A tail rotor that's gone: the main rotor's torque turns the whole helicopter the other way
+    // (nose left; the rotor turns clockwise seen from above), against a little drag from the boom.
+    if (A->tailBroken && !A->rotorBroken) alpha = vadd(alpha, vscale(u, 2.6f * rpm2 * (0.3f + A->thr) - 0.6f * vdot(om, u)));
+    // ---- drag: nose-first, sideways and through the disc
+    float vf = vdot(A->vel, A->fwd), vs = vdot(A->vel, A->right);
+    V3 D = vadd(vadd(vscale(A->fwd, -2.6f * vf * fabsf(vf)), vscale(A->right, -9.0f * vs * fabsf(vs))), v3(0, -(4.0f + 30.0f * A->rpm) * vax * fabsf(vax), 0));
+    D = vscale(D, 0.5f * AIR_RHO / M);
+    for (int i = 0; i < c->nn; i++) {
+        Node *N = &c->n[i];
+        V3 r = vsub(N->p, A->pos);
+        add_force(N, vscale(vadd(vcross(alpha, r), D), N->m));
+    }
 }
 
 // A car node against the airframe's skin: one-sided contact with each triangle, so a node can't slip
@@ -1521,15 +1863,27 @@ static void airframes_substep(World *w, float h, int phase) {
                 near = !(c->bmax.x + m < A->c.bmin.x || A->c.bmax.x + m < c->bmin.x || c->bmax.y + m < A->c.bmin.y ||
                          A->c.bmax.y + m < c->bmin.y || c->bmax.z + m < A->c.bmin.z || A->c.bmax.z + m < c->bmin.z);
             }
-            if (near || A->pilot) { A->asleep = 0; A->quiet = 0; }
+            for (int bi = 0; bi < w->nplanes && !near; bi++) {     // another aircraft (awake, so moving) touching it
+                const Airframe *B = &w->air[bi];
+                if (bi == ai || B->asleep) continue;
+                near = !(B->c.bmax.x + 1 < A->c.bmin.x || A->c.bmax.x + 1 < B->c.bmin.x || B->c.bmax.y + 1 < A->c.bmin.y ||
+                         A->c.bmax.y + 1 < B->c.bmin.y || B->c.bmax.z + 1 < A->c.bmin.z || A->c.bmax.z + 1 < B->c.bmin.z);
+            }
+            if (near || A->pilot || A->rpm > 0.01f) { A->asleep = 0; A->quiet = 0; }
             if (A->asleep) continue;
             airframe_forces(A);
-            airframe_aero(A, h);
+            if (A->kind == AC_HELI) heli_aero(w, A, h); else airframe_aero(A, h);
             for (int ci = 0; ci < w->ncars; ci++) {
                 Car *c = &w->cars[ci];
                 if (!c->active) continue;
                 collide_cars(c, &A->c);
                 collide_shell(c, A);
+            }
+            for (int bi = 0; bi < ai; bi++) {                       // aircraft against each other (once per pair)
+                Airframe *B = &w->air[bi];
+                if (B->asleep) continue;
+                collide_cars(&A->c, &B->c);
+                if (A->kind == AC_HELI) collide_shell(&A->c, B); else if (B->kind == AC_HELI) collide_shell(&B->c, A);
             }
         } else if (!A->asleep) {
             airframe_integrate(w, A, h);
@@ -1546,14 +1900,14 @@ static void airframes_substep(World *w, float h, int phase) {
                     bent += fabsf(B->rest - B->rest0) > 0.03f * B->rest0;
                 }
                 A->nbroken = broken;
-                if (broken > 30 || bent > 160) A->wrecked = 1;
+                if (A->kind == AC_HELI ? (broken > 14 || bent > 90) : (broken > 30 || bent > 160)) A->wrecked = 1;
             }
             int touching = 0;
             for (int ci = 0; ci < w->ncars && !touching; ci++) {
                 const Car *c = &w->cars[ci];
                 touching = c->active && !(c->bmax.x + 1 < A->c.bmin.x || A->c.bmax.x + 1 < c->bmin.x || c->bmax.z + 1 < A->c.bmin.z || A->c.bmax.z + 1 < c->bmin.z || c->bmax.y + 1 < A->c.bmin.y || A->c.bmax.y + 1 < c->bmin.y);
             }
-            A->quiet = (!touching && A->vmax < 0.08f) ? A->quiet + h : 0.0f;
+            A->quiet = (!touching && A->vmax < 0.08f && A->rpm < 0.01f && !A->pilot) ? A->quiet + h : 0.0f;
             if (A->quiet > 2.0f) {
                 A->asleep = 1;
                 for (int i = 0; i < A->c.nn; i++) A->c.n[i].v = v3(0, 0, 0);
@@ -1698,9 +2052,10 @@ static const Rect AP_ROADS[] = {
 };
 static const Rect AP_STREETS[] = {
     {-7, 7, 0, 46},              // access road
-    {-66, 106, 36, 48},          // departures forecourt (wide enough for cabs at the kerb)
-    {-64, -56, 7, 80}, {96, 104, 38, 80},   // west and east service roads
-    {-64, 104, 74, 80},          // apron service road (between the terminal and the apron)
+    {-66, 114, 36, 48},          // departures forecourt (wide enough for cabs at the kerb)
+    {-64, -56, 7, 80}, {104, 112, 38, 80},  // west and east service roads
+    {-64, 112, 74, 80},          // apron service road (between the terminal and the apron)
+    {123, 136, 38, 44},          // east road on past the tower to the hangars
     {30, 78, -13, -7},           // service road into the warehouse district
 };
 typedef struct { Rect r; int type; } Area;
@@ -1710,6 +2065,10 @@ static const Area AP_AREAS[] = {
     {{594, 606, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{1228, 1240, AP_TWY_Z1, AP_RWY_Z0}, 4},   // connectors out on the causeway
     {{-110, 112, AP_APRON_Z0, AP_APRON_Z1}, 5},                           // apron
     {{-212, -110, 122, AP_APRON_Z1}, 5},                                  // hangar apron
+    {{112, AP_EAPRON_X1, AP_EAPRON_Z0, AP_APRON_Z1}, 5},                  // east apron, in front of the hangar row
+    {{AP_HELI_X - AP_HELI_HALF, AP_HELI_X + AP_HELI_HALF, AP_HELI_Z - AP_HELI_HALF, AP_HELI_Z + AP_HELI_HALF}, 5},   // helipad
+    {{136, AP_EAPRON_X1, 44, AP_EAPRON_Z0}, 5},                           // hangar floors and the yard behind
+    {{93, 105, AP_TWY_Z1, AP_RWY_Z0}, 4},                                 // connector to the east apron
     {{-241, -229, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{-6, 6, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{229, 241, AP_TWY_Z1, AP_RWY_Z0}, 4},   // connectors
     {{10, 90, 14, 34}, 4}, {{-50, -12, 14, 34}, 4},                       // car parks
 };
@@ -2041,15 +2400,20 @@ static void build_newyork(World *w) {
 // Airport map: terminal, gate airliners, control tower, hangars (and a parked airliner outside them).
 static void add_plane(World *w, float x, float z, float dx, float dz) {
     if (w->nplanes >= MAX_PLANES) return;
-    w->planes[w->nplanes++] = (Plane){x, z, dx, dz, (unsigned)(frnd() * 4294967040.0f)};
+    w->planes[w->nplanes++] = (Plane){x, z, dx, dz, (unsigned)(frnd() * 4294967040.0f), AC_AIRLINER};
 }
 static void build_airport(World *w) {
     add_building(w, (Rect){AP_TERM_X0, AP_TERM_X1, AP_TERM_Z0, AP_TERM_Z1}, BLD_TERMINAL, 16.0f, 3);
-    for (int g = 0; g < 4; g++) if (g != 2) add_plane(w, AP_GATES[g], AP_NOSE_Z, 0, 1);   // nose-in at the gates
-    add_building(w, (Rect){115, 123, 55, 63}, BLD_ATC, 44.0f, 3);
+    for (int g = 0; g < AP_NGATES; g++) if (g != 2) add_plane(w, AP_GATES[g], AP_NOSE_Z, 0, 1);   // nose-in at the gates (one stand left free)
+    add_building(w, (Rect){AP_ATC_X0, AP_ATC_X1, 55, 63}, BLD_ATC, 44.0f, 3);
     add_building(w, (Rect){-205, -160, 70, 120}, BLD_HANGAR, 18.0f, 2);
     add_building(w, (Rect){-150, -114, 76, 120}, BLD_HANGAR, 15.0f, 2);
-    add_plane(w, -128.0f, 130.0f, -1, 0);                                   // outside the hangars
+    // The maintenance row east of the tower, doors open onto the east apron; the big one takes an airliner.
+    for (int i = 0; i < 3; i++) add_building(w, (Rect){AP_HANGARS[i][0], AP_HANGARS[i][1], AP_HANGAR_Z0, AP_EAPRON_Z0}, BLD_HANGAR, AP_HANGARS[i][2], 2);
+    add_plane(w, -128.0f, 130.0f, -1, 0);                                   // outside the west hangars
+    add_plane(w, 0.5f * (AP_HANGARS[2][0] + AP_HANGARS[2][1]), 134.0f, 0, -1);   // pulled out of the big hangar, nose to the taxiway
+    w->heli = w->nplanes;                                                    // on the helipad beside the tower, nose to the east
+    if (w->nplanes < MAX_PLANES) w->planes[w->nplanes++] = (Plane){AP_HELI_X, AP_HELI_Z, -1, 0, (unsigned)(frnd() * 4294967040.0f), AC_HELI};
     w->flyable = w->nplanes;
     add_plane(w, AP_RWY_X0 + 46.0f, 0.5f * (AP_RWY_Z0 + AP_RWY_Z1), -1, 0);  // lined up on runway 09: the one you can fly
     Block ind = {{34, 74, -38, -14}, 3};                                     // warehouses (shared proving ground)
@@ -2059,7 +2423,7 @@ static void build_airport(World *w) {
 void world_init(World *w, int map) {
     memset(w, 0, sizeof *w);
     g_nmound = 0;
-    w->flyable = -1;
+    w->flyable = w->heli = -1;
     w->map = g_map = (map < 0 || map >= MAP_COUNT) ? MAP_DEFAULT : map;
     rng_state = 20240611u;
     // Crash-test wall behind the spawn point.
@@ -2104,7 +2468,8 @@ void world_init(World *w, int map) {
     w->ncars = 0;
     for (int i = 0; i < w->nplanes; i++) {             // soft-body airframes, settled onto their gear
         const Plane *P = &w->planes[i];
-        airframe_build(&w->air[i], v3(P->x, terrain_height(P->x, P->z), P->z), v3(P->dx, 0, P->dz), P->seed);
+        if (P->kind == AC_HELI) heli_build(&w->air[i], v3(P->x, terrain_height(P->x, P->z), P->z), v3(P->dx, 0, P->dz), P->seed);
+        else airframe_build(&w->air[i], v3(P->x, terrain_height(P->x, P->z), P->z), v3(P->dx, 0, P->dz), P->seed);
         airframe_settle(w, &w->air[i]);
     }
 }

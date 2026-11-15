@@ -309,7 +309,7 @@ static const char *ATMOS_FS = GLSL SKY_GLSL
 // texture0 = the fogged HDR scene. Output: rgb = reflection * strength (premultiplied), a = wetness.
 static const char *SSR_FS = GLSL SKY_GLSL
     "uniform float wet, rain;\n"
-    "uniform vec4 roads[16];\n"
+    "uniform vec4 roads[32];\n"
     "uniform int nRoads, nHighway;\n"
     "uniform vec4 broadway;\n"                                   // x0 at z0, dx/dz, horizontal half-width, z0 ...
     "uniform vec2 broadwayZ;\n"                                  // ... and its z range (empty range = none)
@@ -317,7 +317,7 @@ static const char *SSR_FS = GLSL SKY_GLSL
     "float surface(vec2 p) {\n"      // 1 asphalt, 0.6 pavement, 0.22 anything else
     "  float s = 0.10;\n"
     "  if (p.y > broadwayZ.x && p.y < broadwayZ.y && abs(p.x - broadway.x - broadway.y * (p.y - broadway.w)) < broadway.z) return 0.9;\n"
-    "  for (int i = 0; i < 16; i++) {\n"
+    "  for (int i = 0; i < 32; i++) {\n"
     "    if (i >= nRoads) break;\n"
     "    vec4 r = roads[i];\n"
     "    if (p.x > r.x && p.x < r.y && p.y > r.z && p.y < r.w) return 1.0;\n"
@@ -460,7 +460,7 @@ static Vector3 shadowAmb, shadowSun;
 static int curW, curH;
 static Matrix invVP, VP;
 static Vector3 camPos;
-static float roadRects[16 * 4];
+static float roadRects[32 * 4];
 static float bwParams[4], bwZ[2];
 static int nRoadRects, nHighwayRects;
 
@@ -587,7 +587,7 @@ void post_set_broadway(float x0, float dxdz, float halfX, float z0, float zmin, 
 }
 
 void post_set_roads(const float (*rects)[4], int n, int nHighway) {
-    if (n > 16) n = 16;
+    if (n > 32) n = 32;
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) roadRects[i * 4 + k] = rects[i][k];
     nRoadRects = n; nHighwayRects = nHighway;
 }

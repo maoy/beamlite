@@ -193,9 +193,11 @@ typedef struct {
 enum { MAP_DEFAULT, MAP_NEWYORK, MAP_AIRPORT, MAP_COUNT };
 const char *map_name(int map);
 
-// A parked airliner: nose position and the unit direction from nose to tail.
-typedef struct { float x, z, dx, dz; unsigned seed; } Plane;
-#define MAX_PLANES 6
+// A parked aircraft: an airliner (nose position and the unit direction from nose to tail) or a
+// helicopter (mast position on the pad, and the direction from nose to tail).
+enum { AC_AIRLINER, AC_HELI };
+typedef struct { float x, z, dx, dz; unsigned seed; int kind; } Plane;
+#define MAX_PLANES 10
 
 // Its soft-body airframe (~40 t of nodes and beams on its landing gear; see physics.c).
 #define AF_RINGS 17             // fuselage frames
@@ -224,6 +226,16 @@ typedef struct {
     int onGround, stall;
     int wrecked;                // too broken to fly: engines and controls are dead, the wings no longer lift
     int nbroken;                // snapped beams (updated as it breaks up)
+    // ---- helicopter (kind AC_HELI; see physics.c). thr is the collective lever, pitch/roll the cyclic, yaw the pedals.
+    int kind;                   // AC_*
+    int mast[2], hub[4];        // mast base and rotor head; four nodes around the head that carry the rotor thrust
+    int trHub, skid[2][5];      // tail-rotor hub; skids [right, left] from the upturned tip back
+    int stabTip[2], finTop;     // stabiliser tips [right, left] and the top of the fin (navigation lights)
+    float rpm;                  // main rotor speed, 0..1 of nominal (the engine spools it up and down)
+    float rotorAngle, trAngle;  // blade angles, for drawing
+    float lift;                 // rotor thrust / weight, last substep
+    int rotorBroken, tailBroken;    // blades struck something: no lift / no anti-torque
+    float strikeT;              // seconds since a rotor strike (for the renderer's debris), -1 never
 } Airframe;
 int airframe_damaged_beams(const Airframe *A);
 void airframe_update_frame(Airframe *A);
@@ -240,6 +252,7 @@ typedef struct {
     Plane planes[MAX_PLANES]; int nplanes;
     Airframe air[MAX_PLANES];   // one per plane
     int flyable;                // the airliner on the runway the player can fly, or -1
+    int heli;                   // the helicopter on the helipad, or -1
     // Uniform grid (CSR) of static obstacles: item < MAX_BOXES is a box, otherwise a tree.
     int gridStart[GRID_N * GRID_N + 1];
     int gridItem[MAX_GRID_ITEMS];
@@ -248,6 +261,7 @@ typedef struct {
 float terrain_height(float x, float z);
 float sea_dist(float x, float z);       // airport map: metres out to sea from the shore (negative on land); elsewhere far inland
 void world_respawn_plane(World *w);     // put the flyable airliner back on the runway threshold
+void world_respawn_heli(World *w);      // put the helicopter back on its pad, rotor stopped
 V3 terrain_normal(float x, float z);
 float building_mound(const World *w, int b, float x, float z);   // full height of building b's rubble pile above the ground at (x, z)
 
@@ -279,11 +293,22 @@ float broadway_dist(float x, float z);  // perpendicular distance from the centr
 #define AP_APRON_Z0 80.0f
 #define AP_APRON_Z1 138.0f
 #define AP_TERM_X0 -45.0f
-#define AP_TERM_X1 85.0f
+#define AP_TERM_X1 100.0f
 #define AP_TERM_Z0 50.0f
 #define AP_TERM_Z1 70.0f
 #define AP_NOSE_Z 86.0f                 // where a gate airliner's nose stops
-static const float AP_GATES[4] = {-30.0f, 0.0f, 30.0f, 60.0f};
+#define AP_NGATES 5
+static const float AP_GATES[AP_NGATES] = {-30.0f, 0.0f, 30.0f, 60.0f, 90.0f};
+// East side: the control tower, the helipad beside it, and a row of hangars on their own apron.
+#define AP_ATC_X0 115.0f
+#define AP_ATC_X1 123.0f
+#define AP_HELI_X 122.0f                // helipad centre
+#define AP_HELI_Z 84.0f
+#define AP_HELI_HALF 10.0f
+#define AP_EAPRON_X1 262.0f             // the east apron runs from the main apron out to here
+#define AP_EAPRON_Z0 94.0f
+static const float AP_HANGARS[3][3] = {{138, 170, 14.0f}, {176, 208, 14.0f}, {214, 258, 20.0f}};   // x0, x1, wall height (doors face north)
+#define AP_HANGAR_Z0 46.0f
 
 // 0 none, 1 highway, 2 street/avenue, 3 pedestrian plaza, 4 runway/taxiway/car park asphalt, 5 apron concrete
 int road_at(float x, float z);

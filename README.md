@@ -34,9 +34,14 @@ xcode-select --install        # once, if you don't have the command line tools
 | J | traffic on / off |
 | L | lighting: dusk / day |
 | F2 | sun shadows + ambient occlusion on / off |
-| Tab | Airport map: fly the airliner on the runway / back to the car |
+| O | weather: dry / wet / rain / snow |
+| Q | recover (fresh car, upright, in place) |
+| R | reset to start |
+| T / P | slow-mo / pause |
+| K | clear skid marks |
+| Tab | Airport map: fly the airliner on the runway, then the helicopter on the pad, then back to the car |
 
-Flying (after **Tab** on the Airport map):
+Flying the airliner (first **Tab** on the Airport map):
 
 | Key | Action |
 |---|---|
@@ -52,11 +57,23 @@ Flying (after **Tab** on the Airport map):
 To take off: flaps to take-off, full throttle, keep it on the centreline with Q/E, and pull back
 gently at about 135 kt. It lifts off after roughly 580 m. Let go of the keys and it holds wings
 level and its pitch attitude. To land: flaps full, about 140 kt, throttle to idle, brake.
-| O | weather: dry / wet / rain / snow |
-| Q | recover (fresh car, upright, in place) |
-| R | reset to start |
-| T / P | slow-mo / pause |
-| K | clear skid marks |
+
+Flying the helicopter (second **Tab**):
+
+| Key | Action |
+|---|---|
+| Shift / Ctrl | collective up / down (it hovers at about 50%) |
+| W / S (or ↑ / ↓) | cyclic: nose down to fly forward / nose up to slow down |
+| A / D (or ← / →) | cyclic: bank left / right |
+| Q / E | pedals: turn left / right |
+| C | cockpit camera |
+| R | put the helicopter back on the pad |
+
+The rotor takes about six seconds to spool up. Raise the collective until it lifts off, then ease
+the stick forward. Let go of the stick and it returns to level; level it out and it slows down. Hop
+out in the air (**Tab**) and it slows to a hover and lets itself down. Keep the blades clear: a tip
+that touches the ground, a wall, a tree or a vehicle shatters the rotor, and losing the tail rotor
+sends it spinning.
 
 Three maps, switched with **M**. All share the proving ground: a launch ramp straight ahead, a
 crash-test wall behind you, concrete pillars, a warehouse district off a service road to the right,
@@ -78,14 +95,16 @@ apartment blocks, and the towers, hangars and terminal take several big hits (or
   lamps and yellow cabs parked on 7th Avenue. The washboard moves south of the highway.
 - **Airport**: you start on the access road heading north toward a glass terminal, with a
   departures forecourt under a canopy, taxis at the kerb, and two car parks. Past the terminal,
-  airliners sit nose-in at the gates with jet bridges, a control tower glows over the apron, and
-  floodlight masts light it. Further north are two hangars (one with an airliner outside) and
-  runway 09/27. Like the runways at SFO, it runs 1.5 km out into a bay on a causeway, with piano keys,
+  airliners sit nose-in at five gates with jet bridges, a control tower glows over the apron, and
+  floodlight masts light it. Beside the tower is a helipad with a helicopter you can fly, a windsock
+  and green edge lights. East of it, three maintenance hangars line their own apron, and an airliner
+  stands outside the big one. Two more hangars sit west of the terminal (one with an airliner
+  outside), and north of it all is runway 09/27. Like the runways at SFO, it runs 1.5 km out into a bay on a causeway, with piano keys,
   touchdown bars, numbers, edge and threshold lights and approach lights. A blue-lit taxiway runs
   alongside. The bay lies north and east of the field. To the south and west the land rises into
   coastal hills. The map reaches 6 km from the field in every direction, so there is room to fly.
-  An airliner waits lined up on runway 09: press **Tab** to fly it (see below). The parked airliners
-  are soft bodies and the buildings are solid. The field is graded flat, and this map has no washboard.
+  An airliner waits lined up on runway 09: press **Tab** to fly it, and **Tab** again to fly the
+  helicopter (see above). The parked aircraft are soft bodies and the buildings are solid. The field is graded flat, and this map has no washboard.
 
 ## How it works
 
@@ -160,6 +179,21 @@ apartment blocks, and the towers, hangars and terminal take several big hits (or
   sideways, steer at the nose and brake on the mains. Two assists make it flyable on a keyboard:
   control throws shrink as speed rises, and with the keys released it levels the wings and trims
   out pitch rate.
+- **Helicopter**: a ~2 t light utility helicopter (after the H125 class) built the same way: 72
+  nodes and 474 beams forming a cabin of five frames, an engine deck, a tapering tail boom with fin
+  and stabiliser, a mast placed over the centre of mass, and skids on cross tubes that yield before
+  the cabin does. It also flies by forces on nodes. The rotor's thrust acts on the rotor head along
+  the mast and grows with the square of rotor speed and with collective. It falls off as the
+  helicopter climbs through its own downwash, which is what turns a fixed collective into a steady
+  climb or descent, and it gains a little in ground effect and with forward speed. The cyclic and
+  pedals run through a stability-augmentation loop like a modern helicopter's: the stick commands a
+  pitch and bank angle, the pedals a yaw rate, and in forward flight the tail weathervanes it into
+  coordinated turns. The loop's output is an angular acceleration applied to every node as
+  m (α × r), so it turns the airframe without pushing it anywhere. Its authority is the rotor's: none
+  at rest, and full only once the rotor carries the weight. Blade tips are tested against the
+  ground, buildings, trees, vehicles and other aircraft every substep, and a strike breaks the rotor
+  in a burst of fragments and sparks. Low over the ground the downwash blows dust (or spray over
+  the bay) out from under it.
 - **Crashes**: an airframe beam that is permanently crushed or stretched past a limit snaps, so a
   hard impact breaks the airliner into pieces. Past a damage threshold it is wrecked: engines and
   controls die and the buckled wings stop lifting. Skin whose frame has pulled apart is no longer

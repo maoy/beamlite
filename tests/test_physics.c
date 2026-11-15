@@ -300,6 +300,53 @@ int main(void) {
         printf("airliner dive into the bay: wrecked %d, snapped beams %d, speed now %.1f m/s, lowest point %.1f m, exploded %d\n",
                A->wrecked, A->nbroken, A->airspeed, A->c.bmin.y, A->c.exploded);
     }
+    {   // The helicopter on the pad: spool up, lift off at ~70% collective, settle into a hover, fly
+        // forward with the stick down, then let go (it slows and lets itself down). Separately: fly it
+        // at the control tower (the blades strike and it falls), and land at increasing sink rates.
+        world_init(&W, MAP_AIRPORT); W.ncars = 0;
+        Airframe *A = &W.air[W.heli];
+        float M = 0; for (int i = 0; i < A->c.nn; i++) M += A->c.n[i].m;
+        printf("helicopter: %d nodes, %d beams, %.0f kg; asleep on the pad %d\n", A->c.nn, A->c.nb, M, A->asleep);
+        A->pilot = 1;
+        for (int t = 0; t < (int)(8 * SIM_HZ); t++) world_substep(&W, H);
+        float rpm = A->rpm;
+        for (int t = 0; t < (int)(8 * SIM_HZ); t++) { A->thr = A->agl < 20 ? 0.72f : 0.52f; world_substep(&W, H); }
+        for (int t = 0; t < (int)(8 * SIM_HZ); t++) { A->thr = fminf(fmaxf(A->thr - A->vel.y * 1.5f * H, 0), 1); world_substep(&W, H); }
+        printf("helicopter hover: rotor %.0f%% after spool-up; %.1f m up, collective %.0f%%, drifting %.1f m/s, vertical %.2f m/s\n",
+               100 * rpm, A->agl, 100 * A->thr, sqrtf(A->vel.x * A->vel.x + A->vel.z * A->vel.z), A->vel.y);
+        A->pitch = -1;
+        for (int t = 0; t < (int)(20 * SIM_HZ); t++) { A->thr = fminf(fmaxf(A->thr - A->vel.y * 1.5f * H, 0), 1); world_substep(&W, H); }
+        printf("helicopter forward 20 s: %.0f kt, nose %.0f deg, %.1f m up, collective %.0f%%\n", A->airspeed * 1.944f, asinf(A->fwd.y) * 57.3f, A->agl, 100 * A->thr);
+        A->pitch = 0; A->pilot = 0;
+        int t = 0;
+        for (; t < (int)(60 * SIM_HZ) && !A->onGround; t++) world_substep(&W, H);
+        printf("helicopter let go: down after %.0f s at %.1f m/s, damaged beams %d, rotor broken %d\n", t / SIM_HZ, A->vel.y, airframe_damaged_beams(A), A->rotorBroken);
+
+        world_init(&W, MAP_AIRPORT); W.ncars = 0;
+        A = &W.air[W.heli]; A->pilot = 1;
+        for (t = 0; t < (int)(8 * SIM_HZ); t++) world_substep(&W, H);
+        A->thr = 0.62f;
+        for (t = 0; t < (int)(6 * SIM_HZ); t++) world_substep(&W, H);
+        for (t = 0; t < (int)(12 * SIM_HZ) && !A->rotorBroken; t++) {
+            float e = atan2f(59 - A->pos.z, 119 - A->pos.x) - atan2f(A->fwd.z, A->fwd.x);
+            while (e > 3.14159f) e -= 6.28318f;
+            while (e < -3.14159f) e += 6.28318f;
+            A->yaw = fminf(fmaxf(e * 2, -1), 1); A->pitch = fabsf(e) < 0.2f ? -0.6f : 0;
+            A->thr = fminf(fmaxf(A->thr + ((A->pos.y < 25 ? 0.5f : -0.5f) - A->vel.y) * 1.5f * H, 0), 1);
+            world_substep(&W, H);
+        }
+        float hitY = A->agl;
+        for (t = 0; t < (int)(8 * SIM_HZ); t++) world_substep(&W, H);
+        printf("helicopter into the tower: rotor strike %d at %.0f m; fell, now %.1f m up, snapped beams %d, exploded %d\n", A->rotorBroken, hitY, A->agl, A->nbroken, A->c.exploded);
+        const float sink[3] = {2.0f, 4.0f, 7.0f};
+        for (int k = 0; k < 3; k++) {
+            world_init(&W, MAP_AIRPORT); W.ncars = 0;
+            A = &W.air[W.heli]; A->asleep = 0;
+            for (int i = 0; i < A->c.nn; i++) { A->c.n[i].p.y += 0.6f; A->c.n[i].v.y = -sink[k]; }
+            for (t = 0; t < (int)(3 * SIM_HZ); t++) world_substep(&W, H);
+            printf("helicopter landing at %.0f m/s: deformed beams %d, snapped %d\n", sink[k], airframe_damaged_beams(A), A->nbroken);
+        }
+    }
     {   // The generated map: buildings and trees exist and the test routes above are clear of them.
         world_init(&W, MAP_DEFAULT);
         printf("map: %d buildings, %d trees\n", W.nbld, W.ntree);

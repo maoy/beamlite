@@ -16,7 +16,7 @@ static const Grid GRID_DEFAULT = {3, 3, {-40, 0, 40}, {0, 48, 97}, {4, 7, 4}, {7
 static const Grid GRID_NEWYORK = {3, 5, {-54, 0, 54}, {0, 47, 75, 103, 128}, {6, 8, 6}, {7, 3, 3, 3, 4}, 1u << 2, 0, {{0}}, 0};
 // Airport landside loop: highway, access road, forecourt, the two service roads and the apron road.
 // The access road stops at the terminal (link 4-7 blocked); the highway east of the access road crosses the ramp.
-static const Grid GRID_AIRPORT = {3, 3, {-60, 0, 100}, {0, 42, 77}, {4, 7, 4}, {7, 6, 3}, 1u << 2, 1, {{4, 7}}, 1};
+static const Grid GRID_AIRPORT = {3, 3, {-60, 0, 108}, {0, 42, 77}, {4, 7, 4}, {7, 6, 3}, 1u << 2, 1, {{4, 7}}, 1};
 static Grid G;
 static float timer;
 #define CYCLE 30.0f
