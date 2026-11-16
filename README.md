@@ -288,7 +288,8 @@ when you switch maps.
   stereo stream mixes continuous voices, which the game steers every frame, with one-shot voices
   for events. Sources are placed by distance and panned by where they are relative to the camera.
   - Engines: the hatch is a four-cylinder (harmonics of its firing rate, brighter under load), the
-    semi a diesel six with injector clatter, the pickup an electric whine. The physics has no
+    semi a diesel six with injector clatter. The pickup is electric, so it has no engine sound:
+    silent at rest, then a thin motor whine that climbs with speed. The physics has no
     gearbox, so engine speed comes from road speed through made-up gears, and wheelspin lets it
     rev. Your car and the three loudest others each get a voice.
   - Helicopter: blade slap three times per rotor turn, a turbine whine and the tail rotor's buzz,

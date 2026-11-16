@@ -235,10 +235,15 @@ static void smooth(unsigned n) {
 
 static inline float engine_sample(Eng *e, const AudCar *c, float rate) {
     float rev = c->rev, load = c->load, n = nrand(), s = 0;
-    if (c->type == ENG_ELECTRIC) {                          // motor and inverter whine; nearly silent at rest
-        e->ph = wrap1(e->ph + (70.0f + 1500.0f * rev) * rate / SR);
-        s = 0.5f * sinf(TAU * e->ph) + 0.22f * sinf(TAU * 2.0f * e->ph) + 0.1f * sinf(TAU * 3.0f * e->ph);
-        return s * (0.05f + 0.5f * load) * (0.3f + 0.7f * rev) * 0.3f;
+    if (c->type == ENG_ELECTRIC) {
+        // No engine: silent at rest, then a thin motor and gear whine that climbs with road speed and
+        // swells under power. It stays well under the tyres and the wind, as in a real EV.
+        float f = 420.0f + 4300.0f * rev;
+        e->ph = wrap1(e->ph + f * rate / SR);
+        e->z2 = wrap1(e->z2 + f * 2.63f * rate / SR);                    // the reduction gear, not a harmonic
+        s = sinf(TAU * e->ph) + 0.28f * sinf(TAU * e->z2);
+        float moving = fminf(1.0f, rev * 12.0f);                         // nothing until it rolls
+        return s * moving * (0.012f + 0.022f * sqrtf(rev) + 0.075f * load * load);
     }
     if (c->type == ENG_PETROL) {                            // four cylinders: firing at 2x crank speed
         float fc = (850.0f + 5900.0f * rev) / 120.0f * rate;    // engine cycles per second (two crank turns each)

@@ -32,7 +32,8 @@ static AudioParams base(void) {
 static void car(const char *name, int type, float rev, float load) {
     AudioParams p = base();
     p.car[0] = (AudCar){0, type, rev, load, 1, 1};
-    audio_set(&p); render(name, 1.5f, 0.01f, 0.45f);
+    int ev = type == ENG_ELECTRIC;                          // an EV is silent at rest and never loud
+    audio_set(&p); render(name, 1.5f, ev ? (rev > 0 ? 0.004f : 0.0f) : 0.01f, ev ? (rev > 0 ? 0.09f : 0.0005f) : 0.45f);
 }
 int main(int argc, char **argv) {
     audio_listener(0, 0, 0, 1, 0, 0);
@@ -40,7 +41,7 @@ int main(int argc, char **argv) {
     audio_set(&p); render("silence", 0.5f, 0.0f, 0.0001f);
     car("petrol idle", ENG_PETROL, 0.0f, 0.0f); car("petrol mid, half throttle", ENG_PETROL, 0.5f, 0.5f); car("petrol flat out", ENG_PETROL, 1.0f, 1.0f);
     car("diesel idle", ENG_DIESEL, 0.0f, 0.0f); car("diesel pulling", ENG_DIESEL, 0.7f, 1.0f);
-    car("electric cruising", ENG_ELECTRIC, 0.4f, 0.3f); car("electric flat out", ENG_ELECTRIC, 1.0f, 1.0f);
+    car("electric at rest", ENG_ELECTRIC, 0.0f, 0.0f); car("electric cruising", ENG_ELECTRIC, 0.4f, 0.3f); car("electric flat out", ENG_ELECTRIC, 1.0f, 1.0f);
     p = base(); p.wind = 1; audio_set(&p); render("wind, full", 1.5f, 0.02f, 0.4f);
     p = base(); p.road = 1; audio_set(&p); render("tyre roar, full", 1.5f, 0.02f, 0.4f);
     p = base(); p.skid = 1; audio_set(&p); render("tyre squeal, full", 1.5f, 0.02f, 0.4f);
