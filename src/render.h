@@ -35,6 +35,8 @@ void post_set_emissive(float intensity);        // ...and its intensity
 // material id in the colour's alpha (see render.c). bakeAmb/bakeSun are the vertex-light multipliers.
 void post_paint_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time);
 void post_paint_end(void);
+Shader post_city_shader(void);                  // per-pixel building facades (see render.c); for the city models
+void post_set_city(const Env *e, float time);   // once a frame, before drawing them
 void post_water_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time);   // draw the sea surface between these
 void post_water_end(void);
 // Sun shadows. post_shadow_begin returns 1 when the map is due a refresh: then draw the casters

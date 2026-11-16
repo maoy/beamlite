@@ -101,6 +101,13 @@ ducks you have found stay found when you switch maps.
   content (tickers, video walls, colour-cycling spots), no real brands. They spill coloured light
   onto the street and smear across the wet road. There are zebra crossings, lane lines, street
   lamps and yellow cabs parked on 7th Avenue. The washboard moves south of the highway.
+  Around that core the same grid of avenues and cross streets carries on to the edge of the map,
+  about 290 buildings in all with towers up to 190 m, so every street ends in more city instead of
+  forest. Tall buildings step back as they rise and carry cornices, mechanical floors, masts with
+  warning lights or timber water tanks. Pavements are 3 m wide with kerbs, street trees, hydrants,
+  litter bins, newspaper boxes, mailboxes, parking signs and subway entrances with globe lamps.
+  Orange-and-white steam stacks and manholes breathe steam. The furniture is scenery: it doesn't
+  collide. South of the highway is still the proving ground.
 - **Airport**: you start on the access road heading north toward a glass terminal, with a
   departures forecourt under a canopy, taxis at the kerb, and two car parks. Past the terminal,
   airliners sit nose-in at five gates with jet bridges, a control tower glows over the apron, and
@@ -230,6 +237,15 @@ ducks you have found stay found when you switch maps.
   50 m patch, which is rebuilt when a tree in it falls. The renderer bakes the buildings into one
   flat-shaded mesh, with windows, doors, shopfronts, gable roofs, chimneys and rooftop plant.
   The chase camera pulls in so buildings never block the view.
+- **City facades** (`src/render.c`): New York's buildings are plain boxes, a few dozen triangles
+  each, and a shader draws the facade on them per pixel. A wall carries one of six styles in its
+  vertex alpha: blue or green curtain wall, brick, limestone, dark piers, concrete ribbons. Street
+  level gets shopfronts with displays and coloured sign bands. Above that are bays of windows that
+  reflect the sky by day and light up at dusk: offices a floor at a time in cool white, flats one
+  by one in warm light, some with blinds half down. Far away, where a bay is smaller than a pixel,
+  the wall fades to its average so it doesn't shimmer. Position along the wall comes from the
+  object-space position and a normal rebuilt from derivatives, so the pattern stays put on a
+  building while it collapses.
 - **Vehicle paint** (`src/render.c`): vehicles and airliners are shaded per pixel. Each vertex
   carries a normal and a material: clear-coated paint, flame livery, chrome, glass, satin trim,
   rubber or brushed stainless. Diffuse light matches the world's baked lighting. On top come a

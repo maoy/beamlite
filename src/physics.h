@@ -26,8 +26,8 @@ static inline V3 vrot(V3 v, V3 k, float a) {
 #define MAX_TRIS 640
 #define MAX_PANELS 12
 #define MAX_CARS 14
-#define MAX_BOXES 320
-#define MAX_BLD 256
+#define MAX_BOXES 1000
+#define MAX_BLD 900
 #define MAX_TREES 1024
 #define GRID_N 100               // collision grid over the 600 m world
 #define GRID_CELL 6.0f
@@ -291,6 +291,14 @@ int duck_touch(World *w, const Car *c);
 #define BW_DX 0.9f                      // Broadway: x = TS_X + BW_DX * (z - TS_Z)
 #define BW_HALF 7.0f                    // Broadway half-width (perpendicular)
 #define CITY_X 104.0f                   // Midtown spans |x| < CITY_X ...
+// Around that core the same grid carries on to the edge of the map: avenues every 54 m, streets every 30.
+#define NY_EDGE 299.0f
+#define NY_NAV 11                // avenues (x centre, half-width), 7th in the middle
+static const float NY_AV[NY_NAV][2] = {{0, 8}, {54, 6}, {-54, 6}, {110, 6}, {-110, 6}, {164, 6}, {-164, 6}, {218, 6}, {-218, 6}, {272, 6}, {-272, 6}};
+#define NY_NST 9                 // cross streets (z0, z1)
+static const float NY_ST[NY_NST][2] = {{44, 50}, {72, 78}, {100, 106}, {124, 132}, {156, 162}, {186, 192}, {216, 222}, {246, 252}, {276, 282}};
+#define NY_GRID_X 278.0f         // the cross streets run this far east and west; the avenues this far north
+#define NY_GRID_Z 282.0f
 #define CITY_Z0 7.0f                    // ... and CITY_Z0 < z < CITY_Z1
 #define CITY_Z1 132.0f
 #define PLAZA_HALF 30.0f                // Broadway is plaza within this distance (in z) of the bowtie

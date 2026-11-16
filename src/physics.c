@@ -105,6 +105,7 @@ float building_mound(const World *w, int b, float x, float z) {
 static float terrain_base(float x, float z) {
     float r = sqrtf(x * x + z * z);
     float hills = smooth01(90.0f, 170.0f, r);
+    if (g_map == MAP_NEWYORK) hills *= 1.0f - smooth01(-45.0f, -12.0f, z);     // the city is built on the flat
     float far = 0.0f;
     if (g_map == MAP_AIRPORT) {
         float d = 1e9f;                                  // distance outside the graded airfield and causeway
@@ -2078,12 +2079,18 @@ static const Rect DEF_STREETS[] = {
     {36, 44, 7, 136}, {76, 84, 7, 94}, {-44, -36, 7, 136}, {-84, -76, 7, 94},   // side streets
     {30, 78, -13, -7},           // service road into the warehouse district
 };
-static const Rect NY_STREETS[] = {
-    {-8, 8, CITY_Z0, CITY_Z1},                                   // 7th Avenue, full width
-    {48, 60, CITY_Z0, CITY_Z1}, {-60, -48, CITY_Z0, CITY_Z1},    // 6th and 8th Avenues
-    {-CITY_X, CITY_X, 44, 50}, {-CITY_X, CITY_X, 72, 78},        // cross streets
-    {-CITY_X, CITY_X, 100, 106}, {-CITY_X, CITY_X, 124, CITY_Z1},
+static const Rect NY_STREETS[] = {                               // (keep in step with NY_AV / NY_ST in physics.h)
+    {-8, 8, CITY_Z0, NY_GRID_Z},                                 // 7th Avenue, full width
+    {48, 60, CITY_Z0, NY_GRID_Z}, {-60, -48, CITY_Z0, NY_GRID_Z},    // 6th and 8th Avenues
+    {-NY_GRID_X, NY_GRID_X, 44, 50}, {-NY_GRID_X, NY_GRID_X, 72, 78},        // cross streets
+    {-NY_GRID_X, NY_GRID_X, 100, 106}, {-NY_GRID_X, NY_GRID_X, 124, 132},
     {30, 78, -13, -7},                                           // service road into the warehouse district
+    {104, 116, CITY_Z0, NY_GRID_Z}, {-116, -104, CITY_Z0, NY_GRID_Z},        // the avenues beyond the core
+    {158, 170, CITY_Z0, NY_GRID_Z}, {-170, -158, CITY_Z0, NY_GRID_Z},
+    {212, 224, CITY_Z0, NY_GRID_Z}, {-224, -212, CITY_Z0, NY_GRID_Z},
+    {266, 278, CITY_Z0, NY_GRID_Z}, {-278, -266, CITY_Z0, NY_GRID_Z},
+    {-NY_GRID_X, NY_GRID_X, 156, 162}, {-NY_GRID_X, NY_GRID_X, 186, 192},    // and the streets uptown
+    {-NY_GRID_X, NY_GRID_X, 216, 222}, {-NY_GRID_X, NY_GRID_X, 246, 252}, {-NY_GRID_X, NY_GRID_X, 276, 282},
 };
 // No scenery here: ramp + landing run-out, crash wall, spawn, and the headless test routes.
 static const Rect KEEP_CLEAR[] = {
@@ -2105,7 +2112,7 @@ float broadway_x(float z) { return TS_X + BW_DX * (z - TS_Z); }
 float broadway_dist(float x, float z) { return fabsf(x - broadway_x(z)) / sqrtf(1.0f + BW_DX * BW_DX); }
 static int on_broadway(float x, float z, float m) { return g_map == MAP_NEWYORK && z > CITY_Z0 && z < CITY_Z1 && broadway_dist(x, z) < BW_HALF + m; }
 static int in_airport(float x, float z) { return g_map == MAP_AIRPORT && fabsf(x) < 268.0f && z > 6.0f && z < 225.0f; }
-static int in_city(float x, float z) { return g_map == MAP_NEWYORK && fabsf(x) < CITY_X + 6 && z > CITY_Z0 - 2 && z < CITY_Z1 + 6; }
+static int in_city(float x, float z) { (void)x; return g_map == MAP_NEWYORK && z > CITY_Z0 - 2; }   // the whole north half is built up
 
 static int in_rect(const Rect *r, float x, float z, float m) {
     return x > r->x0 - m && x < r->x1 + m && z > r->z0 - m && z < r->z1 + m;
@@ -2380,11 +2387,17 @@ static int pick_kind(int zone, int first) {
     if (zone == 1) return u < 0.3f ? BLD_APARTMENT : u < 0.65f ? BLD_SHOP : BLD_HOUSE;
     if (zone == 2) return u < 0.75f ? BLD_HOUSE : u < 0.87f ? BLD_SHOP : BLD_WAREHOUSE;
     if (zone == 4) return u < 0.62f ? BLD_TOWER : u < 0.92f ? BLD_APARTMENT : BLD_SHOP;          // Midtown
+    if (zone == 5) return u < 0.55f ? BLD_TOWER : BLD_APARTMENT;                                 // the city around it
     return u < 0.75f ? BLD_WAREHOUSE : BLD_SHOP;                                  // industrial
 }
 
 // Frontage width, depth and wall height for a kind.
 static void pick_size(int k, int zone, float *wdt, float *dep, float *ht) {
+    if (zone == 5) {                                // around Midtown: bigger lots, a long tail of tall towers
+        if (k == BLD_TOWER) { float t = frnd(); *wdt = frange(16, 30); *dep = frange(14, 24); *ht = 45.0f + 150.0f * t * t; }
+        else { *wdt = frange(16, 28); *dep = frange(12, 20); *ht = 3.4f * (int)frange(6, 18) + 0.8f; }
+        return;
+    }
     if (zone == 4) {                                // Midtown: big floor plates, tall
         switch (k) {
             case BLD_TOWER: *wdt = frange(11, 20); *dep = frange(12, 20); *ht = frange(55, 140); return;
@@ -2403,7 +2416,8 @@ static void pick_size(int k, int zone, float *wdt, float *dep, float *ht) {
 
 static void fill_block(World *w, const Block *bk) {
     const Rect *R = &bk->r;
-    const float SET = bk->zone == 4 ? 0.8f : 1.5f;     // setback from the kerb (Midtown builds right up to it)
+    const int mid = bk->zone >= 4;                      // Midtown and the city around it
+    const float SET = mid ? 3.2f : 1.5f;                // setback from the kerb: the pavement
     int first = 1;
     // Lots along each street edge: south, north, west, east.
     for (int e = 0; e < 4; e++) {
@@ -2414,7 +2428,7 @@ static void fill_block(World *w, const Block *bk) {
             int k = pick_kind(bk->zone, first);
             float wdt, dep, ht;
             pick_size(k, bk->zone, &wdt, &dep, &ht);
-            if (bk->zone == 4) {                    // Midtown: lots on facing sides share the block depth
+            if (mid) {                              // Midtown: lots on facing sides share the block depth
                 float across = e < 2 ? R->z1 - R->z0 : R->x1 - R->x0;
                 float half = across * 0.5f - SET - 0.3f;
                 dep = across < 24.0f ? across - 2.0f * SET : fminf(dep, half);
@@ -2428,19 +2442,19 @@ static void fill_block(World *w, const Block *bk) {
             else if (e == 1) { fp = (Rect){R->x0 + cur, R->x0 + cur + wdt, R->z1 - SET - dep, R->z1 - SET}; front = 2; }
             else if (e == 2) { fp = (Rect){R->x0 + SET, R->x0 + SET + dep, R->z0 + cur, R->z0 + cur + wdt}; front = 1; }
             else { fp = (Rect){R->x1 - SET - dep, R->x1 - SET, R->z0 + cur, R->z0 + cur + wdt}; front = 0; }
-            float gap = bk->zone == 4 ? 0.6f : (k == BLD_HOUSE ? 2.2f : 1.6f);
+            float gap = mid ? 0.6f : (k == BLD_HOUSE ? 2.2f : 1.6f);
             if (fp.x1 <= R->x1 && fp.z1 <= R->z1 && area_free(w, fp, gap)) {
                 add_building(w, fp, k, ht, front);
                 first = 0;
-                cur += wdt + (bk->zone == 4 ? frange(0.6f, 1.4f) : k == BLD_HOUSE ? frange(2.5f, 5.0f) : frange(1.8f, 3.5f));
+                cur += wdt + (mid ? frange(0.6f, 1.4f) : k == BLD_HOUSE ? frange(2.5f, 5.0f) : frange(1.8f, 3.5f));
             } else cur += 2.0f;
         }
     }
-    if (bk->zone == 4) {                                // Midtown: second row of towers behind the frontage
-        for (int t = 0; t < 40; t++) {
+    if (mid) {                                          // Midtown: second row of towers behind the frontage
+        for (int t = 0; t < (bk->zone == 4 ? 40 : 10); t++) {
             int k = frnd() < 0.7f ? BLD_TOWER : BLD_APARTMENT;
             float wdt, dep, ht;
-            pick_size(k, 4, &wdt, &dep, &ht);
+            pick_size(k, bk->zone, &wdt, &dep, &ht);
             if (wdt > R->x1 - R->x0 - 2 || dep > R->z1 - R->z0 - 2) continue;
             float x0 = frange(R->x0 + 1, R->x1 - 1 - wdt), z0 = frange(R->z0 + 1, R->z1 - 1 - dep);
             Rect fp = {x0, x0 + wdt, z0, z0 + dep};
@@ -2555,6 +2569,21 @@ static void build_newyork(World *w) {
         }
     Block ind = {{34, 74, -38, -14}, 3};
     fill_block(w, &ind);
+    // The rest of the city: the same grid out to the edge of the map, so every street ends in buildings.
+    const float cx[10][2] = {{-266, -224}, {-212, -170}, {-158, -116}, {-CITY_X + 1, -60}, {-48, -8}, {8, 48}, {60, CITY_X - 1}, {116, 158}, {170, 212}, {224, 266}};
+    const float cz[9][2] = {{14, 44}, {50, 72}, {78, 100}, {106, 124}, {132, 156}, {162, 186}, {192, 216}, {222, 246}, {252, 276}};
+    for (int i = 0; i < 10; i++)
+        for (int j = 0; j < 9; j++) {
+            if (i >= 3 && i <= 6 && j < 4) continue;                       // the Midtown core, done above
+            Block b = {{cx[i][0], cx[i][1], cz[j][0], cz[j][1]}, 5};
+            fill_block(w, &b);
+        }
+    for (int j = 0; j < 9; j++) {                                          // a wall of buildings along the east and west edges
+        Block e = {{NY_GRID_X + 1, NY_EDGE, cz[j][0], cz[j][1]}, 5}, wv = {{-NY_EDGE, -NY_GRID_X - 1, cz[j][0], cz[j][1]}, 5};
+        fill_block(w, &e); fill_block(w, &wv);
+    }
+    Block top = {{-NY_EDGE, NY_EDGE, NY_GRID_Z + 1, NY_EDGE}, 5};          // and across the top, closing the avenues
+    fill_block(w, &top);
 }
 
 // Airport map: terminal, gate airliners, control tower, hangars (and a parked airliner outside them).
@@ -2603,7 +2632,7 @@ void world_init(World *w, int map) {
     else build_default(w);
 
     // Roadside trees along the highway and the cross road, out in the country.
-    float crossNorth = g_map == MAP_NEWYORK ? 142.0f : g_map == MAP_AIRPORT ? 1e9f : 100.0f;
+    float crossNorth = g_map == MAP_DEFAULT ? 100.0f : 1e9f;
     for (float x = 66; x < 250; x += 11) { try_tree(w, x, 14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); try_tree(w, x + 5, -14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); }
     for (float x = -86; x > -250; x -= 11) { try_tree(w, x, 14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); try_tree(w, x - 5, -14.5f + frange(-1, 1), frange(6, 9), TREE_BROADLEAF, 2.0f); }
     for (float z = crossNorth; z < 250; z += 12) { try_tree(w, 12, z, frange(6, 10), TREE_CONIFER, 2.0f); try_tree(w, -12, z + 6, frange(6, 10), TREE_CONIFER, 2.0f); }

@@ -220,6 +220,96 @@ static const char *WATER_FS = GLSL SKY_GLSL
     "  finalColor = vec4(pow(max(col, 0.0), vec3(1.0 / 2.2)), 1.0);\n"
     "}\n";
 
+// City facades. The city mesh is plain vertex-coloured boxes with the lighting baked in; a wall whose
+// vertex alpha is below 250 carries a facade style, and this shader draws that facade on it per pixel:
+// a storefront floor with sign bands, then bays of windows above (curtain wall, punched masonry,
+// ribbons, piers), each pane reflecting the sky or, when someone is in, lit from inside. Position
+// along the wall comes from the object-space position and a normal rebuilt from its derivatives, so no
+// extra vertex data is needed and the pattern stays put on a building that is collapsing.
+static const char *CITY_VS =
+    "#version 330\n"
+    "in vec3 vertexPosition; in vec4 vertexColor;\n"
+    "uniform mat4 mvp; uniform mat4 matModel;\n"
+    "out vec2 fragTexCoord; out vec4 fragColor; out vec3 objPos; out vec3 fragPos;\n"
+    "void main() { fragTexCoord = vec2(0.0); fragColor = vertexColor; objPos = vertexPosition;\n"
+    "  fragPos = (matModel * vec4(vertexPosition, 1.0)).xyz; gl_Position = mvp * vec4(vertexPosition, 1.0); }\n";
+static const char *CITY_FS = GLSL SKY_GLSL
+    "in vec3 objPos; in vec3 fragPos;\n"
+    "uniform float night;\n"
+    "vec3 skyLite(vec3 r) {\n"
+    "  float sd = max(dot(r, sunDir), 0.0);\n"
+    "  return mix(horizonCol(r), zenith, pow(clamp(r.y, 0.0, 1.0), 0.5)) + sunCol * (pow(sd, 6.0) * 0.30 + pow(sd, 90.0) * 0.9); }\n"
+    "float band(float f, float a, float b, float w) { return smoothstep(a - w, a + w, f) * (1.0 - smoothstep(b - w, b + w, f)); }\n"
+    "void main() {\n"
+    "  float st = floor(fragColor.a * 255.0 + 0.5);\n"
+    "  vec3 base = fragColor.rgb;\n"
+    "  if (st > 249.5) { finalColor = vec4(base, 1.0); return; }\n"
+    "  vec3 N = normalize(cross(dFdx(objPos), dFdy(objPos)));\n"
+    "  if (abs(N.y) > 0.5) { finalColor = vec4(base, 1.0); return; }\n"
+    "  vec3 V = normalize(fragPos - camPos);\n"
+    "  if (dot(N, V) > 0.0) N = -N;\n"
+    "  N = normalize(vec3(N.x, 0.0, N.z));\n"
+    "  vec3 T = vec3(-N.z, 0.0, N.x);\n"
+    "  float u = dot(objPos, T), v = objPos.y;\n"
+    "  float sid = st + dot(abs(N.xz), vec2(3.0, 7.0));\n"    // differs between a building's faces
+    // Style: bay width, floor height, window width and height as fractions, glazing tint.
+    "  float bay = 3.0, fl = 3.6, wx = 0.6, wy = 0.6, y0 = 0.2; vec3 tint = vec3(0.10, 0.13, 0.17);\n"
+    "  if (st < 1.5) { bay = 1.6; fl = 3.9; wx = 0.90; wy = 0.76; y0 = 0.12; tint = vec3(0.16, 0.26, 0.38); }\n"        // blue curtain wall
+    "  else if (st < 2.5) { bay = 2.7; fl = 3.3; wx = 0.44; wy = 0.54; y0 = 0.24; }\n"                                   // brick, punched windows
+    "  else if (st < 3.5) { bay = 3.3; fl = 3.7; wx = 0.56; wy = 0.60; y0 = 0.20; }\n"                                   // limestone
+    "  else if (st < 4.5) { bay = 1.4; fl = 4.0; wx = 0.78; wy = 0.90; y0 = 0.05; tint = vec3(0.05, 0.06, 0.08); }\n"    // dark piers, glass strips
+    "  else if (st < 5.5) { bay = 6.0; fl = 3.5; wx = 0.96; wy = 0.50; y0 = 0.28; }\n"                                   // concrete, ribbon windows
+    "  else { bay = 2.0; fl = 3.9; wx = 0.88; wy = 0.82; y0 = 0.09; tint = vec3(0.13, 0.26, 0.23); }\n"                  // green glass
+    "  float shade = clamp(max(base.r, max(base.g, base.b)) * 1.5, 0.35, 1.0);\n"
+    "  vec3 R = reflect(V, N);\n"
+    "  vec3 refl = pow(skyLite(normalize(vec3(R.x, abs(R.y) * 0.7 + 0.04, R.z))), vec3(1.0 / 2.2));\n"
+    "  refl *= mix(0.35, 1.0, smoothstep(6.0, 70.0, v));\n"   // low floors mirror the dark street canyon, not the sky
+    "  float F = clamp(0.22 + 0.78 * pow(1.0 - max(dot(-V, N), 0.0), 4.0), 0.0, 1.0);\n"
+    "  vec3 col;\n"
+    "  const float GF = 5.4;\n"
+    "  if (v < GF) {\n"                                         // street level: shopfronts under a sign band
+    "    float shop = floor(u / 9.0 + sid);\n"
+    "    float hs = hash(vec2(shop, sid));\n"
+    "    float fu = fract(u / 4.5), w = fwidth(u / 4.5);\n"
+    "    float pane = band(fu, 0.04, 0.96, w) * band(v, 0.55, 3.55, fwidth(v));\n"
+    "    vec3 inside = mix(vec3(1.0, 0.80, 0.52), vec3(0.80, 0.90, 1.0), step(0.7, hs)) * (0.55 + 0.6 * hash(vec2(shop, 4.0)));\n"
+    "    float open = step(0.25, hash(vec2(shop, 9.0)));\n"
+    "    inside *= (0.30 + 0.70 * smoothstep(0.5, 3.4, v)) * (0.62 + 0.55 * hash(floor(vec2(u * 1.3, v * 1.6)) + shop));\n"   // shelves and displays
+    "    vec3 glass = mix(tint * 0.5 * shade + inside * (0.16 + 0.08 * open), refl * 0.8, F * 0.7);\n"
+    "    glass = mix(glass, inside * (0.70 + 0.75 * night), open * (0.45 + 0.50 * night) * (1.0 - F * 0.5));\n"
+    "    vec3 sign = 0.5 + 0.5 * cos(6.2831 * (hs + vec3(0.0, 0.33, 0.67)));\n"
+    "    sign = mix(sign, vec3(dot(sign, vec3(0.33))), 0.35) * (0.80 * shade + 1.3 * night * step(0.2, hs));\n"
+    "    float sb = band(v, 3.95, 4.95, fwidth(v)) * band(fract(u / 9.0 + sid), 0.05, 0.95, fwidth(u / 9.0)) * step(0.15, hs);\n"
+    "    col = mix(base * 0.80, glass, pane);\n"
+    "    col = mix(col, sign, sb);\n"
+    "    col *= 0.55 + 0.45 * smoothstep(0.0, 0.5, v);\n"      // grime at the pavement
+    "  } else {\n"
+    "    vec2 q = vec2(u / bay + sid * 0.37, (v - GF) / fl);\n"
+    "    vec2 cell = floor(q), f = fract(q), w = fwidth(q);\n"
+    "    float win = band(f.x, 0.5 - wx * 0.5, 0.5 + wx * 0.5, w.x) * band(f.y, y0, y0 + wy, w.y);\n"
+    "    float r = hash(cell + sid);\n"
+    "    vec3 glass = mix(tint * shade * (0.55 + 0.5 * hash(cell + 3.3)), refl, F);\n"
+    "    glass *= 1.0 - 0.35 * step(0.80, hash(cell + 6.1)) * step(f.y, y0 + wy * (0.4 + 0.5 * hash(cell + 1.7)));\n"   // some blinds half down
+    // Lit rooms: whole floors of offices tend to be on together; flats come on one by one.
+    "    float office = step(st, 1.5) + step(3.5, st) * step(st, 4.5) + step(5.5, st);\n"
+    "    float floorOn = hash(vec2(cell.y, sid));\n"
+    "    float p = night * mix(0.34, 0.20 + 0.55 * step(0.45, floorOn), office) + (1.0 - night) * 0.03;\n"
+    "    float on = step(1.0 - p, r);\n"
+    "    vec3 lamp = mix(vec3(1.0, 0.76, 0.46), vec3(0.78, 0.90, 1.0), max(step(0.80, hash(cell + 9.1)), office * step(0.3, hash(cell + 2.9))));\n"
+    "    float fy = clamp((f.y - y0) / wy, 0.0, 1.0);\n"
+    "    vec3 room = lamp * (0.75 + 1.25 * hash(cell + 5.3)) * (0.45 + 0.55 * smoothstep(0.15, 0.95, fy)) * (0.7 + 0.3 * night);\n"
+    "    room *= 1.0 - 0.45 * step(0.55, hash(cell + 7.7)) * step(fy, 0.42);\n"   // furniture against the glass
+    "    glass = mix(glass, room, on * (1.0 - 0.35 * F));\n"
+    "    vec3 wall = base * (1.0 - 0.10 * step(f.y, 0.05)) * (0.94 + 0.12 * hash(cell * 0.5 + 11.0));\n"   // floor lines, weathering
+    "    col = mix(wall, glass, win);\n"
+    // Far away the bays shrink below a pixel: fade to the facade's average instead of shimmering.
+    "    float lod = clamp(1.6 - max(w.x, w.y) * 3.2, 0.0, 1.0);\n"
+    "    vec3 avgGlass = mix(mix(tint * shade * 0.8, refl, F), lamp * 1.3, p * 0.85);\n"
+    "    col = mix(mix(base, avgGlass, wx * wy * 0.95), col, lod);\n"
+    "  }\n"
+    "  finalColor = vec4(col, 1.0);\n"
+    "}\n";
+
 // Shadow-map depth pass: any colour will do.
 static const char *DEPTH_FS = "#version 330\nout vec4 finalColor;\nvoid main() { finalColor = vec4(1.0); }\n";
 
@@ -447,7 +537,8 @@ static Shader shEmissive, shAtmos, shSSR, shComposite, shBright, shBlur, shFinal
 static int locIntensity, locAtmos[U_COUNT], locSSR[U_COUNT], locWet, locRain, locRoads, locNRoads, locNHighway, locRefl;
 static int locBrightTexel, locBrightThr, locBlurStep, locFinal[6];
 static RenderTexture2D scene, hdr, hdr2, refl[2], bl[3][2], aoRT[2];
-static Shader shPaint, shDepth, shAO, shWater;
+static Shader shPaint, shDepth, shAO, shWater, shCity;
+static int locCity[U_COUNT], locCityNight;
 static int locWater[U_COUNT], locWaterCol;
 static int locPaint[U_COUNT], locPaintAmb, locPaintSun, locPaintGround, locPaintLamp, locAO[U_COUNT];
 static int locShMap, locShVP, locShAmb, locShSun, locShOn, locShTexel, locAoTex, locAoOn;
@@ -532,6 +623,9 @@ void post_init(void) {
     shPaint = LoadShaderFromMemory(PAINT_VS, PAINT_FS);
     shDepth = LoadShaderFromMemory(NULL, DEPTH_FS);
     shAO = LoadShaderFromMemory(NULL, AO_FS);
+    shCity = LoadShaderFromMemory(CITY_VS, CITY_FS);
+    locCityNight = GetShaderLocation(shCity, "night");
+    for (int i = 0; i < U_COUNT; i++) locCity[i] = GetShaderLocation(shCity, SKY_UNIFORMS[i]);
     shWater = LoadShaderFromMemory(PAINT_VS, WATER_FS);
     locWaterCol = GetShaderLocation(shWater, "waterCol");
     for (int i = 0; i < U_COUNT; i++) locWater[i] = GetShaderLocation(shWater, SKY_UNIFORMS[i]);
@@ -671,6 +765,15 @@ void post_paint_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time
     SetShaderValue(shPaint, locPaintLamp, &lamp, SHADER_UNIFORM_FLOAT);
 }
 void post_paint_end(void) { EndShaderMode(); }
+
+// City facades: models whose material uses this shader need its uniforms set once a frame.
+Shader post_city_shader(void) { return shCity; }
+void post_set_city(const Env *e, float time) {
+    BeginShaderMode(shCity);
+    set_sky_uniforms(shCity, locCity, e, time);
+    SetShaderValue(shCity, locCityNight, &e->lights, SHADER_UNIFORM_FLOAT);
+    EndShaderMode();
+}
 
 // Water: draw the sea surface (world-space vertices) between these.
 void post_water_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time) {

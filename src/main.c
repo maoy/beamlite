@@ -80,7 +80,7 @@ static Color terrain_color(float x, float z, float y, V3 n) {
     else if (road_at(x + 2.2f, z) == 2 || road_at(x - 2.2f, z) == 2 || road_at(x, z + 2.2f) == 2 || road_at(x, z - 2.2f) == 2) {
         r = 0.50f; g = 0.49f; b = 0.47f; cover = 0.85f;                                          // pavement
     }
-    else if (map_has_broadway() && fabsf(x) < CITY_X + 4 && z > CITY_Z0 + 1 && z < CITY_Z1 + 4) {
+    else if (map_has_broadway() && z > CITY_Z0 + 1) {
         r = 0.46f + 0.03f * noise; g = 0.45f + 0.03f * noise; b = 0.43f; cover = 0.85f;           // Midtown: paved kerb to kerb
     }
     else if (sea_dist(x, z) > -7.0f) {                                                           // beach, then seabed
@@ -158,6 +158,7 @@ static int nExt, hasFar;
 
 typedef struct { float *v; unsigned char *c; int n, cap; } MeshB;
 static int mbFlat;                 // when set, mb_tri skips lighting (glowing surfaces)
+static int mbStyle;                // when set, goes in the vertex alpha: a facade style for the city shader
 
 static void mb_push(MeshB *m, V3 p, Color c) {
     if (m->n == m->cap) {
@@ -166,7 +167,7 @@ static void mb_push(MeshB *m, V3 p, Color c) {
         m->c = MemRealloc(m->c, m->cap * 4);
     }
     m->v[m->n * 3] = p.x; m->v[m->n * 3 + 1] = p.y; m->v[m->n * 3 + 2] = p.z;
-    m->c[m->n * 4] = c.r; m->c[m->n * 4 + 1] = c.g; m->c[m->n * 4 + 2] = c.b; m->c[m->n * 4 + 3] = 255;
+    m->c[m->n * 4] = c.r; m->c[m->n * 4 + 1] = c.g; m->c[m->n * 4 + 2] = c.b; m->c[m->n * 4 + 3] = mbStyle ? mbStyle : 255;
     m->n++;
 }
 
@@ -344,17 +345,17 @@ static void place_street_lamps(MeshB *m, const World *w) {
 
 // Lamps along every avenue and cross-street kerb.
 static void place_lamps_newyork(MeshB *m, const World *w) {
-    const float av[3][2] = {{-8, 8}, {48, 60}, {-60, -48}};
-    const float st[4][2] = {{44, 50}, {72, 78}, {100, 106}, {124, CITY_Z1}};
-    for (int i = 0; i < 3; i++)
-        for (float z = 16; z < CITY_Z1 - 4; z += 22) {
-            if (lamp_spot_ok(w, av[i][0] - 0.7f, z)) street_lamp(m, av[i][0] - 0.7f, z, 1, 0);
-            if (lamp_spot_ok(w, av[i][1] + 0.7f, z + 11)) street_lamp(m, av[i][1] + 0.7f, z + 11, -1, 0);
+    for (int i = 0; i < NY_NAV; i++) {
+        float x0 = NY_AV[i][0] - NY_AV[i][1], x1 = NY_AV[i][0] + NY_AV[i][1];
+        for (float z = 16; z < NY_GRID_Z - 4; z += 24) {
+            if (lamp_spot_ok(w, x0 - 0.7f, z)) street_lamp(m, x0 - 0.7f, z, 1, 0);
+            if (lamp_spot_ok(w, x1 + 0.7f, z + 12)) street_lamp(m, x1 + 0.7f, z + 12, -1, 0);
         }
-    for (int j = 0; j < 4; j++)
-        for (float x = -CITY_X + 4; x < CITY_X - 4; x += 24) {
-            if (lamp_spot_ok(w, x, st[j][0] - 0.7f)) street_lamp(m, x, st[j][0] - 0.7f, 0, 1);
-            if (j < 3 && lamp_spot_ok(w, x + 12, st[j][1] + 0.7f)) street_lamp(m, x + 12, st[j][1] + 0.7f, 0, -1);
+    }
+    for (int j = 0; j < NY_NST; j++)
+        for (float x = -NY_GRID_X + 4; x < NY_GRID_X - 4; x += 26) {
+            if (lamp_spot_ok(w, x, NY_ST[j][0] - 0.7f)) street_lamp(m, x, NY_ST[j][0] - 0.7f, 0, 1);
+            if (lamp_spot_ok(w, x + 13, NY_ST[j][1] + 0.7f)) street_lamp(m, x + 13, NY_ST[j][1] + 0.7f, 0, -1);
         }
 }
 
@@ -393,42 +394,46 @@ static void paint_rect(MeshB *m, float x0, float x1, float z0, float z1) {
     mb_quad(m, a, b, c, d, (Color){222, 222, 214, 255}, v3((x0 + x1) * 0.5f, -10, (z0 + z1) * 0.5f));
 }
 static void build_markings_airport(MeshB *m);
+static void build_ny_paint(MeshB *m);
 static void build_markings(const World *w) {
     if (hasMarkings) { UnloadModel(markings); hasMarkings = 0; }
     if (w->map == MAP_AIRPORT) { MeshB am = {0}; build_markings_airport(&am); markings = mb_model(&am); hasMarkings = 1; return; }
     if (w->map != MAP_NEWYORK) return;
     MeshB m = {0};
-    const float av[3][2] = {{-8, 8}, {48, 60}, {-60, -48}};
-    const float st[4][2] = {{44, 50}, {72, 78}, {100, 106}, {124, CITY_Z1}};
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 4; j++) {
+    float av[NY_NAV][2];
+    const float (*st)[2] = NY_ST;
+    for (int i = 0; i < NY_NAV; i++) { av[i][0] = NY_AV[i][0] - NY_AV[i][1]; av[i][1] = NY_AV[i][0] + NY_AV[i][1]; }
+    build_ny_paint(&m);
+    for (int i = 0; i < NY_NAV; i++)
+        for (int j = 0; j < NY_NST; j++) {
             for (int sd = 0; sd < 2; sd++) {
                 // Crossing the street, either side of the avenue: stripes run along x.
                 float bx0 = sd ? av[i][1] + 0.6f : av[i][0] - 3.6f;
-                for (float z = st[j][0] + 0.4f; z + 0.45f < st[j][1] - 0.3f; z += 0.9f) paint_rect(&m, bx0, bx0 + 3.0f, z, z + 0.45f);
+                if (bx0 > -NY_GRID_X && bx0 + 3 < NY_GRID_X)
+                    for (float z = st[j][0] + 0.4f; z + 0.45f < st[j][1] - 0.3f; z += 0.9f) paint_rect(&m, bx0, bx0 + 3.0f, z, z + 0.45f);
                 // Crossing the avenue, either side of the street: stripes run along z.
                 float bz0 = sd ? st[j][1] + 0.6f : st[j][0] - 3.6f;
-                if (bz0 < CITY_Z0 + 1 || bz0 + 3 > CITY_Z1) continue;
+                if (bz0 < CITY_Z0 + 1 || bz0 + 3 > NY_GRID_Z) continue;
                 for (float x = av[i][0] + 0.4f; x + 0.45f < av[i][1] - 0.3f; x += 0.9f) paint_rect(&m, x, x + 0.45f, bz0, bz0 + 3.0f);
             }
         }
-    for (int i = 0; i < 3; i++) {                       // lane lines along the avenues
+    for (int i = 0; i < NY_NAV; i++) {                  // lane lines along the avenues
         float wdt = av[i][1] - av[i][0];
         int lanes = (int)(wdt / 3.8f);
         for (int l = 1; l < lanes; l++) {
             float x = av[i][0] + wdt * l / lanes;
-            for (float z = CITY_Z0 + 2; z < CITY_Z1 - 3; z += 9) {
+            for (float z = CITY_Z0 + 2; z < NY_GRID_Z - 3; z += 9) {
                 int junction = 0;
-                for (int j = 0; j < 4; j++) if (z + 3 > st[j][0] - 4 && z < st[j][1] + 4) junction = 1;
+                for (int j = 0; j < NY_NST; j++) if (z + 3 > st[j][0] - 4 && z < st[j][1] + 4) junction = 1;
                 if (!junction && road_at(x, z) != 3) paint_rect(&m, x - 0.08f, x + 0.08f, z, z + 3.0f);
             }
         }
     }
-    for (int j = 0; j < 4; j++)                          // centre lines along the streets
-        for (float x = -CITY_X + 2; x < CITY_X - 3; x += 9) {
+    for (int j = 0; j < NY_NST; j++)                    // centre lines along the streets
+        for (float x = -NY_GRID_X + 2; x < NY_GRID_X - 3; x += 9) {
             float zc = (st[j][0] + st[j][1]) * 0.5f;
             int junction = 0;
-            for (int i = 0; i < 3; i++) if (x + 3 > av[i][0] - 4 && x < av[i][1] + 4) junction = 1;
+            for (int i = 0; i < NY_NAV; i++) if (x + 3 > av[i][0] - 4 && x < av[i][1] + 4) junction = 1;
             if (!junction && road_at(x, zc) == 2 && road_at(x + 3, zc) == 2) paint_rect(&m, x, x + 3.0f, zc - 0.08f, zc + 0.08f);
         }
     markings = mb_model(&m);
@@ -747,12 +752,239 @@ static void build_markings_airport(MeshB *m) {
 }
 
 
+// ------------------------------------------------------------- New York ----
+// Buildings here are plain boxes whose walls carry a facade style for the city shader (render.c), so a
+// 150 m tower is a few dozen triangles. Tall ones step back as they rise; roofs get cornices,
+// mechanical floors, masts and water tanks; street level gets canopies, awnings and shop-light.
+static int cityMap;                             // the map build_city is working on
+static void mb_blob(MeshB *m, V3 ctr, float rx, float ry, Color col, unsigned seed);
+
+static void ny_box(MeshB *m, V3 mn, V3 mx, Color wall, Color roof, int style) {
+    mbStyle = style; box_shell(m, mn, mx, wall, roof); mbStyle = 0;
+}
+// A rooftop water tank: timber staves on a steel frame, conical cap.
+static void ny_tank(MeshB *m, float x, float y, float z) {
+    Color steel = {70, 72, 76, 255}, wood = {112, 80, 54, 255}, cap = {58, 54, 50, 255};
+    for (int i = 0; i < 4; i++) {
+        float lx = x + (i & 1 ? 1.0f : -1.0f), lz = z + (i & 2 ? 1.0f : -1.0f);
+        box_shell(m, v3(lx - 0.08f, y, lz - 0.08f), v3(lx + 0.08f, y + 2.2f, lz + 0.08f), steel, steel);
+    }
+    V3 c = v3(x, y + 3.6f, z);
+    for (int k = 0; k < 10; k++) {
+        float a0 = k * 0.628318f, a1 = (k + 1) * 0.628318f, r = 1.55f;
+        V3 p0 = v3(x + cosf(a0) * r, y + 2.2f, z + sinf(a0) * r), p1 = v3(x + cosf(a1) * r, y + 2.2f, z + sinf(a1) * r);
+        V3 q0 = vadd(p0, v3(0, 2.8f, 0)), q1 = vadd(p1, v3(0, 2.8f, 0));
+        mb_quad(m, p0, p1, q1, q0, k & 1 ? wood : scale_col(wood, 0.9f), c);
+        mb_tri(m, q0, q1, v3(x, y + 6.0f, z), cap, c);
+        mb_tri(m, p0, p1, v3(x, y + 2.2f, z), cap, v3(x, y + 9, z));
+    }
+}
+
+static void build_ny_building(MeshB *m, const Building *B) {
+    bseed = B->seed;
+    float g = B->ground, H = B->mx.y - g, top = B->mx.y;
+    V3 mn = B->mn, mx = B->mx;
+    float u = brnd();
+    int style = B->kind == BLD_TOWER ? (u < 0.34f ? 1 : u < 0.52f ? 4 : u < 0.68f ? 6 : u < 0.86f ? 3 : 5)
+                                     : (u < 0.55f ? 2 : u < 0.85f ? 3 : 5);
+    static const Color PAL[7][3] = {{{0}},
+        {{96, 108, 122, 255}, {84, 96, 112, 255}, {112, 120, 130, 255}},        // steel-framed glass
+        {{142, 76, 58, 255}, {118, 66, 52, 255}, {176, 150, 118, 255}},         // brick: red, brown, buff
+        {{198, 190, 172, 255}, {176, 170, 158, 255}, {206, 200, 190, 255}},     // limestone
+        {{58, 56, 56, 255}, {42, 46, 52, 255}, {86, 70, 54, 255}},              // dark metal, bronze
+        {{152, 152, 148, 255}, {168, 164, 156, 255}, {134, 136, 138, 255}},     // concrete
+        {{70, 98, 94, 255}, {64, 86, 96, 255}, {92, 104, 92, 255}}};            // green glass
+    Color wall = PAL[style][(int)(brnd() * 3) % 3];
+    Color trim = style == 2 ? (Color){196, 188, 172, 255} : scale_col(wall, style == 3 ? 0.86f : 1.18f), roofc = {74, 74, 78, 255};
+    // Tiers: tall buildings step back (never below 52 m, so the screens around the square stay on a wall).
+    float wd = mx.x - mn.x, dp = mx.z - mn.z;
+    float h1 = H, h2 = H, in1 = 0, in2 = 0;
+    if (H > 75 && brnd() < 0.75f) {
+        h1 = fmaxf(52.0f, H * (0.48f + 0.26f * brnd()));
+        in1 = fminf(1.5f + 2.2f * brnd(), fminf(wd, dp) * 0.5f - 3.5f);
+        if (in1 < 1.0f) { in1 = 0; h1 = H; }
+        else if (H > 115 && brnd() < 0.7f) {
+            h2 = h1 + (H - h1) * (0.45f + 0.3f * brnd());
+            in2 = fminf(in1 + 1.5f + 1.8f * brnd(), fminf(wd, dp) * 0.5f - 2.5f);
+            if (in2 < in1 + 0.8f) { in2 = in1; h2 = H; }
+        }
+    }
+    ny_box(m, mn, v3(mx.x, g + h1, mx.z), wall, roofc, style);
+    if (h1 < H) {
+        box_shell(m, v3(mn.x - 0.25f, g + h1 - 0.5f, mn.z - 0.25f), v3(mx.x + 0.25f, g + h1 + 0.25f, mx.z + 0.25f), trim, roofc);
+        ny_box(m, v3(mn.x + in1, g + h1, mn.z + in1), v3(mx.x - in1, g + h2, mx.z - in1), wall, roofc, style);
+        if (h2 < H) {
+            box_shell(m, v3(mn.x + in1 - 0.2f, g + h2 - 0.4f, mn.z + in1 - 0.2f), v3(mx.x - in1 + 0.2f, g + h2 + 0.2f, mx.z - in1 + 0.2f), trim, roofc);
+            ny_box(m, v3(mn.x + in2, g + h2, mn.z + in2), v3(mx.x - in2, top, mx.z - in2), wall, roofc, style);
+        }
+    }
+    float in = h2 < H ? in2 : in1;                  // inset of the top tier
+    V3 tn = v3(mn.x + in, top, mn.z + in), tx = v3(mx.x - in, top, mx.z - in);
+    // Cornice, and a band over the shopfronts.
+    box_shell(m, v3(tn.x - 0.3f, top - 0.3f, tn.z - 0.3f), v3(tx.x + 0.3f, top + 0.6f, tx.z + 0.3f), trim, roofc);
+    box_shell(m, v3(mn.x - 0.14f, g + 5.15f, mn.z - 0.14f), v3(mx.x + 0.14f, g + 5.5f, mx.z + 0.14f), style == 1 || style == 4 || style == 6 ? (Color){46, 48, 52, 255} : trim, roofc);
+    // Rooftop: mechanical floor, then a mast on the tall ones or a water tank on the masonry ones.
+    float cx = 0.5f * (tn.x + tx.x), cz = 0.5f * (tn.z + tx.z), tw = tx.x - tn.x, td = tx.z - tn.z, ry = top + 0.6f;
+    if (tw > 7 && td > 7) {
+        float mh = 3.0f + 3.0f * brnd(), k = 0.22f + 0.12f * brnd();
+        box_shell(m, v3(tn.x + tw * k, ry, tn.z + td * k), v3(tx.x - tw * k, ry + mh, tx.z - td * k), (Color){128, 130, 134, 255}, roofc);
+        if (H > 110 && brnd() < 0.65f) {            // stepped crown and a mast with an aircraft warning light
+            box_shell(m, v3(cx - tw * 0.12f, ry + mh, cz - td * 0.12f), v3(cx + tw * 0.12f, ry + mh + 5.0f, cz + td * 0.12f), trim, roofc);
+            float sh = 14.0f + 22.0f * brnd();
+            box_shell(m, v3(cx - 0.3f, ry + mh + 5.0f, cz - 0.3f), v3(cx + 0.3f, ry + mh + 5.0f + sh, cz + 0.3f), (Color){150, 152, 156, 255}, roofc);
+            mbFlat = 1; box_shell(&GLOW, v3(cx - 0.35f, ry + mh + 5.0f + sh, cz - 0.35f), v3(cx + 0.35f, ry + mh + 5.7f + sh, cz + 0.35f), (Color){255, 40, 30, 255}, (Color){255, 40, 30, 255}); mbFlat = 0;
+        } else if ((style == 2 || style == 3) && H < 85) ny_tank(m, tn.x + tw * 0.2f, ry, tn.z + td * 0.2f);
+        else if (brnd() < 0.5f) box_shell(m, v3(tx.x - tw * 0.2f - 1.5f, ry, tx.z - td * 0.2f - 1.2f), v3(tx.x - tw * 0.2f, ry + 1.6f, tx.z - td * 0.2f), (Color){150, 152, 156, 255}, (Color){110, 112, 116, 255});
+    }
+    // Street level on the front: entrance canopy, awnings on the masonry buildings, light spilling out.
+    V3 o, a, n; float len;
+    facade(B, B->front, &o, &a, &n, &len);
+    V3 mid = vadd(o, vscale(a, len * 0.5f));
+    V3 c0 = vadd(vadd(mid, vscale(a, -2.0f)), v3(0, g + 3.9f, 0)), c1 = vadd(vadd(mid, vscale(a, 2.0f)), vscale(n, 2.2f));
+    box_shell(m, v3(fminf(c0.x, c1.x), g + 3.9f, fminf(c0.z, c1.z)), v3(fmaxf(c0.x, c1.x), g + 4.15f, fmaxf(c0.z, c1.z)), (Color){40, 42, 46, 255}, (Color){60, 62, 66, 255});
+    wall_lamp(m, B, B->front, len * 0.5f, 4.6f);
+    if (style == 2 || style == 3)
+        for (float uu = 1.0f; uu + 3.6f < len - 1.0f; uu += 4.5f) {
+            if (fabsf(uu + 1.8f - len * 0.5f) < 3.6f || brnd() < 0.35f) continue;
+            Color ac = SIGNS[(int)(brnd() * 5) % 5];
+            ac.a = 255;
+            V3 p0 = vadd(vadd(o, vscale(a, uu)), vadd(vscale(n, 0.05f), v3(0, g + 3.75f, 0))), p1 = vadd(p0, vscale(a, 3.6f));
+            V3 p2 = vadd(vadd(p1, vscale(n, 1.3f)), v3(0, -0.6f, 0)), p3 = vadd(vadd(p0, vscale(n, 1.3f)), v3(0, -0.6f, 0));
+            mb_quad(m, p0, p1, p2, p3, ac, v3(mid.x, g - 20, mid.z));
+            mb_quad(m, p3, p2, vadd(p2, v3(0, -0.25f, 0)), vadd(p3, v3(0, -0.25f, 0)), scale_col(ac, 0.8f), vsub(mid, vscale(n, 5)));
+        }
+    for (float uu = 4.0f; uu < len - 2.0f; uu += 9.0f) ground_pool(vadd(vadd(o, vscale(a, uu)), vscale(n, 2.0f)), 3.6f, scale_col(WARM, 0.16f));
+}
+
+// Blocks of the street grid (the same lists physics.c fills with buildings).
+static const float NYBX[12][2] = {{-299, -279}, {-266, -224}, {-212, -170}, {-158, -116}, {-103, -60}, {-48, -8}, {8, 48}, {60, 103}, {116, 158}, {170, 212}, {224, 266}, {279, 299}};
+static const float NYBZ[10][2] = {{14, 44}, {50, 72}, {78, 100}, {106, 124}, {132, 156}, {162, 186}, {192, 216}, {222, 246}, {252, 276}, {283, 299}};
+#define NY_WALK 3.2f                            // pavement width between kerb and building line
+
+static float nyh(float a, float b) { float s = sinf(a * 12.9898f + b * 78.233f) * 43758.5453f; return s - floorf(s); }
+static int ny_walk_ok(const World *w, float x, float z) {       // on the pavement: not road, plaza, Broadway or a building
+    return road_at(x, z) == 0 && broadway_dist(x, z) > BW_HALF + 1.0f && !world_point_solid(w, v3(x, 1.0f, z));
+}
+// One piece of street furniture at (x, z); `ax`/`az` point along the kerb.
+static void ny_item(MeshB *m, int kind, float x, float z, float ax, float az, float h) {
+    float g = terrain_height(x, z);
+    switch (kind) {
+    case 0: {                                   // fire hydrant
+        Color c = h < 0.5f ? (Color){176, 40, 32, 255} : (Color){190, 150, 30, 255};
+        box_shell(m, v3(x - 0.12f, g, z - 0.12f), v3(x + 0.12f, g + 0.62f, z + 0.12f), c, c);
+        box_shell(m, v3(x - 0.2f, g + 0.36f, z - 0.07f), v3(x + 0.2f, g + 0.5f, z + 0.07f), c, c);
+        box_shell(m, v3(x - 0.15f, g + 0.62f, z - 0.15f), v3(x + 0.15f, g + 0.72f, z + 0.15f), scale_col(c, 0.8f), scale_col(c, 0.8f));
+    } break;
+    case 1: {                                   // litter bin
+        Color c = {36, 62, 44, 255};
+        box_shell(m, v3(x - 0.3f, g, z - 0.3f), v3(x + 0.3f, g + 0.95f, z + 0.3f), c, (Color){20, 20, 22, 255});
+    } break;
+    case 2: {                                   // a row of newspaper boxes
+        static const Color nb[4] = {{196, 40, 36, 255}, {30, 80, 170, 255}, {230, 190, 40, 255}, {40, 130, 80, 255}};
+        for (int k = 0; k < 3; k++) {
+            float px = x + ax * (k - 1) * 0.55f, pz = z + az * (k - 1) * 0.55f;
+            Color c = nb[(int)(h * 40 + k) % 4];
+            box_shell(m, v3(px - 0.22f, g + 0.25f, pz - 0.22f), v3(px + 0.22f, g + 1.15f, pz + 0.22f), c, scale_col(c, 0.8f));
+            box_shell(m, v3(px - 0.05f, g, pz - 0.05f), v3(px + 0.05f, g + 0.25f, pz + 0.05f), (Color){40, 40, 44, 255}, (Color){40, 40, 44, 255});
+        }
+    } break;
+    case 3: {                                   // mailbox
+        Color c = {28, 58, 128, 255};
+        box_shell(m, v3(x - 0.28f, g + 0.15f, z - 0.28f), v3(x + 0.28f, g + 1.2f, z + 0.28f), c, scale_col(c, 1.2f));
+    } break;
+    case 4: {                                   // street tree in a pit
+        Color bark = {74, 62, 52, 255};
+        box_shell(m, v3(x - 0.7f, g, z - 0.7f), v3(x + 0.7f, g + 0.06f, z + 0.7f), (Color){60, 50, 42, 255}, (Color){66, 54, 44, 255});
+        box_shell(m, v3(x - 0.11f, g, z - 0.11f), v3(x + 0.11f, g + 3.0f, z + 0.11f), bark, bark);
+        mb_blob(m, v3(x, g + 4.6f, z), 1.9f, 2.0f, (Color){(unsigned char)(70 + 30 * h), (unsigned char)(118 + 30 * h), 62, 255}, (unsigned)(h * 99991));
+    } break;
+    case 5: {                                   // parking sign on a pole
+        box_shell(m, v3(x - 0.03f, g, z - 0.03f), v3(x + 0.03f, g + 2.6f, z + 0.03f), (Color){120, 122, 126, 255}, (Color){120, 122, 126, 255});
+        V3 c0 = v3(x - fabsf(ax) * 0.22f - 0.02f, g + 2.0f, z - fabsf(az) * 0.22f - 0.02f), c1 = v3(x + fabsf(ax) * 0.22f + 0.02f, g + 2.6f, z + fabsf(az) * 0.22f + 0.02f);
+        box_shell(m, c0, c1, h < 0.5f ? (Color){200, 40, 36, 255} : (Color){36, 110, 60, 255}, (Color){220, 220, 220, 255});
+    } break;
+    default: {                                  // steam stack: the orange-and-white chimney over a leaking main
+        for (int k = 0; k < 6; k++) {
+            Color c = k & 1 ? (Color){236, 236, 232, 255} : (Color){232, 104, 28, 255};
+            box_shell(m, v3(x - 0.22f, g + k * 0.5f, z - 0.22f), v3(x + 0.22f, g + (k + 1) * 0.5f, z + 0.22f), c, c);
+        }
+    } break;
+    }
+}
+
+// Steam: stacks standing in the road and manholes that breathe.
+#define NY_VENTS 10
+static const float NY_VENT[NY_VENTS][3] = {{-5.5f, 34, 1}, {6.0f, 62, 0}, {-50.5f, 90, 1}, {57.5f, 58, 0}, {22, 47, 0}, {-30, 75, 0}, {-6.0f, 118, 1}, {40, 103, 0}, {112, 66, 1}, {-108, 96, 0}};
+
+static void build_ny_street(MeshB *m, const World *w) {
+    // Kerb line and furniture round every block.
+    for (int i = 0; i < 12; i++)
+        for (int j = 0; j < 10; j++) {
+            float x0 = NYBX[i][0], x1 = NYBX[i][1], z0 = NYBZ[j][0], z1 = NYBZ[j][1];
+            for (int e = 0; e < 4; e++) {
+                int alongX = e < 2;
+                float len = alongX ? x1 - x0 : z1 - z0;
+                for (float t = 5.0f + 6.0f * nyh(i * 7.1f + e, j * 3.3f); t < len - 4.0f; t += 7.0f + 6.0f * nyh(t, i + j * 13.0f + e)) {
+                    float off = 0.75f;          // from the kerb
+                    float x = alongX ? x0 + t : (e == 2 ? x0 + off : x1 - off), z = alongX ? (e == 0 ? z0 + off : z1 - off) : z0 + t;
+                    if (!ny_walk_ok(w, x, z)) continue;
+                    float h = nyh(x * 0.37f, z * 0.73f), h2 = nyh(x * 1.7f + 3.0f, z * 0.21f);
+                    int kind = h < 0.30f ? 4 : h < 0.42f ? 0 : h < 0.58f ? 1 : h < 0.68f ? 2 : h < 0.76f ? 3 : h < 0.90f ? 5 : -1;
+                    if (kind < 0) continue;
+                    if (kind == 4 && fabsf(x - TS_X) < 70 && fabsf(z - TS_Z) < 45) kind = 1;       // no trees in the square itself
+                    ny_item(m, kind, x, z, alongX ? 1.0f : 0.0f, alongX ? 0.0f : 1.0f, h2);
+                }
+            }
+        }
+    for (int k = 0; k < NY_VENTS; k++) if (NY_VENT[k][2] > 0.5f) ny_item(m, 6, NY_VENT[k][0], NY_VENT[k][1], 1, 0, 0);
+    // Subway entrances by the square: green railings round a stairwell, a globe lamp on each newel.
+    const float sub[3][3] = {{-11.5f, 55.5f, 1}, {11.5f, 82.5f, -1}, {-51.5f, 54.0f, 1}};
+    for (int k = 0; k < 3; k++) {
+        float x = sub[k][0], z = sub[k][1], g = terrain_height(x, z);
+        Color grn = {30, 84, 58, 255}, dark = {22, 22, 24, 255};
+        if (!ny_walk_ok(w, x, z)) continue;
+        box_shell(m, v3(x - 0.75f, g + 0.01f, z - 2.2f), v3(x + 0.75f, g + 0.03f, z + 2.2f), dark, dark);
+        box_shell(m, v3(x - 0.85f, g, z - 2.3f), v3(x - 0.75f, g + 1.1f, z + 2.3f), grn, grn);
+        box_shell(m, v3(x + 0.75f, g, z - 2.3f), v3(x + 0.85f, g + 1.1f, z + 2.3f), grn, grn);
+        float zb = z + sub[k][2] * 2.25f;
+        box_shell(m, v3(x - 0.85f, g, zb - 0.05f), v3(x + 0.85f, g + 1.1f, zb + 0.05f), grn, grn);
+        for (int sd = -1; sd <= 1; sd += 2) {
+            float px = x + sd * 0.8f, pz = z - sub[k][2] * 2.3f;
+            box_shell(m, v3(px - 0.06f, g, pz - 0.06f), v3(px + 0.06f, g + 2.5f, pz + 0.06f), grn, grn);
+            mbFlat = 1; box_shell(&GLOW, v3(px - 0.17f, g + 2.5f, pz - 0.17f), v3(px + 0.17f, g + 2.84f, pz + 0.17f), sd < 0 ? (Color){90, 255, 130, 255} : (Color){255, 240, 210, 255}, (Color){255, 240, 210, 255}); mbFlat = 0;
+        }
+    }
+}
+
+// Kerbs, manholes and steam grates painted on the roads.
+static void build_ny_paint(MeshB *m) {
+    Color kerb = {168, 166, 160, 255}, iron = {40, 40, 42, 255};
+    for (int i = 0; i < 12; i++)
+        for (int j = 0; j < 10; j++) {
+            float x0 = NYBX[i][0], x1 = NYBX[i][1], z0 = NYBZ[j][0], z1 = NYBZ[j][1];
+            paint_c(m, x0, x1, z0, z0 + 0.18f, kerb); paint_c(m, x0, x1, z1 - 0.18f, z1, kerb);
+            paint_c(m, x0, x0 + 0.18f, z0, z1, kerb); paint_c(m, x1 - 0.18f, x1, z0, z1, kerb);
+        }
+    for (int a = 0; a < NY_NAV; a++)
+        for (float z = 20; z < NY_GRID_Z - 6; z += 23) {
+            float x = NY_AV[a][0] + (nyh(a, z) - 0.5f) * NY_AV[a][1];
+            if (road_at(x, z) != 2) continue;
+            paint_c(m, x - 0.42f, x + 0.42f, z - 0.42f, z + 0.42f, iron);
+            paint_c(m, x - 0.30f, x + 0.30f, z - 0.30f, z + 0.30f, (Color){58, 58, 60, 255});
+        }
+    for (int k = 0; k < NY_VENTS; k++) {
+        float x = NY_VENT[k][0], z = NY_VENT[k][1];
+        paint_c(m, x - 0.5f, x + 0.5f, z - 0.5f, z + 0.5f, iron);
+    }
+}
+
 static void build_building(MeshB *m, const Building *B) {
     if (B->kind == BLD_STEPS) { build_steps(m, B); return; }
     if (B->kind == BLD_WEDGE) { build_wedge(m, B); return; }
     if (B->kind == BLD_TERMINAL) { build_terminal(m, B); return; }
     if (B->kind == BLD_ATC) { build_atc(m, B); return; }
     if (B->kind == BLD_HANGAR) { build_hangar(m, B); return; }
+    if (cityMap == MAP_NEWYORK && (B->kind == BLD_TOWER || B->kind == BLD_APARTMENT || B->kind == BLD_SHOP)) { build_ny_building(m, B); return; }
     bseed = B->seed;
     int city = B->kind == BLD_APARTMENT || B->kind == BLD_TOWER;
     Color wall = B->kind == BLD_HOUSE ? WALLS_HOUSE[(int)(brnd() * 6)] : WALLS_CITY[(int)(brnd() * 6)];
@@ -859,13 +1091,14 @@ static void build_building(MeshB *m, const Building *B) {
 
 static Model build_city(const World *w, Model *glow, Model *pool) {
     MeshB m = {0};
+    cityMap = w->map;
     memset(rngScreen, 0, sizeof rngScreen); memset(rngScreenPool, 0, sizeof rngScreenPool);
     for (int i = 0; i < w->nbld; i++) {
         rngCity[i].s = m.n; rngGlow[i].s = GLOW.n; rngPool[i].s = POOL.n;
         build_building(&m, &w->bld[i]);
         rngCity[i].e = m.n; rngGlow[i].e = GLOW.n; rngPool[i].e = POOL.n;
     }
-    if (w->map == MAP_NEWYORK) place_lamps_newyork(&m, w);
+    if (w->map == MAP_NEWYORK) { place_lamps_newyork(&m, w); build_ny_street(&m, w); }
     else if (w->map == MAP_AIRPORT) build_airport_extras(&m, w);
     else place_street_lamps(&m, w);
     for (int i = 0; i < traffic_signal_count(); i++) {   // traffic signals: pole, mast arm, housing
@@ -2178,7 +2411,7 @@ static void draw_spray(Camera3D cam) {
 // ---------------------------------------------------------- crash effects ----
 // Dust and sparks where wreckage scrapes the ground, spray where it hits the water, and a fuel fire
 // with smoke once an airliner has broken up on land.
-enum { FX_DUST, FX_SPLASH, FX_SMOKE, FX_FIRE, FX_SPARK };
+enum { FX_DUST, FX_SPLASH, FX_SMOKE, FX_FIRE, FX_SPARK, FX_STEAM };
 typedef struct { V3 p, v; float life, max, size; unsigned char kind; } Fx;
 #define MAX_FX 4000
 static Fx fx[MAX_FX];
@@ -2265,6 +2498,7 @@ static void update_fx(float dt) {
         case FX_SPLASH: f->v.y -= 9.81f * dt; f->v = vscale(f->v, 1.0f - fminf(dt * 0.5f, 0.9f)); f->size += 1.5f * dt;
                         if (f->p.y < AP_SEA_Y - 0.2f && f->v.y < 0) f->life = 0; break;
         case FX_SMOKE:  f->v = vscale(f->v, 1.0f - fminf(dt * 0.6f, 0.9f)); f->v.y += 1.2f * dt; f->v.x += 0.5f * dt; f->size += 1.9f * dt; break;
+        case FX_STEAM:  f->v = vscale(f->v, 1.0f - fminf(dt * 0.8f, 0.9f)); f->v.y += 0.9f * dt; f->v.x += 0.35f * dt; f->size += 0.9f * dt; break;
         case FX_FIRE:   f->v = vscale(f->v, 1.0f - fminf(dt * 1.5f, 0.9f)); f->v.y += 6.0f * dt; f->size *= 1.0f - fminf(dt * 0.7f, 0.9f); break;
         default:        f->v.y -= 9.81f * dt;
                         { float g = terrain_height(f->p.x, f->p.z) + 0.03f; if (f->p.y < g) { f->p.y = g; f->v.y = fabsf(f->v.y) * 0.4f; } } break;
@@ -2282,6 +2516,7 @@ static void draw_fx(Camera3D cam, int glow) {
         if (!glow) {
             if (f->kind == FX_DUST) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){150, 134, 110, (unsigned char)(120 * a)});
             else if (f->kind == FX_SPLASH) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){236, 242, 248, (unsigned char)(170 * a)});
+            else if (f->kind == FX_STEAM) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){226, 230, 234, (unsigned char)(70 * fminf(a * 1.5f, 1.0f) * fminf((1.0f - a) * 6.0f, 1.0f))});
             else if (f->kind == FX_SMOKE) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){26, 25, 25, (unsigned char)(190 * fminf(a * 1.6f, 1.0f) * fminf((1.0f - a) * 8.0f + 0.25f, 1.0f))});
         } else {
             if (f->kind == FX_FIRE) DrawBillboard(cam, softTex, RV(f->p), f->size, (Color){255, (unsigned char)(90 + 130 * a), (unsigned char)(20 + 60 * a * a), (unsigned char)(200 * fminf(a * 2.0f, 1.0f))});
@@ -2313,6 +2548,7 @@ static void build_world_meshes(const World *w) {
     }
     city = build_city(w, &cityGlow, &cityPool);
     build_markings(w);
+    city.materials[0].shader = post_city_shader();
     cityGlow.materials[0].shader = post_emissive_shader();
     cityPool.materials[0].shader = post_emissive_shader();
     build_trees();
@@ -2570,7 +2806,7 @@ static void collapse_dust(const Building *B, float n, int big) {
 static void start_collapse(const World *w, int bi) {
     const Building *B = &w->bld[bi];
     BldFx *f = &bfx[bi];
-    if (rngCity[bi].e > rngCity[bi].s) { f->anim = model_from_range(&city, rngCity[bi]); f->hasAnim = 1; }
+    if (rngCity[bi].e > rngCity[bi].s) { f->anim = model_from_range(&city, rngCity[bi]); f->anim.materials[0].shader = post_city_shader(); f->hasAnim = 1; }
     blank_range(&city, rngCity[bi]);
     blank_range(&cityGlow, rngGlow[bi]);
     blank_range(&cityPool, rngPool[bi]);
@@ -3325,6 +3561,13 @@ int main(void) {
             emit_spray(&world, sdt);
             update_spray(sdt);
             emit_crash_fx(&world, sdt);
+            if (world.map == MAP_NEWYORK && sdt > 0)        // steam from the stacks and manholes
+                for (int k = 0; k < NY_VENTS; k++) {
+                    float n = (NY_VENT[k][2] > 0.5f ? 9.0f : 5.0f) * sdt;
+                    for (int q = (int)n + (frand() < n - (int)n); q > 0; q--)
+                        fx_emit(FX_STEAM, v3(NY_VENT[k][0] + (frand() - 0.5f) * 0.3f, NY_VENT[k][2] > 0.5f ? 3.0f : 0.1f, NY_VENT[k][1] + (frand() - 0.5f) * 0.3f),
+                                v3((frand() - 0.5f) * 0.5f, 1.2f + 0.8f * frand(), (frand() - 0.5f) * 0.5f), 3.5f + 2.5f * frand(), 0.5f + 0.4f * frand());
+                }
             heli_fx(&world, sdt);
             update_fx(sdt);
         }
@@ -3403,6 +3646,7 @@ int main(void) {
         PMARK(2);
         // ---- sun shadow map: the casters, seen from the sun
         post_set_quality(fancy, fancy);
+        post_set_city(ENV, (float)GetTime());
         if (post_shadow_begin(flying ? RV(ap->pos) : RV(pc->pos), ENV, RV(AMB), RV(SUNC))) {
             depthOnly = 1;
             DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
