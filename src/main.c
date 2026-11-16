@@ -7,6 +7,7 @@
 #include "physics.h"
 #include "render.h"
 #include "traffic.h"
+#include "audio.h"
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
@@ -2431,6 +2432,8 @@ static Fx fx[MAX_FX];
 static int fxHead;
 static float fireT[MAX_PLANES];
 static int wasWrecked[MAX_PLANES];
+static int inSea[MAX_PLANES];           // sound: already splashed down
+static float sndScrape;                 // sound: airframes dragging along the ground this frame (gain at the listener)
 
 static void fx_emit(int kind, V3 p, V3 v, float life, float size) {
     Fx *f = &fx[fxHead];
@@ -2441,13 +2444,15 @@ static V3 frand3(float s) { return v3((frand() - 0.5f) * 2 * s, (frand() - 0.5f)
 static void fx_clear(void) { for (int i = 0; i < MAX_FX; i++) fx[i].life = 0; for (int i = 0; i < MAX_PLANES; i++) { fireT[i] = 0; wasWrecked[i] = 0; } }
 
 static void emit_crash_fx(World *w, float dt) {
+    sndScrape = 0;
     if (dt <= 0) return;
     for (int ai = 0; ai < w->nplanes; ai++) {
         Airframe *A = &w->air[ai];
         const Car *c = &A->c;
         if (!A->wrecked) { wasWrecked[ai] = 0; fireT[ai] = 0; }
         if (A->asleep) continue;
-        int onLand = 0, touching = 0;
+        int onLand = 0, touching = 0, wet = 0;
+        float drag = 0;
         for (int i = 0; i < c->nn; i++) {
             const Node *N = &c->n[i];
             float sp = vlen(N->v);
@@ -2456,13 +2461,13 @@ static void emit_crash_fx(World *w, float dt) {
             int sea = g < AP_SEA_Y - 0.2f && w->map == MAP_AIRPORT;
             if (sea) {
                 if (N->p.y > AP_SEA_Y + 0.5f || N->p.y < AP_SEA_Y - 2.5f) continue;
-                touching++;
+                touching++; wet++;
                 float n = sp * 0.5f * dt;
                 for (int k = (int)n + (frand() < n - (int)n); k > 0; k--)
                     fx_emit(FX_SPLASH, v3(N->p.x, AP_SEA_Y + 0.1f, N->p.z), vadd(v3(N->v.x * 0.25f, 3.0f + sp * (0.10f + 0.22f * frand()), N->v.z * 0.25f), frand3(2.0f + sp * 0.05f)), 1.2f + 1.3f * frand(), 0.8f + 1.6f * frand());
             } else {
                 if (N->p.y > g + 0.3f) continue;
-                touching++; onLand++;
+                touching++; onLand++; drag += sp;
                 float n = sp * 0.22f * dt;
                 for (int k = (int)n + (frand() < n - (int)n); k > 0; k--)
                     fx_emit(FX_DUST, v3(N->p.x, g + 0.2f, N->p.z), vadd(v3(N->v.x * 0.2f, 1.0f + 2.5f * frand(), N->v.z * 0.2f), frand3(1.5f)), 1.5f + 2.0f * frand(), 1.2f + 1.5f * frand());
@@ -2471,10 +2476,18 @@ static void emit_crash_fx(World *w, float dt) {
                     fx_emit(FX_SPARK, v3(N->p.x, g + 0.1f, N->p.z), vadd(v3(N->v.x * 0.5f, 2.0f + 5.0f * frand(), N->v.z * 0.5f), frand3(4.0f)), 0.4f + 0.6f * frand(), 0.10f + 0.10f * frand());
             }
         }
+        if (drag > 0) {                                  // metal on the ground (wheels rolling fast count a little)
+            float gl, gr;
+            audio_spatial(A->pos.x, A->pos.y, A->pos.z, 30.0f, &gl, &gr);
+            sndScrape = fmaxf(sndScrape, 0.5f * (gl + gr) * fminf(1.0f, drag / 400.0f) * (A->wrecked || A->nbroken > 4 ? 1.0f : 0.12f));
+        }
+        if (wet > 3 && !inSea[ai]) audio_play(SND_SPLASH, fminf(1.0f, 0.3f + vlen(A->vel) / 40.0f), A->pos.x, A->pos.y, A->pos.z);
+        inSea[ai] = wet > 3 || (inSea[ai] && wet > 0);
         // Breaking up starts a fuel fire (not if it went gently into the water).
         if (A->wrecked && !wasWrecked[ai]) {
             wasWrecked[ai] = 1;
             if (onLand || A->nbroken > 60) {
+                audio_play(SND_EXPLODE, 1.0f, A->pos.x, A->pos.y, A->pos.z);
                 fireT[ai] = 75.0f;
                 for (int k = 0; k < 90; k++) fx_emit(FX_FIRE, vadd(A->pos, frand3(6.0f)), vadd(vscale(A->vel, 0.3f), vadd(frand3(9.0f), v3(0, 7, 0))), 0.7f + 0.9f * frand(), 3.0f + 4.0f * frand());
                 for (int k = 0; k < 50; k++) fx_emit(FX_SMOKE, vadd(A->pos, frand3(7.0f)), vadd(vscale(A->vel, 0.2f), vadd(frand3(5.0f), v3(0, 6, 0))), 4.0f + 4.0f * frand(), 4.0f + 4.0f * frand());
@@ -2834,7 +2847,12 @@ static void start_collapse(const World *w, int bi) {
 static void update_destruction(World *w, float dt) {
     for (int k = 0; k < w->nbev; k++) {
         const BldEvent *e = &w->bev[k];
-        if (e->collapse) { start_collapse(w, e->bld); continue; }
+        if (e->collapse) {
+            const Building *B = &w->bld[e->bld];
+            audio_play(SND_COLLAPSE, clampf(0.45f + (B->mx.y - B->ground) / 60.0f, 0.45f, 1.0f), e->p.x, B->ground + 3.0f, e->p.z);
+            start_collapse(w, e->bld); continue;
+        }
+        audio_play(SND_BREACH, clampf(e->imp / 15000.0f, 0.25f, 1.0f), e->p.x, e->p.y, e->p.z);
         add_breach(w, e);
         int n = (int)clampf(e->imp / 900.0f, 3, 40);
         float sz = clampf(0.12f + sqrtf(e->imp) / 900.0f, 0.12f, 0.5f);
@@ -2893,6 +2911,7 @@ static void heli_fx(const World *w, float dt) {
         if (A->strikeT >= 0 && !heliStruck[ai]) {
             heliStruck[ai] = 1;
             V3 hub = A->c.n[A->mast[1]].p;
+            audio_play(SND_ROTOR, 1.0f, hub.x, hub.y, hub.z);
             for (int b = 0; b < 14; b++) {
                 float a = frand() * 6.2831853f;
                 V3 d = vadd(vscale(A->fwd, cosf(a)), vscale(A->right, sinf(a)));
@@ -3025,7 +3044,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
         const char *lines[] = {
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
-            "T  slow-mo      P  pause      K  clear skids      H  help", "U  rebuild knocked-down buildings      Y  collect a rubber duck", "G  drop tailgate      L  lighting      O  weather",
+            "T  slow-mo      P  pause      K  clear skids      H  help", "U  rebuild knocked-down buildings      Y  collect a rubber duck", "Z  sound on / off", "G  drop tailgate      L  lighting      O  weather",
             "M  map: Default / New York / Airport      J  traffic",
             "TAB  fly: airliner, then helicopter (Airport map)",
             "F2  sun shadows + ambient occlusion on / off",
@@ -3033,7 +3052,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
             "New York: Times Square up 7th Avenue, straight ahead."};
         int n = sizeof lines / sizeof lines[0];
         hud_panel(16, 66, 420, 20 + n * 21);
-        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 12 ? RAYWHITE : HUD_DIM);
+        for (int i = 0; i < n; i++) txt(lines[i], 30, 76 + i * 21, 16, i < 13 ? RAYWHITE : HUD_DIM);
     }
 }
 
@@ -3223,8 +3242,10 @@ static int playerType = VEH_PICKUP;
 static V3 player_paint(void) { return vehicle_def(playerType)->paint; }
 
 // Start: facing the ramp on Default; facing up 7th Avenue toward Times Square on New York.
+static float sndHush;                   // sound: the player's car was just replaced, so its jump in speed is not a crash
 static void spawn_player(World *w) {
     skids_forget(0);
+    sndHush = 0.3f;
     // In the right-hand lane, clear of the junction (traffic turns through junctions).
     float x = w->map == MAP_NEWYORK ? -4.0f : w->map == MAP_AIRPORT ? -3.5f : -20.0f;
     float z = w->map == MAP_NEWYORK ? 15.0f : w->map == MAP_AIRPORT ? 16.0f : 3.5f;
@@ -3312,6 +3333,161 @@ static void draw_duck_hud(const World *w, float dt) {
     }
 }
 
+// ---------------------------------------------------------------- sound ----
+// Each frame: tell the synthesiser (audio.c) what every engine, the wind and the tyres are doing, and
+// turn sudden stops and newly snapped beams into crash sounds. Other events (glass, explosions,
+// buildings, rotor strikes, ducks) play from where they happen in the code.
+static int soundOff;
+static float sndRev[MAX_CARS]; static int sndGear[MAX_CARS];
+typedef struct { V3 pos, vel; int broken; float cool; } HitTrack;
+static HitTrack hitCar[MAX_CARS], hitAir[MAX_PLANES];
+static int sndTrees = -1;
+
+// Engine speed 0..1 from road speed through made-up gears (the physics has no gearbox).
+static float car_rev(int i, const Car *c, float dt) {
+    static const float PET[5] = {13, 24, 36, 48, 62}, DSL[8] = {4, 7, 11, 15, 20, 26, 33, 41};
+    float v = fabsf(vdot(c->vel, c->fwd)), want;
+    if (c->type == VEH_PICKUP) want = v / 58.0f;
+    else {
+        const float *top = c->type == VEH_SEMI ? DSL : PET; int ng = c->type == VEH_SEMI ? 8 : 5, g = sndGear[i] < ng ? sndGear[i] : ng - 1;
+        float r = v / top[g];
+        if (r > 0.93f && g < ng - 1) g++; else if (r < 0.42f && g > 0) g--;
+        sndGear[i] = g; r = v / top[g];
+        if (g == 0) r = fmaxf(r, 0.4f * c->ctl.throttle);                // slipping the clutch off the line
+        want = r;
+    }
+    int spin = 0;
+    for (int k = 0; k < c->nw; k++) spin |= c->w[k].contact && c->w[k].slip > 0.3f;
+    if (spin && c->ctl.throttle > 0.5f) want += 0.25f;                   // wheelspin lets it rev
+    sndRev[i] += (clampf(want, 0, 1) - sndRev[i]) * fminf(1.0f, dt * (c->type == VEH_SEMI ? 5.0f : 9.0f));
+    return sndRev[i];
+}
+
+// A sudden change of velocity, or beams snapping, is a crash. Returns its loudness (0 = none).
+static float hit_track(HitTrack *h, V3 pos, V3 vel, int broken, float simdt, float dt) {
+    float out = 0;
+    h->cool -= dt;
+    V3 dp = vsub(pos, h->pos), dv = vsub(vel, h->vel);
+    int jumped = vdot(dp, dp) > 16.0f || broken < h->broken;            // respawned or swapped: not a crash
+    if (!jumped && simdt > 0 && h->cool <= 0) {
+        float a = vlen(dv) / simdt;
+        if (a > 55.0f && vlen(dv) > 0.5f) out = clampf((a - 40.0f) / 420.0f, 0.12f, 1.0f);
+        if (broken > h->broken) out = fmaxf(out, clampf(0.2f + 0.07f * (broken - h->broken), 0, 1));
+        if (out > 0) h->cool = 0.09f;
+    }
+    if (simdt > 0 || jumped) { h->pos = pos; h->vel = vel; h->broken = broken; }
+    return out;
+}
+
+static void sound_frame(World *w, Camera3D cam, int flying, const Airframe *ap, int inside, int paused, int slowmo, float simdt, float dt) {
+    V3 eye = v3(cam.position.x, cam.position.y, cam.position.z);
+    V3 right = vnorm(vcross(vsub(v3(cam.target.x, cam.target.y, cam.target.z), eye), v3(cam.up.x, cam.up.y, cam.up.z)));
+    audio_listener(eye.x, eye.y, eye.z, right.x, right.y, right.z);
+    AudioParams P = {0};
+    P.master = soundOff || paused ? 0.0f : 0.85f;
+    P.rate = slowmo ? 0.5f : 1.0f;
+    const Car *pc = &w->cars[0];
+    // Engines: the player's car on voice 0, the nearest moving others on the rest.
+    for (int k = 0; k < AUD_CARS; k++) P.car[k].id = -1;
+    float best[AUD_CARS]; for (int k = 0; k < AUD_CARS; k++) best[k] = 0;
+    for (int i = 0; i < w->ncars; i++) {
+        const Car *c = &w->cars[i];
+        if (!c->active || c->exploded) continue;
+        float rev = car_rev(i, c, dt), sp = vlen(c->vel);
+        float load = fmaxf(c->ctl.throttle, vdot(c->vel, c->fwd) < -0.3f ? c->ctl.brake : 0.0f);
+        int running = i == 0 ? !flying : (sp > 0.5f || c->ctl.throttle > 0.02f);    // parked cars are switched off
+        if (!running) continue;
+        float gl, gr;
+        audio_spatial(c->pos.x, c->pos.y, c->pos.z, 7.0f, &gl, &gr);
+        if (i == 0 && inside) gl = gr = 0.75f;
+        AudCar v = {i, c->type == VEH_PICKUP ? ENG_ELECTRIC : c->type == VEH_SEMI ? ENG_DIESEL : ENG_PETROL, rev, load, gl, gr};
+        if (i == 0) { P.car[0] = v; continue; }
+        float g = gl + gr;
+        for (int k = 1; k < AUD_CARS; k++)                              // keep the loudest three, loudest first
+            if (g > best[k]) {
+                for (int m = AUD_CARS - 1; m > k; m--) { P.car[m] = P.car[m - 1]; best[m] = best[m - 1]; }
+                P.car[k] = v; best[k] = g; break;
+            }
+    }
+    // Keep each car on the voice it already has, so engines do not swap pitch when the order changes.
+    static int slot[AUD_CARS] = {-1, -1, -1, -1};
+    AudCar keep[AUD_CARS]; int used[AUD_CARS] = {0};
+    for (int k = 1; k < AUD_CARS; k++) { keep[k].id = -1; keep[k].gl = keep[k].gr = 0; }
+    for (int k = 1; k < AUD_CARS; k++)
+        for (int m = 1; m < AUD_CARS; m++) if (P.car[m].id >= 0 && P.car[m].id == slot[k]) { keep[k] = P.car[m]; used[m] = 1; }
+    for (int m = 1; m < AUD_CARS; m++) {
+        if (P.car[m].id < 0 || used[m]) continue;
+        for (int k = 1; k < AUD_CARS; k++) if (keep[k].id < 0) { keep[k] = P.car[m]; break; }
+    }
+    for (int k = 1; k < AUD_CARS; k++) { P.car[k] = keep[k]; slot[k] = keep[k].id; }
+
+    // Wind and tyres, for whatever the listener is riding in.
+    V3 yv = flying && ap ? ap->vel : pc->vel;
+    float sp = vlen(yv);
+    P.wind = fminf(1.0f, powf(sp / 80.0f, 1.6f)) * (inside ? 0.45f : 0.7f) + 0.02f;
+    if (!flying) {
+        int nc = 0; float slip = 0;
+        for (int k = 0; k < pc->nw; k++) if (pc->w[k].contact) { nc++; slip = fmaxf(slip, pc->w[k].slip); }
+        int paved = road_at(pc->pos.x, pc->pos.z) != 0;
+        float fr = pc->nw ? (float)nc / pc->nw : 0.0f;
+        P.road = fr * fminf(1.0f, powf(sp / 45.0f, 1.2f)) * (paved ? 0.45f : 0.7f);
+        P.skid = sp > 2.0f ? clampf((slip - 0.12f) / 0.6f, 0, 1) * (paved ? 1.0f : 0.15f) * (weather == 3 ? 0.15f : weather ? 0.7f : 1.0f) : 0.0f;
+    } else if (ap && ap->kind == AC_AIRLINER && ap->onGround) P.road = fminf(1.0f, sp / 70.0f) * 0.6f;
+    P.rain = weather == 2 ? (inside ? 0.7f : 1.0f) : 0.0f;
+    // Scraping: aircraft sliding on the ground (from emit_crash_fx), cars on their roof or side.
+    P.scrape = sndScrape;
+    for (int i = 0; i < w->ncars; i++) {
+        const Car *c = &w->cars[i];
+        if (!c->active || c->up.y > 0.35f || vlen(c->vel) < 2.5f || c->pos.y > terrain_height(c->pos.x, c->pos.z) + 2.0f) continue;
+        float gl, gr;
+        audio_spatial(c->pos.x, c->pos.y, c->pos.z, 10.0f, &gl, &gr);
+        P.scrape = fmaxf(P.scrape, 0.5f * (gl + gr) * fminf(1.0f, vlen(c->vel) / 15.0f));
+    }
+    for (int ai = 0; ai < w->nplanes; ai++) {
+        if (fireT[ai] <= 0) continue;
+        float gl, gr;
+        audio_spatial(w->air[ai].pos.x, w->air[ai].pos.y, w->air[ai].pos.z, 18.0f, &gl, &gr);
+        P.fire = fmaxf(P.fire, 0.5f * (gl + gr) * fminf(1.0f, fireT[ai] / 20.0f));
+    }
+    // Helicopter and the airliner you can fly.
+    if (w->heli >= 0) {
+        const Airframe *A = &w->air[w->heli];
+        P.heliRpm = A->rotorBroken ? fminf(A->rpm, 0.5f) : A->rpm; P.heliLoad = A->thr; P.heliTail = A->tailBroken ? 0.0f : 1.0f;
+        audio_spatial(A->pos.x, A->pos.y, A->pos.z, 26.0f, &P.heliL, &P.heliR);
+        if (flying == 2 && inside) P.heliL = P.heliR = 0.6f;
+    }
+    if (w->flyable >= 0) {
+        const Airframe *A = &w->air[w->flyable];
+        P.jetN1 = A->wrecked ? 0.0f : A->pilot ? 0.22f + 0.78f * A->thr : A->thr > 0.02f ? 0.22f + 0.78f * A->thr : 0.0f;
+        audio_spatial(A->pos.x, A->pos.y, A->pos.z, 45.0f, &P.jetL, &P.jetR);
+        if (flying == 1 && inside) P.jetL = P.jetR = 0.4f;
+    }
+    audio_set(&P);
+
+    // Crashes.
+    if (sndHush > 0) { hitCar[0].cool = sndHush; sndHush = 0; }
+    for (int i = 0; i < w->ncars; i++) {
+        const Car *c = &w->cars[i];
+        if (!c->active) { hitCar[i].cool = 0.3f; continue; }
+        float g = hit_track(&hitCar[i], c->pos, c->vel, c->brokenBeams, simdt, dt);
+        if (g > 0) audio_play(SND_CRASH, fminf(1.0f, g * (c->type == VEH_SEMI ? 1.3f : 1.0f)), c->pos.x, c->pos.y, c->pos.z);
+    }
+    for (int ai = 0; ai < w->nplanes; ai++) {
+        const Airframe *A = &w->air[ai];
+        if (A->asleep) { hitAir[ai].pos = A->pos; hitAir[ai].vel = A->vel; hitAir[ai].broken = A->nbroken; continue; }
+        float g = hit_track(&hitAir[ai], A->pos, A->vel, A->nbroken, simdt, dt);
+        if (g > 0) audio_play(SND_CRASH, fminf(1.0f, g * 1.4f), A->pos.x, A->pos.y, A->pos.z);
+    }
+    // Trees going over.
+    if (sndTrees > w->treesDown) sndTrees = -1;
+    if (sndTrees >= 0 && w->treesDown > sndTrees)
+        for (int i = 0; i < w->ntree; i++) {
+            const Tree *T = &w->tree[i];
+            if (T->broken && T->tilt < 0.12f) audio_play(SND_TREE, clampf(T->h / 12.0f, 0.4f, 1.0f), T->x, T->y + 1.0f, T->z);
+        }
+    sndTrees = w->treesDown;
+}
+
 // Build a map: world, meshes, road data for the renderer, player and parked vehicles.
 static int trafficOn = 1;
 #define TRAFFIC_CARS 8
@@ -3390,6 +3566,8 @@ int main(void) {
     if (profHeli) { help = 0; load_map(&world, MAP_AIRPORT, &nextSlot); if (world.heli >= 0) { flying = 2; world.air[world.heli].pilot = 1; } }
     if (profEnv && !getenv("BEAMLITE_PROF_VSYNC")) SetTargetFPS(0);
     if (profEnv && getenv("BEAMLITE_PROF_DAY")) set_env(1);
+    if (!profEnv || getenv("BEAMLITE_PROF_SOUND")) audio_init();        // profiling runs are silent unless asked
+    if (getenv("BEAMLITE_PROF_SOUND") && !strcmp(getenv("BEAMLITE_PROF_SOUND"), "mute")) soundOff = 1;   // everything runs, nothing is heard
     // BEAMLITE_PROF_CRASH=<map>,<building kind>,<vehicle>,<km/h>: the player is launched at a building's side wall.
     int profCrash = profEnv && getenv("BEAMLITE_PROF_CRASH");
     if (profCrash) {
@@ -3440,6 +3618,7 @@ int main(void) {
             float hdg = atan2f(pc->fwd.z, pc->fwd.x);
             V3 p = pc->pos;
             skids_forget(0);
+            sndHush = 0.3f;
             car_build_vehicle(pc, playerType, v3(p.x, terrain_height(p.x, p.z) + vehicle_def(playerType)->spawnH + 0.2f, p.z), -hdg, player_paint());
         }
         if (IsKeyPressed(KEY_N) && !flying) {       // drop a parked truck ahead, side-on (unless that's inside a building)
@@ -3465,9 +3644,10 @@ int main(void) {
         if (IsKeyPressed(KEY_M)) { flying = 0; load_map(&world, (world.map + 1) % MAP_COUNT, &nextSlot); ap = NULL; }
         if (IsKeyPressed(KEY_U)) {                      // rebuild every knocked-down building
             int n = world_reset_buildings(&world);
-            if (n > 0) { destruction_reset(); build_world_meshes(&world); }
+            if (n > 0) { destruction_reset(); build_world_meshes(&world); audio_play_ui(SND_CHIME, 0.8f); }
             hud_toast(n ? TextFormat("%d BUILDING%s REBUILT", n, n == 1 ? "" : "S") : "NOTHING TO REBUILD");
         }
+        if (IsKeyPressed(KEY_Z)) { soundOff = !soundOff; hud_toast(soundOff ? "SOUND OFF" : "SOUND ON"); }
         if (IsKeyPressed(KEY_B)) beamView = !beamView;
         if (IsKeyPressed(KEY_C)) camMode = !camMode;
         if (IsKeyPressed(KEY_P)) paused = !paused;
@@ -3492,7 +3672,8 @@ int main(void) {
                 float hdg = atan2f(pc->fwd.z, pc->fwd.x);
                 V3 p = pc->pos;
                 skids_forget(0);
-                car_build_vehicle(pc, playerType, v3(p.x, terrain_height(p.x, p.z) + vehicle_def(playerType)->spawnH + 0.2f, p.z), -hdg, player_paint());
+                sndHush = 0.3f;
+            car_build_vehicle(pc, playerType, v3(p.x, terrain_height(p.x, p.z) + vehicle_def(playerType)->spawnH + 0.2f, p.z), -hdg, player_paint());
             }
         }
         if (IsKeyPressed(KEY_L)) { set_env((envIdx + 1) % (int)(sizeof ENVS / sizeof ENVS[0])); build_world_meshes(&world); }
@@ -3552,19 +3733,26 @@ int main(void) {
             car_update_frame(c);
             car_update_damage(c);
             if (c->exploded) {
+                audio_play(SND_EXPLODE, 0.9f, c->pos.x, c->pos.y, c->pos.z);
                 if (i == 0) spawn_player(&world);
                 else c->active = 0;
             }
         }
         for (int i = 0; i < world.ncars; i++)
-            if (world.cars[i].glassNew) { spawn_glass(&world.cars[i], world.cars[i].glassNew); world.cars[i].glassNew = 0; }
+            if (world.cars[i].glassNew) {
+                int np = 0; for (unsigned m = world.cars[i].glassNew; m; m &= m - 1) np++;
+                audio_play(SND_GLASS, fminf(1.0f, 0.45f + 0.15f * np), world.cars[i].pos.x, world.cars[i].pos.y, world.cars[i].pos.z);
+                spawn_glass(&world.cars[i], world.cars[i].glassNew); world.cars[i].glassNew = 0;
+            }
         update_destruction(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         update_debris(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         {                                               // rubber ducks: get up to one in whatever you are driving or flying, press Y
             const Car *you = flying && ap ? &ap->c : &world.cars[0];
             int di = duck_near(&world, you);
+            if (di >= 0 && !duckInReach) { V3 q = duck_pos(&world, &world.duck[di], 0); audio_play(SND_QUACK, 0.45f, q.x, q.y, q.z); }   // it greets you
             duckInReach = di >= 0;
             if (di >= 0 && IsKeyPressed(KEY_Y) && !pickerOpen) {
+                audio_play_ui(SND_QUACK, 0.9f);
                 world.duck[di].found = 1;
                 duckFound[world.map][di] = 1;
                 int nf = 0; for (int i = 0; i < world.nduck; i++) nf += world.duck[i].found;
@@ -3767,6 +3955,8 @@ int main(void) {
         if (profEnv) { glFinish(); PMARK(5); }
 #endif
 
+        sound_frame(&world, cam, flying, flying ? ap : NULL, camMode, paused, slowmo, steps * H, dt);
+
         // ---- grade it onto the screen, then the HUD
         BeginDrawing();
         Env env = *ENV;
@@ -3814,6 +4004,8 @@ int main(void) {
             printf("[%s] frames %d, avg frame %.2f ms (%.0f fps), %d cars, %d planes\n", k ? "airborne" : "ground", prof_frames[k], 1000 * tot / prof_frames[k], prof_frames[k] / tot, world.ncars, world.nplanes);
             for (int i = 0; i < 8; i++) printf("  %-22s %6.2f ms  %4.1f%%\n", PROF_NAMES[i], 1000 * prof_acc[k][i] / prof_frames[k], 100 * prof_acc[k][i] / tot);
         }
+        if (getenv("BEAMLITE_PROF_SOUND")) printf("sounds played: crash %u, glass %u, explosion %u, collapse %u, breach %u, tree %u, splash %u, duck %u, rotor %u\n", audio_played(SND_CRASH), audio_played(SND_GLASS),
+                                                  audio_played(SND_EXPLODE), audio_played(SND_COLLAPSE), audio_played(SND_BREACH), audio_played(SND_TREE), audio_played(SND_SPLASH), audio_played(SND_QUACK), audio_played(SND_ROTOR));
         if (prof_substeps) printf("substeps only: %.2f ms per frame (%.1f substeps/frame, %.0f us each)\n", 1000 * prof_sub / (prof_frames[0] + prof_frames[1]), (double)prof_substeps / (prof_frames[0] + prof_frames[1]), 1e6 * prof_sub / prof_substeps);
         if (world.flyable >= 0) printf("plane end state: airspeed %.0f m/s, agl %.0f m, x %.0f\n", world.air[world.flyable].airspeed, world.air[world.flyable].agl, world.air[world.flyable].pos.x);
         fflush(stdout);
@@ -3822,6 +4014,7 @@ int main(void) {
     for (int i = 0; i < CH_N * CH_N; i++) UnloadModel(chunks[i]);
     UnloadModel(city); UnloadModel(cityGlow); UnloadModel(cityPool);
     UnloadModel(treeModel[0]); UnloadModel(treeModel[1]); UnloadModel(stumpModel);
+    audio_shutdown();
     post_shutdown();
     CloseWindow();
     return 0;

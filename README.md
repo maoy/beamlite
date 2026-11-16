@@ -40,6 +40,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | T / P | slow-mo / pause |
 | K | clear skid marks |
 | Y | collect the rubber duck in reach |
+| Z | sound on / off |
 | U | rebuild every knocked-down building (clears the rubble; anything parked on it is moved out) |
 | Tab | Airport map: fly the airliner on the runway, then the helicopter on the pad, then back to the car |
 
@@ -283,14 +284,34 @@ when you switch maps.
   up. Ploughed roads keep less of it and steep rock sheds it. Snowflakes drift as soft sprites
   around the camera. The sky turns overcast with thicker haze, every rolling wheel leaves a track,
   and tyre grip halves (the Sparrow's 100–0 km/h stop goes from 36 m to 66 m).
+- **Sound** (`audio.c`): everything is synthesised as it plays; there are no sample files. One
+  stereo stream mixes continuous voices, which the game steers every frame, with one-shot voices
+  for events. Sources are placed by distance and panned by where they are relative to the camera.
+  - Engines: the hatch is a four-cylinder (harmonics of its firing rate, brighter under load), the
+    semi a diesel six with injector clatter, the pickup an electric whine. The physics has no
+    gearbox, so engine speed comes from road speed through made-up gears, and wheelspin lets it
+    rev. Your car and the three loudest others each get a voice.
+  - Helicopter: blade slap three times per rotor turn, a turbine whine and the tail rotor's buzz,
+    all following rotor speed and collective. Airliner: exhaust roar, the whine of two fans
+    slightly out of tune, and a spool-up that takes a couple of seconds.
+  - Around you: wind that rises with speed, tyre roar, squeal when a tyre slides (quieter in the
+    wet, on snow and off the road), rain, metal scraping along the ground, burning wreckage.
+  - Events: a crash is a sudden change in a vehicle's velocity or beams snapping, and bigger hits
+    sound lower and longer. Also glass, explosions, walls breached, buildings collapsing, trees
+    snapping, splashes, rotor strikes, and the ducks.
+  - Slow motion drops everything an octave. **Z** turns sound off.
 - **Integration**: semi-implicit Euler at 1200 Hz fixed substeps. Each beam's stiffness and
   damping is limited by the masses it connects, which keeps the explicit integrator stable.
 
 `tests/test_physics.c` is a headless test that runs acceleration, braking, cornering,
 a tailgate drop, a 60 km/h wall crash, a ramp jump, a T-bone and hitting a sapling and a mature tree, then writes wireframe snapshots:
-`cc -O2 tests/test_physics.c src/physics.c -lm -o tp && ./tp`
+`cc -O2 tests/test_physics.c src/physics.c src/traffic.c -lm -o tp && ./tp`
+
+`tests/test_audio.c` renders every sound through the synthesiser without opening an audio device,
+checks each one's level, and can write them all to a WAV to listen to:
+`cc -O2 -DAUDIO_HEADLESS tests/test_audio.c src/audio.c -lm -o ta && ./ta sounds.wav`
 
 ## Ideas for next steps
 
 Per-pixel lighting from nearby lamps; screen-space reflections on chrome and paint; node-beam wheels and tyres; opening doors and frunk; self-collision so crushed panels
-stack up instead of passing through each other; slip-angle tyre model; Metal renderer; sound.
+stack up instead of passing through each other; slip-angle tyre model; Metal renderer; Doppler shift and echoes off buildings.

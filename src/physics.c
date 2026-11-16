@@ -2065,7 +2065,7 @@ static const Area AP_AREAS[] = {
     {{-AP_TWY_X, AP_TWY_X1, AP_TWY_Z0, AP_TWY_Z1}, 4},                    // parallel taxiway
     {{594, 606, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{1228, 1240, AP_TWY_Z1, AP_RWY_Z0}, 4},   // connectors out on the causeway
     {{-110, 112, AP_APRON_Z0, AP_APRON_Z1}, 5},                           // apron
-    {{-212, -110, 122, AP_APRON_Z1}, 5},                                  // hangar apron
+    {{-212, -110, 110, AP_APRON_Z1}, 5},                                  // hangar apron
     {{112, AP_EAPRON_X1, AP_EAPRON_Z0, AP_APRON_Z1}, 5},                  // east apron, in front of the hangar row
     {{AP_HELI_X - AP_HELI_HALF, AP_HELI_X + AP_HELI_HALF, AP_HELI_Z - AP_HELI_HALF, AP_HELI_Z + AP_HELI_HALF}, 5},   // helipad
     {{136, AP_EAPRON_X1, 44, AP_EAPRON_Z0}, 5},                           // hangar floors and the yard behind
@@ -2601,8 +2601,8 @@ static void build_airport(World *w) {
     add_building(w, (Rect){AP_TERM_X0, AP_TERM_X1, AP_TERM_Z0, AP_TERM_Z1}, BLD_TERMINAL, 16.0f, 3);
     for (int g = 0; g < AP_NGATES; g++) if (g != 2) add_plane(w, AP_GATES[g], AP_NOSE_Z, 0, 1);   // nose-in at the gates (one stand left free)
     add_building(w, (Rect){AP_ATC_X0, AP_ATC_X1, 55, 63}, BLD_ATC, 44.0f, 3);
-    add_building(w, (Rect){-205, -160, 70, 120}, BLD_HANGAR, 18.0f, 2);
-    add_building(w, (Rect){-150, -114, 76, 120}, BLD_HANGAR, 15.0f, 2);
+    add_building(w, (Rect){-205, -160, 60, 108}, BLD_HANGAR, 18.0f, 2);
+    add_building(w, (Rect){-150, -114, 66, 108}, BLD_HANGAR, 15.0f, 2);   // clear of the wing of the airliner parked outside
     // The maintenance row east of the tower, doors open onto the east apron; the big one takes an airliner.
     for (int i = 0; i < 3; i++) add_building(w, (Rect){AP_HANGARS[i][0], AP_HANGARS[i][1], AP_HANGAR_Z0, AP_EAPRON_Z0}, BLD_HANGAR, AP_HANGARS[i][2], 2);
     // The north row, doors facing the runway: hangars at either end, cargo sheds, the fire station and an office block between.
