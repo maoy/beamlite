@@ -372,13 +372,19 @@ int main(void) {
             int roof = 0, water = 0, solid = 0;
             for (int i = 0; i < W.nduck; i++) { roof += W.duck[i].bld >= 0; water += W.duck[i].water; solid += world_point_solid(&W, vadd(W.duck[i].p, v3(0, 0.2f, 0))); }
             int gi = -1;
-            for (int i = 0; i < W.nduck && gi < 0; i++) if (W.duck[i].bld < 0 && !W.duck[i].water) gi = i;
+            for (int i = 0; i < W.nduck && gi < 0; i++) {     // a ground duck with a clear run-up from the west
+                V3 d = W.duck[i].p; int clear = W.duck[i].bld < 0 && !W.duck[i].water;
+                for (float x = -8; x <= 0 && clear; x += 0.5f) for (float dz = -1.2f; dz <= 1.2f; dz += 0.6f) if (world_point_solid(&W, v3(d.x + x, terrain_height(d.x + x, d.z + dz) + 1.0f, d.z + dz))) clear = 0;
+                if (clear) gi = i;
+            }
             V3 q = W.duck[gi].p;
             car_build_vehicle(&W.cars[0], VEH_HATCH, v3(q.x - 6, q.y + vehicle_def(VEH_HATCH)->spawnH + 0.2f, q.z), 0, v3(1, 0, 0));
-            int before = duck_touch(&W, &W.cars[0]), got = -1;
-            for (int k = 0; k < 60 && got < 0; k++) { run(0.05f, (Controls){0.5f, 0, 0, 0}); got = duck_touch(&W, &W.cars[0]); }
-            printf("ducks on %-8s %d (%d on roofs, %d afloat, %d inside something); drove into #%d: found %d (none before %d)\n",
-                   map_name(m), W.nduck, roof, water, solid, gi, got == gi, before < 0);
+            int before = duck_near(&W, &W.cars[0]), got = -1;
+            for (int k = 0; k < 60 && got < 0; k++) { run(0.05f, (Controls){0.5f, 0, 0, 0}); got = duck_near(&W, &W.cars[0]); }
+            W.duck[gi].found = got == gi;                   // the player presses Y
+            int after = duck_near(&W, &W.cars[0]);
+            printf("ducks on %-8s %d (%d on roofs, %d afloat, %d inside something); drove up to #%d: in reach %d (not before %d), gone once collected %d\n",
+                   map_name(m), W.nduck, roof, water, solid, gi, got == gi, before < 0, after != gi);
         }
     }
     {   // The generated map: buildings and trees exist and the test routes above are clear of them.

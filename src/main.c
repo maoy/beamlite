@@ -626,6 +626,8 @@ static void build_airport_extras(MeshB *m, const World *w) {
     for (float x = -100; x <= 80; x += 30) flood_mast(m, x, 80.8f);
     flood_mast(m, -160, 137.5f); flood_mast(m, -130, 137.5f);
     for (float x = 150; x < AP_EAPRON_X1; x += 45) flood_mast(m, x, 137.5f);        // east apron
+    const float nmast[6] = {-88.5f, -27, 16, 52, 123, 185};                          // north row, in the gaps
+    for (int i = 0; i < 6; i++) flood_mast(m, nmast[i], AP_NAPRON_Z1 + 1.0f);
     // Helipad: edge lights (green, at night) round the touchdown circle, and a windsock.
     mbFlat = 1;
     for (int i = 0; i < 16; i++) {
@@ -729,6 +731,17 @@ static void build_markings_airport(MeshB *m) {
     for (int i = 0; i < 3; i++) {                             // lead-in lines out of the east hangars
         float hx = 0.5f * (AP_HANGARS[i][0] + AP_HANGARS[i][1]);
         paint_c(m, hx - 0.15f, hx + 0.15f, AP_EAPRON_Z0 + 0.5f, AP_APRON_Z1 - 1, yellow);
+    }
+    // North side: crossings over the runway with holding lines, the apron edge, lead-in lines to the hangars.
+    for (int i = 0; i < 3; i++) {
+        paint_c(m, cx[i] - 0.15f, cx[i] + 0.15f, AP_RWY_Z1, AP_NAPRON_Z0 + 1, yellow);
+        paint_c(m, cx[i] - 5.5f, cx[i] + 5.5f, AP_NAPRON_Z0 + 2.0f, AP_NAPRON_Z0 + 2.3f, yellow);
+        paint_c(m, cx[i] - 5.5f, cx[i] + 5.5f, AP_NAPRON_Z0 + 2.8f, AP_NAPRON_Z0 + 3.1f, yellow);
+    }
+    paint_c(m, AP_NAPRON_X0 + 1, AP_NAPRON_X1 - 1, AP_NAPRON_Z0 + 0.3f, AP_NAPRON_Z0 + 0.6f, yellow);
+    for (int i = 0; i < AP_NHANGARS; i++) {
+        float nx = 0.5f * (AP_NHANGAR[i][0] + AP_NHANGAR[i][1]);
+        paint_c(m, nx - 0.15f, nx + 0.15f, AP_NAPRON_Z0 + 4, AP_NAPRON_Z1 + 1.5f, yellow);
     }
     // Helipad: a white square edge, the yellow touchdown circle, and the H.
     float hx = AP_HELI_X, hz = AP_HELI_Z, e = AP_HELI_HALF - 0.6f;
@@ -2950,10 +2963,11 @@ static const char *zone_name(V3 p, int map) {
         if (t == 4 && p.z > AP_TWY_Z0 - 1) return "TAXIWAY";
         if (fabsf(p.x - AP_HELI_X) < AP_HELI_HALF && fabsf(p.z - AP_HELI_Z) < AP_HELI_HALF) return "HELIPAD";
         if (p.x > AP_HANGARS[0][0] - 2 && p.z > 40 && p.z < AP_APRON_Z1) return "HANGARS";
+        if (p.z > AP_RWY_Z1 && p.z < AP_NROW_Z1 + 8 && p.x > AP_NAPRON_X0 && p.x < AP_NAPRON_X1) return "NORTH APRON";
         if (t == 5) return "APRON";
         if (t == 4) return "CAR PARK";
         if (p.z > 34 && p.z < 82 && p.x > -70 && p.x < 134) return "TERMINAL";
-        if (p.z < 230 && fabsf(p.x) < 268) return "AIRFIELD";
+        if (p.z < 280 && fabsf(p.x) < 268) return "AIRFIELD";
     }
     if (map == MAP_NEWYORK && p.z > CITY_Z0 && p.z < CITY_Z1 + 6 && fabsf(p.x) < CITY_X + 6) {
         float dx = p.x - TS_X, dz = p.z - TS_Z;
@@ -3011,7 +3025,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
         const char *lines[] = {
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
-            "T  slow-mo      P  pause      K  clear skids      H  help", "U  rebuild knocked-down buildings", "G  drop tailgate      L  lighting      O  weather",
+            "T  slow-mo      P  pause      K  clear skids      H  help", "U  rebuild knocked-down buildings      Y  collect a rubber duck", "G  drop tailgate      L  lighting      O  weather",
             "M  map: Default / New York / Airport      J  traffic",
             "TAB  fly: airliner, then helicopter (Airport map)",
             "F2  sun shadows + ambient occlusion on / off",
@@ -3266,6 +3280,7 @@ static void draw_ducks(const World *w, V3 eye, float time) {
     rlEnd();
 }
 
+static int duckInReach;                                    // an unfound duck is close enough to collect with Y
 static char toastMsg[64];
 static float toastT;
 static void hud_toast(const char *s) { snprintf(toastMsg, sizeof toastMsg, "%s", s); toastT = 2.8f; }
@@ -3282,6 +3297,12 @@ static void draw_duck_hud(const World *w, float dt) {
         DrawCircle((int)x + 28, (int)26, 5, (Color){255, 204, 26, 255});
         DrawTriangle((Vector2){x + 32, 24}, (Vector2){x + 32, 29}, (Vector2){x + 37, 27}, (Color){255, 112, 18, 255});
         txt(s, x + 44, 24, 18, nf == w->nduck ? (Color){255, 204, 26, 255} : RAYWHITE);
+    }
+    if (duckInReach) {
+        const char *s = "[Y]  COLLECT RUBBER DUCK";
+        float tw = txtw(s, 24), pw = tw + 36, x = sw * 0.5f - pw * 0.5f, y = GetScreenHeight() * 0.62f;
+        hud_panel(x, y, pw, 42);
+        txt(s, x + 18, y + 9, 24, (Color){255, 214, 60, 255});
     }
     if (toastT > 0) {
         toastT -= dt;
@@ -3539,10 +3560,12 @@ int main(void) {
             if (world.cars[i].glassNew) { spawn_glass(&world.cars[i], world.cars[i].glassNew); world.cars[i].glassNew = 0; }
         update_destruction(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         update_debris(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
-        if (!paused) {                                  // rubber ducks: touch one with whatever you are driving or flying
+        {                                               // rubber ducks: get up to one in whatever you are driving or flying, press Y
             const Car *you = flying && ap ? &ap->c : &world.cars[0];
-            int di = duck_touch(&world, you);
-            if (di >= 0) {
+            int di = duck_near(&world, you);
+            duckInReach = di >= 0;
+            if (di >= 0 && IsKeyPressed(KEY_Y) && !pickerOpen) {
+                world.duck[di].found = 1;
                 duckFound[world.map][di] = 1;
                 int nf = 0; for (int i = 0; i < world.nduck; i++) nf += world.duck[i].found;
                 V3 q = duck_pos(&world, &world.duck[di], (float)GetTime());

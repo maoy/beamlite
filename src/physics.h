@@ -241,7 +241,7 @@ int airframe_damaged_beams(const Airframe *A);
 void airframe_update_frame(Airframe *A);
 
 // Rubber ducks hidden around the map: behind buildings, under trees, out in the fields, on low roofs
-// (knock the building down, or land on it), afloat in the bay. Touch one with your vehicle to find it.
+// (knock the building down, or land on it), afloat in the bay. Get your vehicle up to one and press Y.
 #define MAX_DUCKS 24
 typedef struct {
     V3 p;                       // where it sits (on a roof: the roof top; afloat: the sea surface)
@@ -280,8 +280,10 @@ float building_mound(const World *w, int b, float x, float z);   // full height 
 // are moved out to the nearest side. Returns how many buildings came back.
 int world_reset_buildings(World *w);
 V3 duck_pos(const World *w, const Duck *d, float time);   // where to draw it now (rides a collapsing roof down, bobs afloat)
-// The player's vehicle touching an unfound duck: marks it found and returns its index, else -1.
-int duck_touch(World *w, const Car *c);
+// The unfound duck within reach of the player's vehicle (any node within DUCK_REACH m), else -1.
+// The player then presses Y to collect it.
+#define DUCK_REACH 3.0f
+int duck_near(const World *w, const Car *c);
 
 // New York map: a Midtown street grid north of the highway with Broadway cutting across 7th Avenue on a
 // diagonal; the "bowtie" where they cross is centred on (TS_X, TS_Z). Broadway is pedestrian plaza
@@ -335,6 +337,15 @@ static const float AP_GATES[AP_NGATES] = {-30.0f, 0.0f, 30.0f, 60.0f, 90.0f};
 #define AP_EAPRON_Z0 94.0f
 static const float AP_HANGARS[3][3] = {{138, 170, 14.0f}, {176, 208, 14.0f}, {214, 258, 20.0f}};   // x0, x1, wall height (doors face north)
 #define AP_HANGAR_Z0 46.0f
+// North side, across the runway from the terminal: an apron along the runway and a row of hangars and
+// service buildings behind it, doors facing the runway. Taxiway crossings link it to the south side.
+#define AP_NAPRON_X0 -200.0f
+#define AP_NAPRON_X1 250.0f
+#define AP_NAPRON_Z0 206.0f
+#define AP_NAPRON_Z1 226.0f
+#define AP_NROW_Z1 262.0f               // back walls of the north row
+#define AP_NHANGARS 4
+static const float AP_NHANGAR[AP_NHANGARS][3] = {{-195, -150, 16.0f}, {-140, -95, 16.0f}, {130, 180, 20.0f}, {190, 245, 18.0f}};   // x0, x1, wall height
 
 // 0 none, 1 highway, 2 street/avenue, 3 pedestrian plaza, 4 runway/taxiway/car park asphalt, 5 apron concrete
 int road_at(float x, float z);

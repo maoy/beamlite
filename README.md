@@ -39,6 +39,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | R | reset to start |
 | T / P | slow-mo / pause |
 | K | clear skid marks |
+| Y | collect the rubber duck in reach |
 | U | rebuild every knocked-down building (clears the rubble; anything parked on it is moved out) |
 | Tab | Airport map: fly the airliner on the runway, then the helicopter on the pad, then back to the car |
 
@@ -87,9 +88,10 @@ Press **U** to stand them all back up.
 
 Each map hides 24 small rubber ducks: tucked behind buildings, at the foot of trees, out in the
 fields and forest, and a few on low flat roofs (knock the building down and the duck comes down
-with it, or land the helicopter on the roof). At the airport two are afloat in the bay. Touch one
-with whatever you are driving or flying to find it; the count shows at the top of the screen, and
-ducks you have found stay found when you switch maps.
+with it, or land the helicopter on the roof). At the airport two are afloat in the bay. Get within
+a few metres of one in whatever you are driving or flying and a prompt comes up: press **Y** to
+collect it. The count shows at the top of the screen, and ducks you have collected stay collected
+when you switch maps.
 
 - **Default**: two small towns up the cross road to the left (+z), with avenues, side streets and
   pavements: houses, shops, apartment blocks, a couple of towers and warehouses, with saplings
@@ -116,7 +118,9 @@ ducks you have found stay found when you switch maps.
   stands outside the big one. Two more hangars sit west of the terminal (one with an airliner
   outside), and north of it all is runway 09/27. Like the runways at SFO, it runs 1.5 km out into a bay on a causeway, with piano keys,
   touchdown bars, numbers, edge and threshold lights and approach lights. A blue-lit taxiway runs
-  alongside. The bay lies north and east of the field. To the south and west the land rises into
+  alongside. Across the runway from the terminal is the north apron. Four more hangars and a row
+  of service buildings face the runway from it: two cargo sheds, the fire station and an office
+  block. Three taxiway crossings over the runway connect it to the south side. The bay lies north and east of the field. To the south and west the land rises into
   coastal hills. The map reaches 6 km from the field in every direction, so there is room to fly.
   An airliner waits lined up on runway 09: press **Tab** to fly it, and **Tab** again to fly the
   helicopter (see above). The parked aircraft are soft bodies and the buildings are solid. The field is graded flat, and this map has no washboard.

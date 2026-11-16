@@ -60,7 +60,7 @@ int dirt_at(float x, float z) { return fabsf(x) < 8.0f && z > wash_z0() && z < w
 // shore (negative on land).
 float sea_dist(float x, float z) {
     if (g_map != MAP_AIRPORT) return -1e9f;
-    float shore = 252.0f - 190.0f * smooth01(300.0f, 420.0f, x) + 14.0f * sinf(x * 0.013f) + 5.0f * sinf(x * 0.041f + 1.0f);
+    float shore = 252.0f + 40.0f * smooth01(340.0f, 270.0f, x) - 190.0f * smooth01(300.0f, 420.0f, x) + 14.0f * sinf(x * 0.013f) + 5.0f * sinf(x * 0.041f + 1.0f);
     float ds = z - shore;
     float dc = fmaxf(x - (AP_RWY_X1 + 75.0f), fmaxf(116.0f - z, z - 216.0f));   // outside the causeway
     return fminf(ds, dc);
@@ -109,7 +109,7 @@ static float terrain_base(float x, float z) {
     float far = 0.0f;
     if (g_map == MAP_AIRPORT) {
         float d = 1e9f;                                  // distance outside the graded airfield and causeway
-        if (z > -20.0f) d = fmaxf(fmaxf(0.0f, fabsf(x) - 262.0f), fmaxf(0.0f, z - 218.0f));
+        if (z > -20.0f) d = fmaxf(fmaxf(0.0f, fabsf(x) - 262.0f), fmaxf(0.0f, z - 270.0f));
         if (x > 200.0f) d = fminf(d, fmaxf(fmaxf(0.0f, x - (AP_RWY_X1 + 70.0f)), fmaxf(0.0f, fmaxf(118.0f - z, z - 214.0f))));
         if (d < 1e8f) hills *= smooth01(0.0f, 60.0f, d);
         // Coastal hills well away from the field, for something to fly around.
@@ -2072,6 +2072,9 @@ static const Area AP_AREAS[] = {
     {{93, 105, AP_TWY_Z1, AP_RWY_Z0}, 4},                                 // connector to the east apron
     {{-241, -229, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{-6, 6, AP_TWY_Z1, AP_RWY_Z0}, 4}, {{229, 241, AP_TWY_Z1, AP_RWY_Z0}, 4},   // connectors
     {{10, 90, 14, 34}, 4}, {{-50, -12, 14, 34}, 4},                       // car parks
+    {{AP_NAPRON_X0, AP_NAPRON_X1, AP_NAPRON_Z0, AP_NAPRON_Z1}, 5},       // north apron, across the runway
+    {{AP_NAPRON_X0, AP_NAPRON_X1, AP_NAPRON_Z1, AP_NROW_Z1 + 4}, 5},     // north row floors and the yard behind
+    {{-241, -229, AP_RWY_Z1, AP_NAPRON_Z0}, 4}, {{-6, 6, AP_RWY_Z1, AP_NAPRON_Z0}, 4}, {{229, 241, AP_RWY_Z1, AP_NAPRON_Z0}, 4},   // runway crossings
 };
 static const Rect DEF_STREETS[] = {
     {-112, 112, 44, 52},         // avenue
@@ -2111,7 +2114,7 @@ int map_has_broadway(void) { return g_map == MAP_NEWYORK; }
 float broadway_x(float z) { return TS_X + BW_DX * (z - TS_Z); }
 float broadway_dist(float x, float z) { return fabsf(x - broadway_x(z)) / sqrtf(1.0f + BW_DX * BW_DX); }
 static int on_broadway(float x, float z, float m) { return g_map == MAP_NEWYORK && z > CITY_Z0 && z < CITY_Z1 && broadway_dist(x, z) < BW_HALF + m; }
-static int in_airport(float x, float z) { return g_map == MAP_AIRPORT && fabsf(x) < 268.0f && z > 6.0f && z < 225.0f; }
+static int in_airport(float x, float z) { return g_map == MAP_AIRPORT && fabsf(x) < 268.0f && z > 6.0f && z < 275.0f; }
 static int in_city(float x, float z) { (void)x; return g_map == MAP_NEWYORK && z > CITY_Z0 - 2; }   // the whole north half is built up
 
 static int in_rect(const Rect *r, float x, float z, float m) {
@@ -2179,8 +2182,9 @@ static unsigned duck_rng;
 static float dkrnd(void) { duck_rng = duck_rng * 1664525u + 1013904223u; return (duck_rng >> 8) / 16777216.0f; }
 static float dkrange(float a, float b) { return a + (b - a) * dkrnd(); }
 
-static int duck_spot_ok(const World *w, V3 p, int onGround) {
-    if (fabsf(p.x) > 285.0f || fabsf(p.z) > 285.0f) return 0;
+static int duck_spot_ok(const World *w, V3 p, int onGround, int water) {
+    float lim = water ? 360.0f : 285.0f;                                // the bay reaches past the detailed square
+    if (fabsf(p.x) > lim || fabsf(p.z) > lim) return 0;
     if (p.x * p.x + p.z * p.z < 18.0f * 18.0f) return 0;               // not right where you start
     for (int k = 0; k < 5; k++) {                                       // clear of walls and trunks all round
         V3 q = v3(p.x + (k == 1 ? 0.5f : k == 2 ? -0.5f : 0), p.y + 0.2f, p.z + (k == 3 ? 0.5f : k == 4 ? -0.5f : 0));
@@ -2220,7 +2224,7 @@ static void place_ducks(World *w) {
         if (f < 2) { x = f == 0 ? B->mx.x + out : B->mn.x - out; z = lerpf(B->mn.z, B->mx.z, u); }
         else { z = f == 2 ? B->mx.z + out : B->mn.z - out; x = lerpf(B->mn.x, B->mx.x, u); }
         V3 p = v3(x, terrain_height(x, z), z);
-        if (road_at(x, z) || !duck_spot_ok(w, p, 1)) continue;
+        if (road_at(x, z) || !duck_spot_ok(w, p, 1, 0)) continue;
         add_duck(w, p, -1, 0); got++;
     }
     // At the foot of a tree.
@@ -2229,7 +2233,7 @@ static void place_ducks(World *w) {
         float a = dkrange(0, 6.2831853f), r = T->r + 0.7f;
         float x = T->x + r * cosf(a), z = T->z + r * sinf(a);
         V3 p = v3(x, terrain_height(x, z), z);
-        if (road_at(x, z) || !duck_spot_ok(w, p, 1)) continue;
+        if (road_at(x, z) || !duck_spot_ok(w, p, 1, 0)) continue;
         add_duck(w, p, -1, 0); got++;
     }
     // On flat roofs low enough to knock down with a car (anything at the airport: there is a helicopter).
@@ -2240,23 +2244,23 @@ static void place_ducks(World *w) {
         if (!airport && B->mx.y - B->ground > 22.0f) continue;
         if (B->mx.x - B->mn.x < 5.0f || B->mx.z - B->mn.z < 5.0f) continue;
         V3 p = v3(dkrange(B->mn.x + 1.5f, B->mx.x - 1.5f), B->mx.y, dkrange(B->mn.z + 1.5f, B->mx.z - 1.5f));
-        if (!duck_spot_ok(w, p, 0)) continue;
+        if (!duck_spot_ok(w, p, 0, 0)) continue;
         add_duck(w, p, bi, 0); got++;
     }
     // Afloat in the bay, not far out.
     for (int t = 0, got = 0; airport && t < 2000 && got < 2; t++) {
-        float x = dkrange(-250, 280), z = dkrange(120, 284);
+        float x = dkrange(-250, 340), z = dkrange(120, 340);
         float s = sea_dist(x, z);
         if (s < 6.0f || s > 30.0f) continue;
         V3 p = v3(x, AP_SEA_Y, z);
-        if (!duck_spot_ok(w, p, 0)) continue;
+        if (!duck_spot_ok(w, p, 0, 1)) continue;
         add_duck(w, p, -1, 1); got++;
     }
     // The rest out in the open: fields, forest, the odd corner.
     for (int t = 0; t < 6000 && w->nduck < MAX_DUCKS; t++) {
         float x = dkrange(-270, 270), z = dkrange(-270, 270);
         V3 p = v3(x, terrain_height(x, z), z);
-        if (road_at(x, z) || !duck_spot_ok(w, p, 1)) continue;
+        if (road_at(x, z) || !duck_spot_ok(w, p, 1, 0)) continue;
         add_duck(w, p, -1, 0);
     }
 }
@@ -2271,11 +2275,12 @@ V3 duck_pos(const World *w, const Duck *d, float time) {
     return p;
 }
 
-int duck_touch(World *w, const Car *c) {
+int duck_near(const World *w, const Car *c) {
     if (c->nn <= 0) return -1;
     V3 ref = c->n[0].p;
+    int best = -1; float bd = DUCK_REACH * DUCK_REACH;
     for (int i = 0; i < w->nduck; i++) {
-        Duck *d = &w->duck[i];
+        const Duck *d = &w->duck[i];
         if (d->found) continue;
         V3 q = duck_pos(w, d, 0);
         q.y += 0.2f;
@@ -2283,10 +2288,11 @@ int duck_touch(World *w, const Car *c) {
         if (vdot(r, r) > 60.0f * 60.0f) continue;
         for (int k = 0; k < c->nn; k++) {
             V3 e = vsub(c->n[k].p, q);
-            if (vdot(e, e) < 1.5f * 1.5f) { d->found = 1; return i; }
+            float dd = vdot(e, e);
+            if (dd < bd) { bd = dd; best = i; }
         }
     }
-    return -1;
+    return best;
 }
 
 int road_rects(float (*out)[4], int max, int *nHighway) {
@@ -2599,6 +2605,12 @@ static void build_airport(World *w) {
     add_building(w, (Rect){-150, -114, 76, 120}, BLD_HANGAR, 15.0f, 2);
     // The maintenance row east of the tower, doors open onto the east apron; the big one takes an airliner.
     for (int i = 0; i < 3; i++) add_building(w, (Rect){AP_HANGARS[i][0], AP_HANGARS[i][1], AP_HANGAR_Z0, AP_EAPRON_Z0}, BLD_HANGAR, AP_HANGARS[i][2], 2);
+    // The north row, doors facing the runway: hangars at either end, cargo sheds, the fire station and an office block between.
+    for (int i = 0; i < AP_NHANGARS; i++) add_building(w, (Rect){AP_NHANGAR[i][0], AP_NHANGAR[i][1], AP_NAPRON_Z1 + 2, AP_NROW_Z1}, BLD_HANGAR, AP_NHANGAR[i][2], 3);
+    add_building(w, (Rect){-82, -32, AP_NAPRON_Z1 + 6, AP_NROW_Z1}, BLD_WAREHOUSE, 10.0f, 3);   // cargo
+    add_building(w, (Rect){-22, 10, AP_NAPRON_Z1 + 4, AP_NROW_Z1 - 8}, BLD_SHOP, 8.0f, 3);      // fire station
+    add_building(w, (Rect){22, 46, AP_NAPRON_Z1 + 8, AP_NROW_Z1 - 4}, BLD_APARTMENT, 22.0f, 3); // operations offices
+    add_building(w, (Rect){58, 116, AP_NAPRON_Z1 + 6, AP_NROW_Z1}, BLD_WAREHOUSE, 11.0f, 3);    // cargo
     add_plane(w, -128.0f, 130.0f, -1, 0);                                   // outside the west hangars
     add_plane(w, 0.5f * (AP_HANGARS[2][0] + AP_HANGARS[2][1]), 134.0f, 0, -1);   // pulled out of the big hangar, nose to the taxiway
     w->heli = w->nplanes;                                                    // on the helipad beside the tower, nose to the east
