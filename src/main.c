@@ -2597,7 +2597,7 @@ static void draw_shards(void) {
 // O cycles dry / wet / rain. Wet roads reflect (render.c) and cost ~12-20% tyre grip;
 // rain adds falling streaks and ripples; any wet road throws spray off the tyres.
 
-static int weather = 1;                         // 0 dry, 1 wet, 2 rain, 3 snow
+static int weather = 0;                         // 0 dry, 1 wet, 2 rain, 3 snow (scripted runs start wet, as they always have)
 #define WEATHER_COUNT 4
 static const char *WEATHER_NAME[] = {"DRY", "WET", "RAIN", "SNOW"};
 static float weather_wet(void) { return weather == 1 ? 0.75f : (weather == 2 ? 1.0f : 0.0f); }
@@ -3809,6 +3809,7 @@ static void sound_frame(World *w, Camera3D cam, int flying, const Airframe *ap, 
 static int trafficOn = 1;
 #define TRAFFIC_CARS 8
 
+static int ducksOn;                 // "Find the ducks!" on the map menu: off unless the player ticks it
 static void load_map(World *w, int map, int *nextSlot) {
     destruction_reset();
     traffic_clear(w);
@@ -3843,6 +3844,7 @@ static void load_map(World *w, int map, int *nextSlot) {
     }
     for (int i = 1; i < w->ncars; i++) w->cars[i].ctl = (Controls){0, 0.6f, 0, 1};
     for (int i = 0; i < w->nduck; i++) w->duck[i].found = duckFound[map][i];   // ducks stay found for the session
+    if (!ducksOn && !getenv("BEAMLITE_PROF")) w->nduck = 0;                   // no duck hunt unless it was ticked on the map menu
     if (trafficOn) traffic_init(w, TRAFFIC_CARS, w->cars[0].pos);
     *nextSlot = w->ncars;
 }
@@ -3987,7 +3989,8 @@ static void fe_loading(int map) {
 // The map menu. Returns the map picked, or -1 when it is left without picking (only if `cancel`).
 static int fe_pick_map(int sel, int cancel) {
     float shown = (float)sel, age = 0;
-    int frames = 0;
+    int frames = 0, ducksWas = ducksOn;
+    if (getenv("BEAMLITE_FE_DUCKS")) ducksOn = 1;
     if (getenv("BEAMLITE_FE_SEL")) sel = atoi(getenv("BEAMLITE_FE_SEL")) % MAP_COUNT;
     while (!WindowShouldClose()) {
         float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight(), u = fminf(sh / 900.0f, sw / 1440.0f), dt = fminf(GetFrameTime(), 0.05f);
@@ -4005,7 +4008,13 @@ static int fe_pick_map(int sel, int cancel) {
         for (int i = 0; i < MAP_COUNT; i++) if (IsKeyPressed(KEY_ONE + i)) { sel = i; go = 1; }
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE)) go = 1;
         if (hover >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { sel = hover; go = 1; }
-        if (cancel && (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_M)) && age > 0.2f) return -1;
+        // The duck hunt: off unless ticked. It takes effect when a map is picked.
+        const char *dlabel = "Find the ducks!", *dhint = "24 rubber ducks are hidden on each map. Drive up to one and press Y.";
+        float bs = 26 * u, dls = 26 * u, dhs = 17 * u, dw = bs + 14 * u + txtw(dlabel, dls) + 22 * u + txtw(dhint, dhs);
+        Rectangle drow = {sw * 0.5f - dw * 0.5f - 12 * u, y0 + ch + 22 * u, dw + 24 * u, bs + 20 * u};
+        int dhover = CheckCollisionPointRec(m, drow);
+        if (IsKeyPressed(KEY_F) || (dhover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) ducksOn = !ducksOn;
+        if (cancel && (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_M)) && age > 0.2f) { ducksOn = ducksWas; return -1; }
         shown += (sel - shown) * fminf(1.0f, dt * 10.0f);
 
         BeginDrawing();
@@ -4041,7 +4050,20 @@ static int fe_pick_map(int sel, int cancel) {
             Color line = f > 0.5f ? HUD_ORANGE : (Color){255, 255, 255, 36};
             DrawRectangleLinesEx((Rectangle){x, y, cw, ch}, f > 0.5f ? 3 * u : 1, fe_a(line, a));
         }
-        const char *keys = cancel ? "LEFT / RIGHT  choose      ENTER  drive      ESC  back to the game" : "LEFT / RIGHT  choose      ENTER  drive      or click a map";
+        {
+            float bx = drow.x + 12 * u, by = drow.y + 10 * u;
+            if (dhover) DrawRectangleRec(drow, fe_a((Color){255, 255, 255, 14}, in));
+            DrawRectangle((int)bx, (int)by, (int)bs, (int)bs, fe_a((Color){16, 19, 26, 240}, in));
+            DrawRectangleLinesEx((Rectangle){bx, by, bs, bs}, 2 * u, fe_a(ducksOn || dhover ? HUD_ORANGE : (Color){255, 255, 255, 120}, in));
+            if (ducksOn) {
+                DrawLineEx((Vector2){bx + bs * 0.20f, by + bs * 0.52f}, (Vector2){bx + bs * 0.42f, by + bs * 0.74f}, 3.5f * u, fe_a(HUD_ORANGE, in));
+                DrawLineEx((Vector2){bx + bs * 0.42f, by + bs * 0.74f}, (Vector2){bx + bs * 0.82f, by + bs * 0.24f}, 3.5f * u, fe_a(HUD_ORANGE, in));
+            }
+            float tx = bx + bs + 14 * u;
+            txt(dlabel, tx, by, dls, fe_a(ducksOn ? HUD_ORANGE : WHITE, in));
+            txt(dhint, tx + txtw(dlabel, dls) + 22 * u, by + 6 * u, dhs, fe_a(HUD_DIM, in));
+        }
+        const char *keys = cancel ? "LEFT / RIGHT  choose      ENTER  drive      F  ducks      ESC  back to the game" : "LEFT / RIGHT  choose      ENTER  drive      F  ducks      or click a map";
         txt(keys, 70 * u, sh - 52 * u, 20 * u, fe_a(HUD_DIM, in));
         fe_copyright(sw - 70 * u, sh - 52 * u, 20 * u, 2, fe_a(HUD_DIM, in));
         EndDrawing();
@@ -4054,7 +4076,8 @@ static int fe_pick_map(int sel, int cancel) {
 static float wrap_pi(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a += 2 * PI; return a; }
 
 int main(void) {
-    set_env(0);
+    set_env(getenv("BEAMLITE_PROF") ? 0 : 1);       // a sunny day (scripted runs start at dusk and wet, as they always have)
+    if (getenv("BEAMLITE_PROF")) weather = 1;
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | ((getenv("BEAMLITE_PROF") && !getenv("BEAMLITE_PROF_VSYNC")) ? 0 : FLAG_VSYNC_HINT));
     InitWindow(1440, 900, "BeamLite — soft-body driving");
     SetExitKey(KEY_NULL);

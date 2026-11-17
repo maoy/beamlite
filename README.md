@@ -80,7 +80,8 @@ sends it spinning.
 
 The game opens on a two-second title card (any key skips it), then asks you to pick a map: **The
 Town**, **New York City** or **The Airport**, each shown with an aerial view. Choose with ←/→ and
-Enter, the number keys, or a click. **M** brings the menu back at any time. The pictures are frames
+Enter, the number keys, or a click. The game starts on a dry, sunny day; **L** and **O** change the
+lighting and weather. **M** brings the menu back at any time. The pictures are frames
 from the game itself and live in `assets/`; without them the screens fall back to a plain backdrop.
 
 Damage costs power. Up to 15% damage a car drives as new; beyond that the engine fades (about 70%
@@ -97,7 +98,8 @@ pile you can drive over. A fast car takes out a house, a semi gets through wareh
 apartment blocks, and the towers, hangars and terminal take several big hits (or the airliner).
 Press **U** to stand them all back up.
 
-Each map hides 24 small rubber ducks: tucked behind buildings, at the foot of trees, out in the
+The duck hunt is optional: tick **Find the ducks!** on the map menu (or press F there) to switch it
+on; it is off by default. With it on, each map hides 24 small rubber ducks: tucked behind buildings, at the foot of trees, out in the
 fields and forest, and a few on low flat roofs (knock the building down and the duck comes down
 with it, or land the helicopter on the roof). At the airport two are afloat in the bay. Get within
 a few metres of one in whatever you are driving or flying and a prompt comes up: press **Y** to
