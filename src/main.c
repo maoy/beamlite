@@ -3045,7 +3045,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
             "T  slow-mo      P  pause      K  clear skids      H  help", "U  rebuild knocked-down buildings      Y  collect a rubber duck", "Z  sound on / off", "G  drop tailgate      L  lighting      O  weather",
-            "M  map: Default / New York / Airport      J  traffic",
+            "M  map menu      J  traffic",
             "TAB  fly: airliner, then helicopter (Airport map)",
             "F2  sun shadows + ambient occlusion on / off",
             "", "Ramp ahead, crash wall behind you, warehouses to the", "right, forest on the hills. Default: towns to the left.",
@@ -3529,6 +3529,210 @@ static void load_map(World *w, int map, int *nextSlot) {
     *nextSlot = w->ncars;
 }
 
+
+// ------------------------------------------------------------- front end ----
+// The splash (logo over a picture, two seconds) and the map menu. The pictures are frames from the
+// game itself, kept in assets/; a missing file just leaves a plain backdrop.
+static Texture2D feSplash, feMap[MAP_COUNT];
+static const char *MAP_TITLE[MAP_COUNT] = {"THE TOWN", "NEW YORK CITY", "THE AIRPORT"};
+static const char *MAP_BLURB[MAP_COUNT] = {
+    "Where it all starts. A small town at a crossroads, forest on the hills, and the proving ground: launch ramp, washboard and crash wall.",
+    "Midtown at full height. Eleven avenues and nine streets of towers, the screens of Times Square, yellow cabs and steaming manholes.",
+    "A bayside airfield with a runway out on a causeway. Fly the airliner or the helicopter, with six kilometres of sky in every direction.",
+};
+static const char *MAP_TAGS[MAP_COUNT][3] = {{"PROVING GROUND", "TOWN", "HILLS"}, {"TIMES SQUARE", "290 BUILDINGS", "TRAFFIC"}, {"AIRLINER", "HELICOPTER", "THE BAY"}};
+static const char *FE_COPYRIGHT = "2026 J&J STUDIO";
+
+static Texture2D fe_load(const char *name) {
+    const char *dirs[] = {GetApplicationDirectory(), "", "../"};
+    for (int i = 0; i < 3; i++) {
+        const char *path = TextFormat("%sassets/%s", dirs[i], name);
+        if (!FileExists(path)) continue;
+        Image im = LoadImage(path);
+        if (!im.data) continue;
+        Texture2D t = LoadTextureFromImage(im);
+        UnloadImage(im);
+        GenTextureMipmaps(&t);
+        SetTextureFilter(t, TEXTURE_FILTER_TRILINEAR);
+        return t;
+    }
+    return (Texture2D){0};
+}
+static void fe_init(void) {
+    const char *files[MAP_COUNT] = {"map_town.png", "map_newyork.png", "map_airport.png"};
+    feSplash = fe_load("splash.png");
+    for (int i = 0; i < MAP_COUNT; i++) feMap[i] = fe_load(files[i]);
+}
+// Fill a rectangle with a picture, cropping whatever doesn't fit. zoom > 1 pushes in on the centre.
+static void fe_cover(Texture2D t, Rectangle d, float zoom, Color tint) {
+    if (!t.id) { DrawRectangleGradientV((int)d.x, (int)d.y, (int)d.width, (int)d.height, (Color){34, 40, 56, tint.a}, (Color){10, 12, 18, tint.a}); return; }
+    float ta = (float)t.width / t.height, da = d.width / d.height;
+    float w = ta > da ? t.height * da : t.width, h = ta > da ? t.height : t.width / da;
+    w /= zoom; h /= zoom;
+    DrawTexturePro(t, (Rectangle){(t.width - w) * 0.5f, (t.height - h) * 0.5f, w, h}, d, (Vector2){0, 0}, 0, tint);
+}
+static float fe_sat(float x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+static Color fe_a(Color c, float a) { c.a = (unsigned char)(c.a * fe_sat(a)); return c; }
+// The copyright line with its sign drawn by hand (the HUD font is loaded as plain ASCII). align: 0 left, 1 centre, 2 right.
+static void fe_copyright(float x, float y, float size, int align, Color c) {
+    float r = size * 0.44f, w = 2 * r + size * 0.32f + txtw(FE_COPYRIGHT, size);
+    x -= align == 1 ? w * 0.5f : align == 2 ? w : 0;
+    Vector2 o = {x + r, y + size * 0.47f};
+    DrawRing(o, r - size * 0.075f, r, 0, 360, 40, c);
+    DrawRing(o, r * 0.36f, r * 0.36f + size * 0.085f, 50, 310, 24, c);
+    txt(FE_COPYRIGHT, x + 2 * r + size * 0.32f, y, size, c);
+}
+// The wordmark, centred on cx with its top at y.
+static void fe_logo(float cx, float y, float size, float alpha) {
+    float wb = txtw("BEAM", size), wl = txtw("LITE", size), gap = size * 0.04f, x = cx - (wb + gap + wl) * 0.5f;
+    txt("BEAM", x + size * 0.03f, y + size * 0.04f, size, fe_a((Color){0, 0, 0, 170}, alpha));
+    txt("LITE", x + wb + gap + size * 0.03f, y + size * 0.04f, size, fe_a((Color){0, 0, 0, 170}, alpha));
+    txt("BEAM", x, y, size, fe_a(WHITE, alpha));
+    txt("LITE", x + wb + gap, y, size, fe_a(HUD_ORANGE, alpha));
+    slash(x, y + size * 0.93f, wb + gap + wl - size * 0.1f, size * 0.055f, fe_a(HUD_ORANGE, alpha));
+    slash(x - size * 0.32f, y + size * 0.93f, size * 0.2f, size * 0.055f, fe_a(WHITE, alpha));
+}
+// Greedy word wrap; returns the y below the last line.
+static float fe_wrap(const char *s, float x, float y, float w, float size, Color c) {
+    char line[256] = "", word[64];
+    while (*s) {
+        int n = 0;
+        while (*s && *s != ' ' && n < 63) word[n++] = *s++;
+        word[n] = 0;
+        while (*s == ' ') s++;
+        char tryl[256];
+        snprintf(tryl, sizeof tryl, "%s%s%s", line, line[0] ? " " : "", word);
+        if (line[0] && txtw(tryl, size) > w) { txt(line, x, y, size, c); y += size * 1.28f; snprintf(line, sizeof line, "%s", word); }
+        else snprintf(line, sizeof line, "%s", tryl);
+    }
+    if (line[0]) { txt(line, x, y, size, c); y += size * 1.28f; }
+    return y;
+}
+static void fe_shot(const char *what) {             // BEAMLITE_FE_SHOT=<prefix>: save this screen (for checking the front end)
+    Image im = LoadImageFromScreen();
+    ExportImage(im, TextFormat("%s.%s.png", getenv("BEAMLITE_FE_SHOT"), what));
+    UnloadImage(im);
+}
+
+static void fe_draw_splash(float t) {
+    float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight(), u = sh / 900.0f;
+    ClearBackground(BLACK);
+    fe_cover(feSplash, (Rectangle){0, 0, sw, sh}, 1.0f + 0.03f * t, fe_a(WHITE, t / 0.2f));
+    DrawRectangleGradientV(0, 0, (int)sw, (int)(sh * 0.45f), (Color){0, 0, 0, 150}, (Color){0, 0, 0, 0});
+    DrawRectangleGradientV(0, (int)(sh * 0.5f), (int)sw, (int)(sh * 0.5f) + 1, (Color){0, 0, 0, 0}, (Color){0, 0, 0, 235});
+    float k = fe_sat((t - 0.25f) / 0.22f), ease = 1 - (1 - k) * (1 - k) * (1 - k);
+    if (k > 0) {                                     // the logo lands, a touch oversized, and settles
+        float size = 190 * u * (1.45f - 0.45f * ease);
+        float pulse = 0.5f + 0.5f * sinf((t - 0.25f) * 9.0f);
+        fe_logo(sw * 0.5f, sh * 0.70f - size * 0.5f, size, ease);
+        const char *tag = "SOFT-BODY DRIVING SANDBOX";
+        float ts = 30 * u, tw = txtw(tag, ts) + ts * 0.9f * 24;
+        float a2 = fe_sat((t - 0.55f) / 0.3f), x = sw * 0.5f - tw * 0.5f;
+        for (const char *c = tag; *c; c++) { char one[2] = {*c, 0}; txt(one, x, sh * 0.70f + 118 * u, ts, fe_a((Color){235, 238, 245, 255}, a2 * (0.82f + 0.18f * pulse))); x += txtw(one, ts) + ts * 0.9f; }
+        BeginBlendMode(BLEND_ADDITIVE);              // a glint runs along the underline
+        float gx = sw * 0.5f + (fe_sat((t - 0.6f) / 0.9f) - 0.5f) * 900 * u;
+        DrawRectangleGradientH((int)(gx - 260 * u), (int)(sh * 0.70f + 80 * u), (int)(260 * u), (int)(5 * u), (Color){255, 200, 120, 0}, (Color){255, 230, 190, 230});
+        DrawRectangleGradientH((int)gx, (int)(sh * 0.70f + 80 * u), (int)(260 * u), (int)(5 * u), (Color){255, 230, 190, 230}, (Color){255, 200, 120, 0});
+        DrawRectangle(0, 0, (int)sw, (int)sh, fe_a((Color){255, 236, 210, 255}, 0.75f * (1 - fe_sat((t - 0.25f) / 0.32f))));   // the flash as it lands
+        EndBlendMode();
+    }
+    fe_copyright(sw * 0.5f, sh - 56 * u, 23 * u, 1, fe_a((Color){200, 205, 214, 255}, (t - 0.4f) / 0.4f));
+    DrawRectangle(0, 0, (int)sw, (int)sh, fe_a(BLACK, (t - 1.75f) / 0.25f));        // out to black
+}
+// Two seconds of logo. Any key or click moves on early.
+static void fe_splash(void) {
+    double t0 = GetTime();
+    int shot = 0;
+    while (!WindowShouldClose()) {
+        float t = (float)(GetTime() - t0);
+        if (getenv("BEAMLITE_FE_SHOT")) t = 1.1f;
+        if (t >= 2.0f || (t > 0.3f && (GetKeyPressed() || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))) break;
+        BeginDrawing();
+        fe_draw_splash(t);
+        EndDrawing();
+        if (getenv("BEAMLITE_FE_SHOT") && ++shot == 20) { fe_shot("splash"); break; }
+    }
+}
+
+static void fe_loading(int map) {
+    float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight(), u = sh / 900.0f;
+    BeginDrawing();
+    ClearBackground(BLACK);
+    fe_cover(feMap[map], (Rectangle){0, 0, sw, sh}, 1.0f, (Color){255, 255, 255, 110});
+    DrawRectangleGradientV(0, (int)(sh * 0.4f), (int)sw, (int)(sh * 0.6f) + 1, (Color){0, 0, 0, 0}, (Color){0, 0, 0, 230});
+    txt(MAP_TITLE[map], 70 * u, sh - 170 * u, 84 * u, WHITE);
+    slash(70 * u, sh - 84 * u, 120 * u, 6 * u, HUD_ORANGE);
+    txt("LOADING", 70 * u, sh - 66 * u, 24 * u, HUD_DIM);
+    EndDrawing();
+}
+
+// The map menu. Returns the map picked, or -1 when it is left without picking (only if `cancel`).
+static int fe_pick_map(int sel, int cancel) {
+    float shown = (float)sel, age = 0;
+    int frames = 0;
+    if (getenv("BEAMLITE_FE_SEL")) sel = atoi(getenv("BEAMLITE_FE_SEL")) % MAP_COUNT;
+    while (!WindowShouldClose()) {
+        float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight(), u = fminf(sh / 900.0f, sw / 1440.0f), dt = fminf(GetFrameTime(), 0.05f);
+        age += dt;
+        float gap = 30 * u, cw = 410 * u, ih = cw * 9.0f / 16.0f, ch = ih + 250 * u;
+        float x0 = sw * 0.5f - (3 * cw + 2 * gap) * 0.5f, y0 = sh * 0.5f - ch * 0.5f + 56 * u;
+        Vector2 m = GetMousePosition();
+        int hover = -1, go = 0;
+        for (int i = 0; i < MAP_COUNT; i++)
+            if (CheckCollisionPointRec(m, (Rectangle){x0 + i * (cw + gap), y0 - 14 * u, cw, ch + 14 * u})) hover = i;
+        Vector2 md = GetMouseDelta();
+        if (hover >= 0 && (md.x != 0 || md.y != 0)) sel = hover;
+        if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) sel = (sel + 1) % MAP_COUNT;
+        if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) sel = (sel + MAP_COUNT - 1) % MAP_COUNT;
+        for (int i = 0; i < MAP_COUNT; i++) if (IsKeyPressed(KEY_ONE + i)) { sel = i; go = 1; }
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE)) go = 1;
+        if (hover >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { sel = hover; go = 1; }
+        if (cancel && (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_M)) && age > 0.2f) return -1;
+        shown += (sel - shown) * fminf(1.0f, dt * 10.0f);
+
+        BeginDrawing();
+        ClearBackground((Color){8, 10, 14, 255});
+        for (int i = 0; i < MAP_COUNT; i++) {            // backdrop: the picked map's picture, dimmed
+            float a = 1 - fabsf(shown - i);
+            if (a > 0.01f) fe_cover(feMap[i], (Rectangle){0, 0, sw, sh}, 1.25f, fe_a((Color){255, 255, 255, 70}, a));
+        }
+        DrawRectangleGradientV(0, 0, (int)sw, (int)sh, (Color){8, 10, 14, 120}, (Color){8, 10, 14, 235});
+        float in = fe_sat(age / 0.35f);
+        fe_logo(sw * 0.5f, y0 - 190 * u, 44 * u, in);
+        const char *head = "CHOOSE YOUR MAP";
+        txt(head, sw * 0.5f - txtw(head, 58 * u) * 0.5f, y0 - 112 * u, 58 * u, fe_a(WHITE, in));
+        for (int i = 0; i < MAP_COUNT; i++) {
+            float f = fe_sat(1 - fabsf(shown - i)), lift = 14 * u * f, rise = (1 - fe_sat((age - 0.06f * i) / 0.3f)) * 30 * u;
+            float x = x0 + i * (cw + gap), y = y0 - lift + rise, a = fe_sat((age - 0.06f * i) / 0.3f);
+            DrawRectangle((int)(x + 6 * u), (int)(y + 10 * u), (int)cw, (int)ch, fe_a((Color){0, 0, 0, 120}, a));
+            DrawRectangle((int)x, (int)y, (int)cw, (int)ch, fe_a((Color){16, 19, 26, 240}, a));
+            unsigned char dim = (unsigned char)(150 + 105 * f);
+            fe_cover(feMap[i], (Rectangle){x, y, cw, ih}, 1.0f + 0.05f * f, fe_a((Color){dim, dim, dim, 255}, a));
+            DrawRectangleGradientV((int)x, (int)(y + ih * 0.6f), (int)cw, (int)(ih * 0.4f) + 1, (Color){16, 19, 26, 0}, fe_a((Color){16, 19, 26, 255}, a));
+            txt(TextFormat("%d", i + 1), x + 18 * u, y + 12 * u, 30 * u, fe_a(f > 0.5f ? HUD_ORANGE : (Color){255, 255, 255, 190}, a));
+            float ty = y + ih + 4 * u;
+            txt(MAP_TITLE[i], x + 22 * u, ty, 42 * u, fe_a(WHITE, a));
+            slash(x + 22 * u, ty + 46 * u, 60 * u + 60 * u * f, 4 * u, fe_a(HUD_ORANGE, a * (0.35f + 0.65f * f)));
+            fe_wrap(MAP_BLURB[i], x + 22 * u, ty + 64 * u, cw - 44 * u, 19.5f * u, fe_a((Color){206, 211, 220, 255}, a));
+            Color tc = fe_a(f > 0.5f ? HUD_ORANGE : HUD_DIM, a);
+            for (int k = 0, tx = (int)(x + 22 * u); k < 3; k++) {
+                if (k) { DrawCircle(tx + (int)(8 * u), (int)(y + ch - 26 * u), 2.2f * u, tc); tx += (int)(17 * u); }
+                txt(MAP_TAGS[i][k], (float)tx, y + ch - 34 * u, 15.5f * u, tc);
+                tx += (int)txtw(MAP_TAGS[i][k], 15.5f * u);
+            }
+            Color line = f > 0.5f ? HUD_ORANGE : (Color){255, 255, 255, 36};
+            DrawRectangleLinesEx((Rectangle){x, y, cw, ch}, f > 0.5f ? 3 * u : 1, fe_a(line, a));
+        }
+        const char *keys = cancel ? "LEFT / RIGHT  choose      ENTER  drive      ESC  back to the game" : "LEFT / RIGHT  choose      ENTER  drive      or click a map";
+        txt(keys, 70 * u, sh - 52 * u, 20 * u, fe_a(HUD_DIM, in));
+        fe_copyright(sw - 70 * u, sh - 52 * u, 20 * u, 2, fe_a(HUD_DIM, in));
+        EndDrawing();
+        if (getenv("BEAMLITE_FE_SHOT") && ++frames == 60) { fe_shot("menu"); return sel; }
+        if (go) return sel;
+    }
+    return cancel ? -1 : sel;
+}
+
 static float wrap_pi(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a += 2 * PI; return a; }
 
 int main(void) {
@@ -3538,13 +3742,22 @@ int main(void) {
     SetExitKey(KEY_NULL);
     SetTargetFPS(120);
 
-    post_init();
+    const char *profEnv = getenv("BEAMLITE_PROF");
     hud_load_font();
+    if (!profEnv) { fe_init(); BeginDrawing(); fe_draw_splash(0); EndDrawing(); }
+    post_init();
     init_spray();
 
     static World world;
     int nextSlot = 3;
-    load_map(&world, MAP_DEFAULT, &nextSlot);
+    if (profEnv) load_map(&world, MAP_DEFAULT, &nextSlot);      // profiling and scripted runs go straight in
+    else {                                                       // the logo, then the player picks a map
+        fe_splash();
+        int m = fe_pick_map(MAP_DEFAULT, 0);
+        if (getenv("BEAMLITE_FE_SHOT")) { CloseWindow(); return 0; }
+        if (!WindowShouldClose()) fe_loading(m);
+        load_map(&world, m, &nextSlot);
+    }
 
     Camera3D cam = {0};
     cam.up = (Vector3){0, 1, 0};
@@ -3557,9 +3770,23 @@ int main(void) {
     const float H = 1.0f / SIM_HZ;
     float acc = 0;
 
-    const char *profEnv = getenv("BEAMLITE_PROF");
     double profEnd = profEnv ? atof(profEnv) : 0, profT0 = GetTime(), pt = 0;
     #define PMARK(i) do { if (profEnv) { double n_ = GetTime(); if (pt) prof_acc[prof_sel][i] += n_ - pt; pt = n_; } } while (0)
+    if (profEnv && getenv("BEAMLITE_MAP")) {            // BEAMLITE_MAP=<n>, BEAMLITE_WEATHER=<n>: the map and weather for screenshots
+        if (getenv("BEAMLITE_PROF_DAY")) set_env(1);
+        if (getenv("BEAMLITE_WEATHER")) weather = atoi(getenv("BEAMLITE_WEATHER"));
+        load_map(&world, atoi(getenv("BEAMLITE_MAP")) % MAP_COUNT, &nextSlot);
+        help = 0;
+    }
+    int profDrive = profEnv && getenv("BEAMLITE_DRIVE");    // BEAMLITE_DRIVE=<vehicle>,<x>,<z>,<heading deg>,<km/h>: the player cruises straight from there
+    if (profDrive) {
+        int dv = 0; float dx = 0, dz = 0, dh = 0, kmh = 40;
+        sscanf(getenv("BEAMLITE_DRIVE"), "%d,%f,%f,%f,%f", &dv, &dx, &dz, &dh, &kmh);
+        float hr = dh * PI / 180.0f;
+        playerType = dv % VEH_COUNT;
+        car_build_vehicle(&world.cars[0], playerType, v3(dx, terrain_height(dx, dz) + vehicle_def(playerType)->spawnH, dz), -hr, player_paint());
+        for (int i = 0; i < world.cars[0].nn; i++) world.cars[0].n[i].v = v3(cosf(hr) * kmh / 3.6f, 0, sinf(hr) * kmh / 3.6f);
+    }
     int profFly = profEnv && getenv("BEAMLITE_PROF_FLY");
     if (profFly) { load_map(&world, MAP_AIRPORT, &nextSlot); if (world.flyable >= 0) { flying = 1; world.air[world.flyable].pilot = 1; world.air[world.flyable].flaps = 0.5f; } }
     int profHeli = profEnv && getenv("BEAMLITE_PROF_HELI");     // scripted helicopter flight: spool up, lift off, fly east
@@ -3585,6 +3812,7 @@ int main(void) {
                 if (!clear) continue;
                 car_build_vehicle(&world.cars[0], cv, v3(x, terrain_height(x, z) + vehicle_def(cv)->spawnH, z), nx > 0 ? PI : 0.0f, PALETTE[0]);
                 for (int i = 0; i < world.cars[0].nn; i++) world.cars[0].n[i].v = v3(-nx * kmh / 3.6f, 0, 0);
+                printf("crash run: from x %.1f z %.1f towards %s, wall at x %.1f\n", x, z, nx > 0 ? "-x" : "+x", sd ? B->mn.x : B->mx.x);
                 done = 1;
             }
         }
@@ -3641,7 +3869,20 @@ int main(void) {
             if (trafficOn) traffic_init(&world, TRAFFIC_CARS, pc->pos); else traffic_clear(&world);
             nextSlot = world.ncars;
         }
-        if (IsKeyPressed(KEY_M)) { flying = 0; load_map(&world, (world.map + 1) % MAP_COUNT, &nextSlot); ap = NULL; }
+        if (IsKeyPressed(KEY_M) && !profEnv) {          // back to the map menu; Esc there returns to this drive
+            AudioParams quiet = {0};
+            audio_set(&quiet);
+            int m = fe_pick_map(world.map, 1);
+            if (m >= 0) {
+                if (flying == 1) air->pilot = 0;
+                if (flying == 2) hel->pilot = 0;
+                flying = 0; pickerOpen = 0;
+                fe_loading(m);
+                load_map(&world, m, &nextSlot);
+                sndHush = 0.3f;
+            }
+            continue;
+        }
         if (IsKeyPressed(KEY_U)) {                      // rebuild every knocked-down building
             int n = world_reset_buildings(&world);
             if (n > 0) { destruction_reset(); build_world_meshes(&world); audio_play_ui(SND_CHIME, 0.8f); }
@@ -3685,6 +3926,7 @@ int main(void) {
         float vF = vdot(pc->vel, pc->fwd);
         Controls ctl = {0, 0, (float)(left - right), IsKeyDown(KEY_SPACE)};
         if (profEnv && !profCrash) { ctl.throttle = 0.5f; ctl.steer = 0.3f * sinf((prof_frames[0] + prof_frames[1]) / 120.0f); }
+        if (profDrive) { ctl.throttle = 0.3f; ctl.steer = 0; }
         if (up) { if (vF < -1.0f) ctl.brake = 1; else ctl.throttle = 1; }
         if (down) { if (vF > 1.0f) ctl.brake = 1; else ctl.throttle = -1; }
         if (pickerOpen) ctl = (Controls){0, 0, 0, 1};
@@ -3854,6 +4096,15 @@ int main(void) {
             camPos = cam.position;
         }
 
+        if (profEnv && getenv("BEAMLITE_CAM_SIDE")) {   // BEAMLITE_CAM_SIDE=<right>,<up>,<ahead>[,<aim height>]: a camera riding alongside the player's vehicle
+            float q[4] = {10, 1.6f, 0, 1.1f};           // ... and optionally the height it aims at
+            sscanf(getenv("BEAMLITE_CAM_SIDE"), "%f,%f,%f,%f", &q[0], &q[1], &q[2], &q[3]);
+            V3 f = vnorm(v3(pc->fwd.x, 0, pc->fwd.z)), r = v3(-f.z, 0, f.x);
+            V3 e = vadd(vadd(pc->pos, vscale(r, q[0])), vadd(vscale(f, q[2]), v3(0, q[1], 0)));
+            cam.position = RV(e); cam.target = RV(vadd(pc->pos, v3(0, q[3], 0))); cam.up = (Vector3){0, 1, 0};
+            camPos = cam.position;
+        }
+
         PMARK(2);
         // ---- sun shadow map: the casters, seen from the sun
         post_set_quality(fancy, fancy);
@@ -3974,10 +4225,12 @@ int main(void) {
 #ifdef __APPLE__
         if (profEnv && getenv("BEAMLITE_PROF_GPU")) { PMARK(6); glFinish(); PMARK(5); }   // GPU time of the post chain is booked with the GPU wait
 #endif
-        if (flying == 2) draw_heli_hud(ap, &world, slowmo, paused, help);
+        int noHud = profEnv && getenv("BEAMLITE_NOHUD");     // clean frames for screenshots
+        if (noHud) ;
+        else if (flying == 2) draw_heli_hud(ap, &world, slowmo, paused, help);
         else if (flying) draw_flight_hud(ap, &world, slowmo, paused, help);
         else draw_hud(pc, &world, vF, pickerOpen ? (Controls){0} : ctl, slowmo, paused, help);
-        draw_duck_hud(&world, dt);
+        if (!noHud) draw_duck_hud(&world, dt);
         if (pickerOpen) draw_picker();
         PMARK(6);
         EndDrawing();

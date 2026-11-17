@@ -30,7 +30,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | X | clear spawned trucks |
 | G | drop the tailgate |
 | V | choose vehicle (←/→, Enter) |
-| M | map: Default / New York / Airport |
+| M | back to the map menu (Esc there returns to your drive) |
 | J | traffic on / off |
 | L | lighting: dusk / day |
 | F2 | sun shadows + ambient occlusion on / off |
@@ -78,7 +78,12 @@ out in the air (**Tab**) and it slows to a hover and lets itself down. Keep the 
 that touches the ground, a wall, a tree or a vehicle shatters the rotor, and losing the tail rotor
 sends it spinning.
 
-Three maps, switched with **M**. All share the proving ground: a launch ramp straight ahead, a
+The game opens on a two-second title card (any key skips it), then asks you to pick a map: **The
+Town**, **New York City** or **The Airport**, each shown with an aerial view. Choose with ←/→ and
+Enter, the number keys, or a click. **M** brings the menu back at any time. The pictures are frames
+from the game itself and live in `assets/`; without them the screens fall back to a plain backdrop.
+
+All three maps share the proving ground: a launch ramp straight ahead, a
 crash-test wall behind you, concrete pillars, a warehouse district off a service road to the right,
 and forest on the hills past ~100 m. Saplings and young trees snap when you hit them; mature
 trunks stop you dead. Every building on every map can be knocked down: hard hits punch holes in
@@ -94,10 +99,10 @@ a few metres of one in whatever you are driving or flying and a prompt comes up:
 collect it. The count shows at the top of the screen, and ducks you have collected stay collected
 when you switch maps.
 
-- **Default**: two small towns up the cross road to the left (+z), with avenues, side streets and
+- **The Town**: two small towns up the cross road to the left (+z), with avenues, side streets and
   pavements: houses, shops, apartment blocks, a couple of towers and warehouses, with saplings
   along the kerbs, and a dirt washboard section on the cross road.
-- **New York**: Midtown, with the Times Square "bowtie" where Broadway crosses 7th Avenue on a
+- **New York City**: Midtown, with the Times Square "bowtie" where Broadway crosses 7th Avenue on a
   diagonal (you start facing up 7th Avenue toward it). Towers of 55–140 m fill the blocks wall to
   wall. A screen-clad wedge tower stands in the south gore and red grandstand steps on the
   pedestrian plaza. Animated LED billboards cover the facades around the square: original abstract
@@ -111,7 +116,7 @@ when you switch maps.
   litter bins, newspaper boxes, mailboxes, parking signs and subway entrances with globe lamps.
   Orange-and-white steam stacks and manholes breathe steam. The furniture is scenery: it doesn't
   collide. South of the highway is still the proving ground.
-- **Airport**: you start on the access road heading north toward a glass terminal, with a
+- **The Airport**: you start on the access road heading north toward a glass terminal, with a
   departures forecourt under a canopy, taxis at the kerb, and two car parks. Past the terminal,
   airliners sit nose-in at five gates with jet bridges, a control tower glows over the apron, and
   floodlight masts light it. Beside the tower is a helipad with a helicopter you can fly, a windsock
