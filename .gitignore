@@ -8,3 +8,6 @@
 
 # macOS
 .DS_Store
+
+# Generated audio preview
+/sounds-preview.wav
