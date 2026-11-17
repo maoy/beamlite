@@ -4,7 +4,9 @@
 // x). Signals at every junction alternate between the two axes. AI cars drive the grid in the
 // right-hand lane on ordinary soft-body physics: they pick a turn at each junction, follow a curved
 // path through it, stop for red and yellow, keep a gap to whatever is ahead (the player included),
-// and respawn out of sight when wrecked, flipped or stuck.
+// and respawn out of sight when wrecked, flipped or stuck. One car in six is a police patrol; when a
+// pursuit is called they switch on their sirens, ignore the signals and go after the player's car:
+// along the streets toward it while it is out of sight, straight at it once they can see it.
 #ifndef BEAMLITE_TRAFFIC_H
 #define BEAMLITE_TRAFFIC_H
 
@@ -24,6 +26,12 @@ void traffic_debug(int why[4]);                     // respawn reasons: stuck, o
 
 // Advance signal timers and drive the AI cars (sets their controls). `player` is avoided when respawning.
 void traffic_update(World *w, float dt, V3 player);
+
+// Police. A pursuit sends every patrol car after car 0 until it is called off.
+void traffic_pursue(World *w, int on);
+int traffic_pursuing(void);
+int traffic_is_police(int slot);                    // an AI patrol car
+float traffic_police_dist(const World *w, V3 p);    // to the nearest patrol car that can still drive (1e9: none)
 
 // Signals, for rendering: one head per junction approach.
 int traffic_signal_count(void);

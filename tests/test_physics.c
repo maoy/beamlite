@@ -55,7 +55,9 @@ static void report(const char *tag) {
            c->glassBrokenCount, TG[c->tailgate], c->exploded);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    (void)argv;
+    if (argc > 1) goto pursuit;                 // any argument: just the police pursuit
     Controls idle = {0, 0, 0, 0}, gas = {1, 0, 0, 0}, brake = {0, 1, 0, 0};
     printf("nodes per truck / beams / tris: ");
     world_init(&W, MAP_DEFAULT); W.ncars = 1;
@@ -423,6 +425,37 @@ int main(void) {
         car_update_frame(&W.cars[0]);
         printf("police SUV: siren off at build %d, settled at %.2f m/s with %.0f%% damage, floor %.2f m up, 6 s flat out -> %.0f km/h (damage %.0f%%)\n",
                sirenOff, rest, dmg0, low, 3.6f * vlen(W.cars[0].vel), W.cars[0].damage);
+    }
+
+pursuit:
+    // A pursuit: the player sits parked on a street; the patrol cars must find their way there with sirens on,
+    // and switch them off again when it is called off. Then the same with the player driving away.
+    for (int run = 0; run < 2; run++) {
+        world_init(&W, MAP_DEFAULT);
+        W.ncars = 1;
+        const VehicleDef *hd = vehicle_def(VEH_HATCH);
+        car_build_vehicle(&W.cars[0], VEH_HATCH, v3(-38, terrain_height(-38, 72) + hd->spawnH, 72), 3.14159f * 0.5f, v3(1, 0, 0));
+        traffic_init(&W, 11, W.cars[0].pos);
+        int npol = 0; for (int i = 1; i < W.ncars; i++) npol += traffic_is_police(i);
+        for (int f = 0; f < 120; f++) { traffic_update(&W, 1 / 60.0f, W.cars[0].pos); for (int i = 0; i < 20; i++) world_substep(&W, H); }
+        float d0 = traffic_police_dist(&W, W.cars[0].pos), best = 1e9f, tNear = -1, close = 0; int sirens = 0;
+        traffic_pursue(&W, 1);
+        for (int f = 0; f < 60 * 60; f++) {
+            W.cars[0].ctl = run ? (Controls){0.35f, 0, 0, 0} : (Controls){0, 1, 0, 1};
+            traffic_update(&W, 1 / 60.0f, W.cars[0].pos);
+            for (int i = 0; i < 20; i++) world_substep(&W, H);
+            for (int i = 0; i < W.ncars; i++) { car_update_frame(&W.cars[i]); car_update_damage(&W.cars[i]); }
+            float d = traffic_police_dist(&W, W.cars[0].pos);
+            if (d < best) best = d;
+            if (d < 15.0f) { close += 1 / 60.0f; if (tNear < 0) tNear = f / 60.0f; }
+            if (f == 30) for (int i = 1; i < W.ncars; i++) sirens += W.cars[i].siren;
+            if (!run && tNear >= 0 && f / 60.0f > tNear + 5) break;
+        }
+        traffic_pursue(&W, 0);
+        int after = 0; for (int i = 1; i < W.ncars; i++) after += W.cars[i].siren;
+        printf("pursuit (%s): %d patrol cars, nearest %.0f m before; sirens on %d; first within 15 m after %.0f s (closest %.0f m, close for %.0f s); respawns %d; sirens after calling off %d; player damage %.0f%%\n",
+               run ? "player driving off" : "player parked", npol, d0, sirens, tNear, best, close, traffic_respawns(), after, W.cars[0].damage);
+        traffic_clear(&W);
     }
     return 0;
 }

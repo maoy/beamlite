@@ -69,7 +69,11 @@ typedef struct {
     Wp wp[32]; int n;
     float lastX, lastZ;                         // the waypoint reached most recently (start of the current leg)
     float stuck, bad;
+    int police, direct;                         // a patrol car; in a pursuit, driving straight at the player (in sight)
+    float replan, pass;                         // pursuit: time to the next route check; time left pulling out to overtake
 } Ai;
+static int chase;                               // a pursuit is on
+static float chaseX, chaseZ;                    // where the player is
 static Ai ai[MAX_CARS];
 static int aiBase = -1, aiCount, respawns;
 static int why[4];                              // respawn reasons: stuck, off route, flipped, damaged
@@ -123,6 +127,14 @@ static void extend(Ai *a) {
         }
         if (!m) { memcpy(opts, lefts, sizeof lefts); m = nl; }
         int next = m ? opts[(int)(rnd() * m) % m] : a->prev;
+        if (chase && a->police) {               // in pursuit: whichever way gets closer to the player, left turns and all
+            float best = 1e30f;
+            for (int i = 0; i < k; i++) {
+                float ddx = node_x(nb[i]) - chaseX, ddz = node_z(nb[i]) - chaseZ, d = ddx * ddx + ddz * ddz;
+                if (nb[i] == a->prev) d += 60.0f * 60.0f;               // turning back only if it is much better
+                if (d < best) { best = d; next = nb[i]; }
+            }
+        }
         append_turn(a, a->prev, a->cur, next);
         append_edge(a, a->cur, next);
         a->prev = a->cur; a->cur = next;
@@ -158,6 +170,8 @@ static void spawn(World *w, Ai *a, V3 avoid, float minDist) {
         if (!clear && tries < 55) continue;
         // Mostly yellow cabs in New York; a mix elsewhere; one in six is a pickup.
         int type = rnd() < 0.16f ? VEH_PICKUP : VEH_HATCH;
+        a->police = (int)(a - ai) % 6 == 0;             // every sixth driver is a patrol car
+        if (a->police) type = VEH_POLICE;
         V3 paint = (w->map == MAP_NEWYORK && rnd() < 0.6f) ? PAINT[0] : PAINT[1 + (int)(rnd() * 6) % 6];
         float yaw = atan2f(-dz, dx);                    // car_build: forward = (cos yaw, 0, -sin yaw)
         car_build_vehicle(&w->cars[a->slot], type, v3(x, terrain_height(x, z) + vehicle_def(type)->spawnH, z), yaw, paint);
@@ -166,6 +180,7 @@ static void spawn(World *w, Ai *a, V3 avoid, float minDist) {
         append_edge(a, from, to);
         extend(a);
         a->stuck = a->bad = 0;
+        a->direct = 0; a->replan = a->pass = 0;
         a->active = 1;
         return;
     }
@@ -178,6 +193,7 @@ void traffic_set_map(int map) { G = map == MAP_NEWYORK ? GRID_NEWYORK : map == M
 void traffic_init(World *w, int count, V3 avoid) {
     traffic_set_map(w->map);
     memset(ai, 0, sizeof ai);
+    chase = 0;
     aiBase = w->ncars; aiCount = 0; respawns = 0; memset(why, 0, sizeof why);
     for (int i = 0; i < count && w->ncars < MAX_CARS; i++) {
         Ai *a = &ai[aiCount++];
@@ -192,6 +208,7 @@ void traffic_clear(World *w) {
         if (w->ncars > aiBase) w->ncars = aiBase;
     }
     memset(ai, 0, sizeof ai);
+    chase = 0;
     aiCount = 0; aiBase = -1;
 }
 
@@ -200,9 +217,74 @@ int traffic_respawns(void) { return respawns; }
 void traffic_debug(int out[4]) { memcpy(out, why, sizeof why); }
 int traffic_is_ai(int slot) { for (int i = 0; i < aiCount; i++) if (ai[i].active && ai[i].slot == slot) return 1; return 0; }
 
+// Put a car that has left its route back on the grid: from the junction nearest it, out along a street.
+static void rejoin(Ai *a, float px, float pz) {
+    int best = -1, nb[4]; float bd = 1e30f;
+    for (int n = 0; n < G.nx * G.nz; n++) {
+        if (!neighbours(n, nb)) continue;
+        float dx = node_x(n) - px, dz = node_z(n) - pz, d = dx * dx + dz * dz;
+        if (d < bd) { bd = d; best = n; }
+    }
+    if (best < 0) return;
+    int k = neighbours(best, nb), to = nb[(int)(rnd() * k) % k];
+    if (chase) {
+        float bt = 1e30f;
+        for (int i = 0; i < k; i++) { float dx = node_x(nb[i]) - chaseX, dz = node_z(nb[i]) - chaseZ, d = dx * dx + dz * dz; if (d < bt) { bt = d; to = nb[i]; } }
+    }
+    float dx, dz, off, rx, rz; int ax;
+    edge_frame(best, to, &dx, &dz, &off, &ax);
+    right_of(dx, dz, &rx, &rz);
+    float out = cross_half(best, ax) + 1.5f, ex = node_x(best) + dx * out + rx * off, ez = node_z(best) + dz * out + rz * off;
+    a->prev = best; a->cur = to; a->n = 0;
+    if ((px - ex) * dx + (pz - ez) * dz < 0) push(a, ex, ez, -1, 0);   // the start of the lane, unless we're already along it
+    append_edge(a, best, to);
+    a->lastX = px; a->lastZ = pz;
+    extend(a);
+}
+
+// Nothing solid between two points a metre off the ground?
+static int in_sight(const World *w, float x0, float z0, float x1, float z1) {
+    float dx = x1 - x0, dz = z1 - z0, len = sqrtf(dx * dx + dz * dz);
+    int n = (int)(len / 2.5f) + 1;
+    for (int i = 1; i < n; i++) {
+        float x = x0 + dx * i / n, z = z0 + dz * i / n;
+        if (world_point_solid(w, v3(x, terrain_height(x, z) + 1.0f, z))) return 0;
+    }
+    return 1;
+}
+
 static void drive(World *w, Ai *a, float dt, V3 player) {
     Car *c = &w->cars[a->slot];
     if (!c->active || c->exploded) { respawns++; spawn(w, a, player, 60.0f); return; }
+    int hunting = chase && a->police;
+    c->siren = hunting;
+    if (hunting) {
+        // Keep the route pointed at the player: every second, drop what is planned beyond the next junction.
+        a->replan -= dt;
+        float ddx = chaseX - c->pos.x, ddz = chaseZ - c->pos.z, dist = sqrtf(ddx * ddx + ddz * ddz);
+        int see = dist < 55.0f && in_sight(w, c->pos.x, c->pos.z, chaseX, chaseZ);
+        if (see != a->direct) {
+            a->direct = see;
+            if (!see) rejoin(a, c->pos.x, c->pos.z);
+        }
+        if (!a->direct && a->replan <= 0) {
+            a->replan = 1.0f;
+            for (int k = 0; k < a->n; k++) if (a->wp[k].stopNode >= 0) { a->n = k + 1; break; }
+            // prev/cur must again describe the leg that ends at that stop line
+            if (a->n && a->wp[a->n - 1].stopNode >= 0 && a->wp[a->n - 1].stopNode != a->cur) {
+                int node = a->wp[a->n - 1].stopNode, nb[4], k = neighbours(node, nb), from = -1; float bd = 1e30f;
+                for (int i = 0; i < k; i++) {       // the neighbour we are coming from: the one behind the stop line
+                    float ex = node_x(nb[i]) - a->wp[a->n - 1].x, ez = node_z(nb[i]) - a->wp[a->n - 1].z, d = ex * ex + ez * ez;
+                    int alongZ = ix_of(nb[i]) == ix_of(node);
+                    if (alongZ != a->wp[a->n - 1].axisZ) continue;
+                    float sx = node_x(node) - node_x(nb[i]), sz = node_z(node) - node_z(nb[i]);
+                    if ((a->wp[a->n - 1].x - node_x(nb[i])) * sx + (a->wp[a->n - 1].z - node_z(nb[i])) * sz < 0.5f * (sx * sx + sz * sz)) continue;
+                    if (d < bd) { bd = d; from = nb[i]; }
+                }
+                if (from >= 0) { a->prev = from; a->cur = node; } else rejoin(a, c->pos.x, c->pos.z);
+            }
+        }
+    } else if (a->direct) { a->direct = 0; rejoin(a, c->pos.x, c->pos.z); }
     float px = c->pos.x, pz = c->pos.z;
     float fl = sqrtf(c->fwd.x * c->fwd.x + c->fwd.z * c->fwd.z) + 1e-6f;
     float fx = c->fwd.x / fl, fz = c->fwd.z / fl, rx, rz;
@@ -215,7 +297,7 @@ static void drive(World *w, Ai *a, float dt, V3 player) {
         const Wp *q = &a->wp[drop];
         float dx = q->x - px, dz = q->z - pz, d = sqrtf(dx * dx + dz * dz), ahead = dx * fx + dz * fz;
         // A stop line stays until the light is green or we're actually past it, so its signal keeps applying.
-        if (q->stopNode >= 0 && ahead > -0.5f && light(q->stopNode, q->axisZ) != LIGHT_GREEN) break;
+        if (!hunting && q->stopNode >= 0 && ahead > -0.5f && light(q->stopNode, q->axisZ) != LIGHT_GREEN) break;
         if (d < 2.5f || (ahead < 0 && d < 8.0f)) drop++; else break;
     }
     if (drop) {
@@ -231,6 +313,13 @@ static void drive(World *w, Ai *a, float dt, V3 player) {
         float dx = a->wp[k].x - px, dz = a->wp[k].z - pz;
         if (dx * dx + dz * dz >= L * L) { t = a->wp[k]; break; }
     }
+    const Car *pl = &w->cars[0];
+    float pdist = 1e9f;
+    if (hunting) {
+        pdist = sqrtf((chaseX - px) * (chaseX - px) + (chaseZ - pz) * (chaseZ - pz));
+        if (a->direct) { float lead = fminf(0.5f, pdist / 40.0f); t.x = chaseX + pl->vel.x * lead; t.z = chaseZ + pl->vel.z * lead; }
+        else if (a->pass > 0) { t.x -= rx * 3.4f; t.z -= rz * 3.4f; a->pass -= dt; }     // pull out round whatever is in the way
+    }
     float tx = t.x - px, tz = t.z - pz, tl = sqrtf(tx * tx + tz * tz) + 1e-6f;
     tx /= tl; tz /= tl;
     float ang = atan2f(fz * tx - fx * tz, fx * tx + fz * tz);         // positive = target to the left
@@ -238,15 +327,20 @@ static void drive(World *w, Ai *a, float dt, V3 player) {
     float steer = fmaxf(-1.0f, fminf(1.0f, ang / lock * 1.1f));
 
     // Target speed: cruise, slow for the turn ahead, stop for signals, keep the gap.
-    float target = 11.0f;
+    float target = hunting ? 23.0f : 11.0f;
     int waitingRed = 0;
-    for (int k = 1; k < a->n; k++) {
-        float dx = a->wp[k].x - px, dz = a->wp[k].z - pz;
-        if (dx * dx + dz * dz > 22.0f * 22.0f) break;
+    for (int k = 1; k < a->n && !a->direct; k++) {
+        float dx = a->wp[k].x - px, dz = a->wp[k].z - pz, reach = hunting ? 30.0f : 22.0f;
+        if (dx * dx + dz * dz > reach * reach) break;
         float sx = a->wp[k].x - a->wp[k - 1].x, sz = a->wp[k].z - a->wp[k - 1].z, sl = sqrtf(sx * sx + sz * sz) + 1e-6f;
-        if ((sx * fx + sz * fz) / sl < 0.8f) { target = 5.0f; break; }
+        if ((sx * fx + sz * fz) / sl < 0.8f) { target = hunting ? 8.0f : 5.0f; break; }
     }
-    for (int k = 0; k < a->n; k++) {
+    if (a->direct) {                    // close in, then sit on the player's tail at the player's own speed
+        float pv = sqrtf(pl->vel.x * pl->vel.x + pl->vel.z * pl->vel.z);
+        target = fmaxf(0.0f, fminf(33.0f, pv + (pdist - 8.0f) * 0.9f));
+        if (fabsf(ang) > 0.9f) target = fminf(target, 7.0f);           // it is behind us: come round slowly
+    }
+    for (int k = 0; k < a->n && !hunting; k++) {
         if (a->wp[k].stopNode < 0) continue;
         float d = (a->wp[k].x - px) * fx + (a->wp[k].z - pz) * fz;
         if (d > 45.0f) break;
@@ -269,6 +363,11 @@ static void drive(World *w, Ai *a, float dt, V3 player) {
         float ol = sqrtf(o->fwd.x * o->fwd.x + o->fwd.z * o->fwd.z) + 1e-6f;
         int sameWay = (o->fwd.x * fx + o->fwd.z * fz) / ol > 0.8f;
         if (!sameWay && fabsf(v) < 0.5f && vlen(o->vel) < 0.5f && a->slot < j) continue;
+        if (hunting) {
+            if (j == 0) continue;                                       // the one we are after
+            if (along > 0 && along < 28.0f && lat < 2.4f && !a->direct) a->pass = 2.0f;
+            if (along > 12.0f || a->pass > 0) continue;                 // only brake for what is right on the nose
+        }
         if (along > 0 && along < 35.0f && lat < 2.4f) target = fminf(target, fmaxf(0.0f, along - 8.5f) * 0.6f);   // ~3 m bumper gap
     }
 
@@ -283,17 +382,44 @@ static void drive(World *w, Ai *a, float dt, V3 player) {
     float u = fmaxf(0.0f, fminf(1.0f, ((px - a->lastX) * sx + (pz - a->lastZ) * sz) / sl2));
     float ex = a->lastX + sx * u - px, ez = a->lastZ + sz * u - pz;
     int off = ex * ex + ez * ez > 8.0f * 8.0f;
+    if (hunting) off = !a->direct && ex * ex + ez * ez > 16.0f * 16.0f;    // a pursuit cuts corners and pulls out to pass
     if (c->up.y < 0.45f || c->damage > 45.0f || off) a->bad += dt; else a->bad = 0;
     // Stalled (not moving, and not first in line at a red): blocked, queued, or deadlocked.
     if (fabsf(v) < 0.4f && !waitingRed) a->stuck += dt; else a->stuck = fmaxf(0.0f, a->stuck - 2.0f * dt);
+    if (hunting && pdist < 16.0f) a->stuck = 0;       // stopped beside the player: that is the job done
+    if (hunting && a->stuck > 6.0f) a->stuck = 36.0f; // wedged somewhere mid-chase: another unit takes over
     if (a->bad > 4.0f || a->stuck > 35.0f) {          // longer than a light cycle, so queues don't count
         why[a->stuck > 35.0f ? 0 : off ? 1 : c->up.y < 0.45f ? 2 : 3]++;
         respawns++; spawn(w, a, player, 60.0f);
     }
 }
 
+void traffic_pursue(World *w, int on) {
+    if (on == chase) return;
+    chase = on;
+    for (int i = 0; i < aiCount; i++) {
+        Ai *a = &ai[i];
+        if (!a->active || !a->police) continue;
+        a->replan = 0; a->pass = 0;
+        if (!on) { w->cars[a->slot].siren = 0; if (a->direct) { a->direct = 0; rejoin(a, w->cars[a->slot].pos.x, w->cars[a->slot].pos.z); } }
+    }
+}
+int traffic_pursuing(void) { return chase; }
+int traffic_is_police(int slot) { for (int i = 0; i < aiCount; i++) if (ai[i].active && ai[i].police && ai[i].slot == slot) return 1; return 0; }
+float traffic_police_dist(const World *w, V3 p) {
+    float best = 1e9f;
+    for (int i = 0; i < aiCount; i++) {
+        const Car *c = &w->cars[ai[i].slot];
+        if (!ai[i].active || !ai[i].police || !c->active || c->exploded) continue;
+        float d = vlen(vsub(c->pos, p));
+        if (d < best) best = d;
+    }
+    return best;
+}
+
 void traffic_update(World *w, float dt, V3 player) {
     timer += dt;
+    chaseX = w->cars[0].pos.x; chaseZ = w->cars[0].pos.z;
     for (int i = 0; i < aiCount; i++) if (ai[i].active) drive(w, &ai[i], dt, player);
 }
 

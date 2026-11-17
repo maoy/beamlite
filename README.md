@@ -203,6 +203,14 @@ when you switch maps.
   flipped, off-route or deadlocked cars respawn out of sight. At the airport the landside roads
   are unsignalised, and cars just loop around the terminal. The highway past the ramp and
   through the crash wall is left out of the routes.
+- **Police**: one traffic car in six is a patrol SUV. Hit another car and you are told to stay at
+  the scene: wait 12 s and you are free to go, but drive more than 30 m away (or hit a patrol car)
+  and it is a hit-and-run. Every patrol car then switches on its lights and siren, ignores the
+  signals and comes after you: along the streets toward you while you are out of sight, pulling out
+  to pass other traffic, then straight at you once it can see you, sitting on your tail at your own
+  speed. A wrecked or wedged patrol car is replaced by another from out of sight. It ends when you
+  stop beside a patrol car for 3 s (busted) or keep every patrol car more than 95 m away for 12 s
+  (lost them). Turning traffic off calls it off.
 - **Airliners**: each parked airliner is a ~40 t node/beam airframe of 246 nodes and 1560 beams,
   resting on its landing gear. The fuselage is a tube of 10-node frames joined by stringers and
   shear diagonals. Wings and stabilisers are two-layer boxes, and the engines hang on pylons. Every
@@ -345,6 +353,7 @@ when you switch maps.
 `tests/test_physics.c` is a headless test that runs acceleration, braking, cornering,
 a tailgate drop, a 60 km/h wall crash, a ramp jump, a T-bone and hitting a sapling and a mature tree, then writes wireframe snapshots:
 `cc -O2 tests/test_physics.c src/physics.c src/traffic.c -lm -o tp && ./tp`
+(`./tp pursuit` runs only the police pursuit check.)
 
 `tests/test_audio.c` renders every sound through the synthesiser without opening an audio device,
 checks each one's level, and can write them all to a WAV to listen to:

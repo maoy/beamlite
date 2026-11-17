@@ -4106,10 +4106,75 @@ static void sound_frame(World *w, Camera3D cam, int flying, const Airframe *ap, 
 static int trafficOn = 1;
 #define TRAFFIC_CARS 8
 
+// ----------------------------------------------------------- the police ----
+// Hit another car and you are expected to stay put. Drive off and it is a hit-and-run: every patrol
+// car in traffic comes after you with its siren on (traffic.c does the driving). It ends when they
+// box you in at a standstill, or when you get far enough away for long enough.
+enum { LAW_CLEAR, LAW_AT_SCENE, LAW_WANTED };
+static int lawState;
+static V3 lawScene;
+static float lawT, lawHeld, lawLost, lawPrevSpeed, lawGrace;
+static float lawDmg[MAX_CARS]; static int lawBroken[MAX_CARS];
+static void law_reset(World *w) { lawState = LAW_CLEAR; lawT = lawHeld = lawLost = 0; lawGrace = 1.0f; traffic_pursue(w, 0); }
+static void law_frame(World *w, float dt, int flying) {
+    const Car *pc = &w->cars[0];
+    float speed = vlen(pc->vel);
+    // Did the player's car just hit someone? Another car close by took damage while the player was moving.
+    int hit = 0, hitPolice = 0;
+    for (int j = 1; j < w->ncars; j++) {
+        const Car *c = &w->cars[j];
+        int hurt = c->active && (c->brokenBeams > lawBroken[j] || c->damage > lawDmg[j] + 0.2f);
+        lawDmg[j] = c->active ? c->damage : 0; lawBroken[j] = c->active ? c->brokenBeams : 0;
+        if (!hurt || lawGrace > 0 || flying || vlen(vsub(c->pos, pc->pos)) > 8.0f || fmaxf(speed, lawPrevSpeed) < 2.0f) continue;
+        if (traffic_is_police(j)) { if (!traffic_pursuing()) hitPolice = 1; continue; }    // a patrol car ramming you is not your offence
+        hit = 1;
+    }
+    lawPrevSpeed = speed;
+    if (lawGrace > 0) lawGrace -= dt;
+    if (getenv("BEAMLITE_WANTED") && lawState != LAW_WANTED && lawGrace <= 0) hitPolice = 1;     // scripted runs: start wanted
+    if (flying || !pc->active) { if (lawState != LAW_CLEAR) law_reset(w); return; }
+    if (lawState == LAW_CLEAR && hit) {
+        lawState = LAW_AT_SCENE; lawScene = pc->pos; lawT = 0;
+        hud_toast(traffic_police_dist(w, pc->pos) < 1e8f ? "YOU HIT A CAR: STAY AT THE SCENE" : "YOU HIT A CAR");
+    } else if (lawState == LAW_AT_SCENE) {
+        lawT += dt;
+        if (hit) { lawScene = pc->pos; lawT = 0; }
+        if (vlen(vsub(pc->pos, lawScene)) > 30.0f) hitPolice = 1;                  // drove off
+        else if (lawT > 12.0f) { lawState = LAW_CLEAR; hud_toast("DETAILS EXCHANGED: FREE TO GO"); }
+    }
+    if (hitPolice && lawState != LAW_WANTED) {
+        if (traffic_police_dist(w, pc->pos) > 1e8f) { lawState = LAW_CLEAR; return; }      // no police about (traffic is off)
+        lawState = LAW_WANTED; lawHeld = lawLost = 0;
+        traffic_pursue(w, 1);
+        hud_toast("HIT AND RUN: POLICE IN PURSUIT");
+    }
+    if (lawState == LAW_WANTED) {
+        float d = traffic_police_dist(w, pc->pos);
+        lawHeld = d < 15.0f && speed < 1.5f ? lawHeld + dt : 0;
+        lawLost = d > 95.0f ? lawLost + dt : 0;
+        if (lawHeld > 3.0f) { law_reset(w); hud_toast("BUSTED"); }
+        else if (lawLost > 12.0f) { law_reset(w); hud_toast("YOU LOST THEM"); }
+    }
+}
+static void draw_law_hud(void) {
+    if (lawState != LAW_WANTED) return;
+    float sw = (float)GetScreenWidth();
+    int blue = fmod(GetTime() * 2.4, 1.0) < 0.5;
+    const char *t = "WANTED";
+    float w = txtw(t, 26), x = sw * 0.5f - w * 0.5f, y = 112;
+    DrawRectangle((int)(x - 44), (int)y - 6, (int)(w + 88), 38, (Color){10, 12, 16, 200});
+    DrawRectangle((int)(x - 44), (int)y - 6, 26, 38, blue ? (Color){60, 20, 20, 255} : (Color){255, 40, 32, 255});
+    DrawRectangle((int)(x + w + 18), (int)y - 6, 26, 38, blue ? (Color){50, 100, 255, 255} : (Color){20, 28, 60, 255});
+    txt(t, x, y, 26, RAYWHITE);
+    const char *h = lawHeld > 0 ? "stay stopped to give yourself up" : "stop beside a patrol car to give up, or lose them";
+    txt(h, sw * 0.5f - txtw(h, 14) * 0.5f, y + 38, 14, HUD_DIM);
+}
+
 static int ducksOn;                 // "Find the ducks!" on the map menu: off unless the player ticks it
 static void load_map(World *w, int map, int *nextSlot) {
     destruction_reset();
     traffic_clear(w);
+    law_reset(w);
     traffic_set_map(map);
     world_init(w, map);
     place_poles(w);
@@ -4501,10 +4566,11 @@ int main(void) {
                 world.cars[slot].ctl = (Controls){0, 0.6f, 0, 1};
             }
         }
-        if (IsKeyPressed(KEY_X)) { traffic_clear(&world); trafficOn = 0; world.ncars = 1; nextSlot = 1; }
+        if (IsKeyPressed(KEY_X)) { traffic_clear(&world); law_reset(&world); trafficOn = 0; world.ncars = 1; nextSlot = 1; }
         if (IsKeyPressed(KEY_J)) {
             trafficOn = !trafficOn;
             if (trafficOn) traffic_init(&world, TRAFFIC_CARS, pc->pos); else traffic_clear(&world);
+            law_reset(&world);
             nextSlot = world.ncars;
         }
         if (IsKeyPressed(KEY_M) && !profEnv) {          // back to the map menu; Esc there returns to this drive
@@ -4604,6 +4670,7 @@ int main(void) {
         pc->ctl = ctl;
 
         traffic_update(&world, paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f), pc->pos);
+        if (!paused) law_frame(&world, dt * (slowmo ? 0.2f : 1.0f), flying);
 
         PMARK(0);
         // ---- physics (fixed substeps)
@@ -4885,7 +4952,7 @@ int main(void) {
         else if (flying == 2) draw_heli_hud(ap, &world, slowmo, paused, help);
         else if (flying) draw_flight_hud(ap, &world, slowmo, paused, help);
         else draw_hud(pc, &world, vF, pickerOpen ? (Controls){0} : ctl, slowmo, paused, help);
-        if (!noHud) draw_duck_hud(&world, dt);
+        if (!noHud) { draw_law_hud(); draw_duck_hud(&world, dt); }
         if (pickerOpen) draw_picker();
         PMARK(6);
         EndDrawing();
