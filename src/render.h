@@ -37,6 +37,7 @@ void post_paint_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time
 void post_paint_end(void);
 Shader post_city_shader(void);                  // per-pixel building facades (see render.c); for the city models
 void post_set_city(const Env *e, float time);
+Shader post_foliage_shader(void);               // alpha cut-out leaf cards; for the tree models
 Shader post_terrain_shader(void);               // per-pixel ground (grass, rock, woodland); for the terrain models
 void post_set_terrain(const Env *e, float time);   // once a frame, before drawing them
 void post_water_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time);   // draw the sea surface between these

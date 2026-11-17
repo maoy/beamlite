@@ -275,6 +275,10 @@ when you switch maps.
   lush and dry grass in patches, grain up close, bare rock where the slope steepens, dark canopy
   where woodland is marked, and grain and staining on tarmac. The bay has turquoise shallows and
   surf along the shore.
+- **Trees**: each tree is a trunk that forks into limbs carrying dozens of leaf clusters: crossed
+  cards cut out by a generated oak-leaf texture, lit as if they lay on the crown's rounded surface
+  and darker toward its heart. Broadleaf trees are white oaks, wide as they are tall; firs are
+  whorls of drooping boughs; the airport grows umbrella pines. Three variants of each are mixed.
 - **Sun shadows**: a 2048² shadow map, an orthographic view down the sun's rays covering 60 m
   either side of your car, refreshed every other frame. Buildings, trees, vehicles and airliners
   cast. The post pass looks each pixel up in it. Because the world's sunlight is baked into its

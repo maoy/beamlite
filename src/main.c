@@ -1226,7 +1226,7 @@ static Model build_city(const World *w, Model *glow, Model *pool) {
 
 // ---------------------------------------------------------------- trees ----
 
-static Model treeModel[2], stumpModel;
+static Model stumpModel;
 #define CONIFER_H 10.0f
 #define BROADLEAF_H 8.0f
 
@@ -1260,57 +1260,219 @@ static void mb_blob(MeshB *m, V3 ctr, float rx, float ry, Color col, unsigned se
     for (int i = 0; i < 20; i++) mb_tri(m, v[f[i][0]], v[f[i][1]], v[f[i][2]], col, ctr);
 }
 
-// Prototype meshes are kept on the CPU so standing trees can be baked into one mesh per
-// 50 m patch (one draw call each instead of one per tree). Fallen trees draw individually.
-static MeshB treeProto[2];
+// Trees. Each is a real trunk and limbs carrying dozens of leaf clusters: small crossed cards cut out
+// by a leaf texture, lit as if they lay on the crown's rounded surface and darker toward its heart.
+// A few variants of each kind are built once; standing trees are baked into one mesh per 50 m patch
+// (one draw call each instead of one per tree). Fallen trees draw individually.
+#define TREE_VARIANTS 3
+typedef struct { float *v, *t; unsigned char *c; int n, cap; } TreeB;
+static TreeB treeProto[2][TREE_VARIANTS];
+static Model treeModel[2][TREE_VARIANTS];
+static Texture2D leafTex;
+static unsigned tbSeed;
+static float tb_rnd(void) { tbSeed = tbSeed * 1664525u + 1013904223u; return (tbSeed >> 8) / 16777216.0f; }
+static float tb_range(float a, float b) { return a + (b - a) * tb_rnd(); }
 
-static void mb_copy(MeshB *dst, const MeshB *src) {
-    memset(dst, 0, sizeof *dst);
-    dst->n = dst->cap = src->n;
-    dst->v = MemAlloc(src->n * 3 * sizeof(float));
-    dst->c = MemAlloc(src->n * 4);
-    memcpy(dst->v, src->v, src->n * 3 * sizeof(float));
-    memcpy(dst->c, src->c, src->n * 4);
+static void tb_push(TreeB *m, V3 p, float u, float v, Color c) {
+    if (m->n == m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 4096;
+        m->v = MemRealloc(m->v, m->cap * 3 * sizeof(float));
+        m->t = MemRealloc(m->t, m->cap * 2 * sizeof(float));
+        m->c = MemRealloc(m->c, m->cap * 4);
+    }
+    m->v[m->n * 3] = p.x; m->v[m->n * 3 + 1] = p.y; m->v[m->n * 3 + 2] = p.z;
+    m->t[m->n * 2] = u; m->t[m->n * 2 + 1] = v;
+    m->c[m->n * 4] = c.r; m->c[m->n * 4 + 1] = c.g; m->c[m->n * 4 + 2] = c.b; m->c[m->n * 4 + 3] = 255;
+    m->n++;
+}
+static void tb_free(TreeB *m) { if (m->v) { MemFree(m->v); MemFree(m->t); MemFree(m->c); } memset(m, 0, sizeof *m); }
+static Model tb_model(const TreeB *m) {              // uploads a copy; the builder stays usable
+    Mesh mesh = {0};
+    mesh.vertexCount = m->n;
+    mesh.triangleCount = m->n / 3;
+    mesh.vertices = MemAlloc(m->n * 3 * sizeof(float));
+    mesh.texcoords = MemAlloc(m->n * 2 * sizeof(float));
+    mesh.colors = MemAlloc(m->n * 4);
+    memcpy(mesh.vertices, m->v, m->n * 3 * sizeof(float));
+    memcpy(mesh.texcoords, m->t, m->n * 2 * sizeof(float));
+    memcpy(mesh.colors, m->c, m->n * 4);
+    UploadMesh(&mesh, false);
+    Model md = LoadModelFromMesh(mesh);
+    md.materials[0].shader = post_foliage_shader();
+    md.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = leafTex;
+    return md;
+}
+
+// The leaf texture: a spray of lobed oak leaves on a clear ground. Its colours sit around mid grey
+// (the shader doubles them), so the vertex colour sets the green. The corner by (0, 0) is solid, for
+// bark and anything else that carries no texture coordinates.
+#define LEAF_RES 512
+#define LEAF_SOLID 0.16f                         // the solid corner's share of the texture
+static void build_leaf_texture(void) {
+    if (leafTex.id) return;
+    Color *px = MemAlloc(LEAF_RES * LEAF_RES * sizeof(Color));
+    for (int i = 0; i < LEAF_RES * LEAF_RES; i++) px[i] = (Color){120, 132, 108, 0};
+    int solid = (int)(LEAF_SOLID * LEAF_RES);
+    for (int y = 0; y < solid; y++) for (int x = 0; x < solid; x++) px[y * LEAF_RES + x] = (Color){128, 128, 128, 255};
+    unsigned keep = tbSeed; tbSeed = 9001u;
+    for (int leaf = 0; leaf < 64; leaf++) {
+        float cx = tb_range(0.24f, 0.96f) * LEAF_RES, cy = tb_range(0.24f, 0.96f) * LEAF_RES, ang = tb_range(0, 6.2831853f);
+        float L = tb_range(86, 128), ca = cosf(ang), sa = sinf(ang), tone = tb_range(0.78f, 1.18f), warm = tb_range(-10, 12);
+        int r = (int)(L * 0.62f);
+        for (int y = (int)cy - r; y <= (int)cy + r; y++)
+        for (int x = (int)cx - r; x <= (int)cx + r; x++) {
+            if (x < 0 || y < 0 || x >= LEAF_RES || y >= LEAF_RES || (x < solid + 4 && y < solid + 4)) continue;
+            float dx = x - cx, dy = y - cy, a = (dx * ca + dy * sa) / L + 0.5f, b = (-dx * sa + dy * ca) / L;
+            if (a <= 0.0f || a >= 1.0f) continue;
+            // White oak: widest past the middle, rounded lobes with deep sinuses, a narrow base.
+            float body = powf(sinf(PI * powf(a, 0.78f)), 0.8f), lobe = powf(fabsf(sinf(PI * (a * 4.0f + 0.12f))), 0.55f);
+            float w = 0.27f * body * (0.50f + 0.50f * lobe);
+            if (a < 0.10f) w = fmaxf(w, 0.012f);                                // the stalk
+            float e = w - fabsf(b);
+            if (e <= 0) continue;
+            float rib = fabsf(b) < 0.008f ? 1.22f : (fabsf(fmodf(a * 7.0f + fabsf(b) * 2.6f, 1.0f) - 0.5f) < 0.035f && fabsf(b) > 0.012f ? 1.10f : 1.0f);
+            float k = tone * rib * (0.86f + 0.14f * fminf(1.0f, e / 0.03f));       // a darker rim
+            px[y * LEAF_RES + x] = (Color){(unsigned char)clampf((118 + warm) * k, 0, 255), (unsigned char)clampf(134 * k, 0, 255), (unsigned char)clampf((100 - warm * 0.5f) * k, 0, 255), 255};
+        }
+    }
+    tbSeed = keep;
+    Image im = {px, LEAF_RES, LEAF_RES, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    leafTex = LoadTextureFromImage(im);
+    GenTextureMipmaps(&leafTex);
+    SetTextureFilter(leafTex, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(leafTex, TEXTURE_WRAP_CLAMP);
+    MemFree(px);
+}
+
+// A tapered limb from a to b, lit as a round thing.
+static void tb_limb(TreeB *m, V3 a, V3 b, float ra, float rb, Color bark, int sides) {
+    V3 d = vnorm(vsub(b, a)), up = fabsf(d.y) > 0.9f ? v3(1, 0, 0) : v3(0, 1, 0);
+    V3 e1 = vnorm(vcross(d, up)), e2 = vcross(d, e1);
+    const float su = LEAF_SOLID * 0.3f;
+    for (int i = 0; i < sides; i++) {
+        float a0 = 6.2831853f * i / sides, a1 = 6.2831853f * (i + 1) / sides;
+        V3 n0 = vadd(vscale(e1, cosf(a0)), vscale(e2, sinf(a0))), n1 = vadd(vscale(e1, cosf(a1)), vscale(e2, sinf(a1)));
+        float streak = 0.86f + 0.28f * ((i * 7 + (int)(a.y * 3)) % 5) / 4.0f;
+        Color c0 = lit(bark, n0, streak), c1 = lit(bark, n1, streak);
+        V3 p00 = vadd(a, vscale(n0, ra)), p01 = vadd(a, vscale(n1, ra)), p10 = vadd(b, vscale(n0, rb)), p11 = vadd(b, vscale(n1, rb));
+        tb_push(m, p00, su, su, c0); tb_push(m, p01, su, su, c1); tb_push(m, p11, su, su, c1);
+        tb_push(m, p00, su, su, c0); tb_push(m, p11, su, su, c1); tb_push(m, p10, su, su, c0);
+    }
+}
+// A cluster of leaves: three crossed cards. Lit by where it sits in the crown (centre cc, radii cr).
+static void tb_clump(TreeB *m, V3 c, float size, V3 cc, V3 cr, Color leaf) {
+    float tone = tb_range(0.82f, 1.16f);
+    Color col = {(unsigned char)fminf(255, leaf.r * tone * tb_range(0.92f, 1.1f)), (unsigned char)fminf(255, leaf.g * tone), (unsigned char)fminf(255, leaf.b * tone * tb_range(0.9f, 1.08f)), 255};
+    const float u0 = LEAF_SOLID + 0.05f, u1 = 0.995f;
+    for (int q = 0; q < 3; q++) {
+        V3 e1 = vnorm(v3(tb_range(-1, 1), tb_range(-0.55f, 0.55f), tb_range(-1, 1)));
+        V3 t = vnorm(v3(tb_range(-1, 1), tb_range(-1, 1), tb_range(-1, 1)));
+        V3 e2 = vnorm(vcross(e1, t));
+        V3 o = vadd(c, v3(tb_range(-0.25f, 0.25f) * size, tb_range(-0.2f, 0.2f) * size, tb_range(-0.25f, 0.25f) * size));
+        float s = size * tb_range(0.85f, 1.15f);
+        V3 P[4]; Color C[4];
+        static const float SG[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+        int rot = (int)(tb_rnd() * 4) & 3, flip = tb_rnd() < 0.5f;
+        float U[4], V[4];
+        for (int k = 0; k < 4; k++) {
+            P[k] = vadd(o, vadd(vscale(e1, SG[k][0] * s), vscale(e2, SG[k][1] * s)));
+            V3 rel = v3((P[k].x - cc.x) / cr.x, (P[k].y - cc.y) / cr.y, (P[k].z - cc.z) / cr.z);
+            float depth = clampf(vlen(rel), 0, 1.15f);
+            V3 n = vnorm(v3(rel.x / cr.x, rel.y / cr.y + 0.12f, rel.z / cr.z));
+            Color lc = col;
+            if (snowCover > 0) lc = snow_over(lc, snowCover * 0.8f * smoothk(0.2f, 0.8f, n.y));
+            C[k] = lit(lc, n, 0.34f + 0.70f * depth * depth);
+            int kk = (k + rot) & 3;
+            U[k] = (SG[kk][0] * (flip ? -1 : 1) > 0) ? u1 : u0; V[k] = SG[kk][1] > 0 ? u1 : u0;
+        }
+        tb_push(m, P[0], U[0], V[0], C[0]); tb_push(m, P[1], U[1], V[1], C[1]); tb_push(m, P[2], U[2], V[2], C[2]);
+        tb_push(m, P[0], U[0], V[0], C[0]); tb_push(m, P[2], U[2], V[2], C[2]); tb_push(m, P[3], U[3], V[3], C[3]);
+    }
+}
+// A point in the crown ellipsoid at radius fraction f, never far below its middle.
+static V3 tb_crown_pt(V3 cc, V3 cr, float f) {
+    for (;;) {
+        V3 d = vnorm(v3(tb_range(-1, 1), tb_range(-0.7f, 1), tb_range(-1, 1)));
+        if (d.y < -0.42f) continue;
+        return v3(cc.x + d.x * cr.x * f, cc.y + d.y * cr.y * f, cc.z + d.z * cr.z * f);
+    }
+}
+// A spreading tree: a stout trunk that forks into heavy limbs, each forking again toward the outside
+// of a broad rounded crown. `fork` is where the trunk divides, cc/cr the crown.
+static void tb_oak(TreeB *m, float fork, V3 cc, V3 cr, float trunkR, Color bark, Color leaf, unsigned seed, int limbs, int fill) {
+    tbSeed = seed;
+    V3 lean = v3(tb_range(-0.25f, 0.25f), 0, tb_range(-0.25f, 0.25f));
+    V3 top = v3(lean.x, fork, lean.z);
+    tb_limb(m, v3(0, -0.4f, 0), v3(0, 0.5f, 0), trunkR * 1.75f, trunkR * 1.12f, bark, 8);        // root flare
+    tb_limb(m, v3(0, 0.5f, 0), v3(lean.x * 0.5f, fork * 0.55f, lean.z * 0.5f), trunkR * 1.12f, trunkR * 0.95f, bark, 8);
+    tb_limb(m, v3(lean.x * 0.5f, fork * 0.55f, lean.z * 0.5f), top, trunkR * 0.95f, trunkR * 0.86f, bark, 8);
+    for (int i = 0; i < limbs; i++) {
+        float a = 6.2831853f * (i + tb_range(-0.3f, 0.3f)) / limbs, rise = i == 0 ? 0.95f : tb_range(0.05f, 0.6f);
+        V3 mid = v3(cc.x + cosf(a) * cr.x * 0.45f * (1 - rise * 0.6f), cc.y + cr.y * (rise - 0.35f) * 0.8f, cc.z + sinf(a) * cr.z * 0.45f * (1 - rise * 0.6f));
+        V3 elbow = vadd(vscale(vadd(top, mid), 0.5f), v3(0, 0.25f * cr.y, 0));
+        tb_limb(m, top, elbow, trunkR * 0.62f, trunkR * 0.46f, bark, 6);
+        tb_limb(m, elbow, mid, trunkR * 0.46f, trunkR * 0.30f, bark, 6);
+        tb_clump(m, mid, cr.x * 0.26f, cc, cr, leaf);
+        for (int j = 0; j < 3; j++) {
+            V3 dir = vnorm(vadd(vsub(mid, cc), v3(tb_range(-1, 1) * cr.x * 0.7f, tb_range(-0.3f, 0.9f) * cr.y, tb_range(-1, 1) * cr.z * 0.7f)));
+            V3 tip = v3(cc.x + dir.x * cr.x * 0.88f, cc.y + fmaxf(dir.y, -0.35f) * cr.y * 0.88f, cc.z + dir.z * cr.z * 0.88f);
+            tb_limb(m, mid, tip, trunkR * 0.28f, trunkR * 0.07f, bark, 5);
+            tb_clump(m, tip, cr.x * 0.25f, cc, cr, leaf);
+            tb_clump(m, vadd(vscale(mid, 0.45f), vscale(tip, 0.55f)), cr.x * 0.24f, cc, cr, leaf);
+        }
+    }
+    for (int i = 0; i < fill; i++) tb_clump(m, tb_crown_pt(cc, cr, tb_range(0.62f, 1.0f)), cr.x * tb_range(0.21f, 0.28f), cc, cr, leaf);
+}
+// A fir: a straight trunk and whorls of drooping boughs, each a flat spray with a hanging skirt.
+static void tb_fir(TreeB *m, float H, Color bark, Color leaf, unsigned seed) {
+    tbSeed = seed;
+    tb_limb(m, v3(0, -0.4f, 0), v3(0, H * 0.5f, 0), 0.27f, 0.16f, bark, 7);
+    tb_limb(m, v3(0, H * 0.5f, 0), v3(0, H * 0.97f, 0), 0.16f, 0.03f, bark, 6);
+    const int tiers = 17;
+    const float u0 = LEAF_SOLID + 0.05f, u1 = 0.995f;
+    for (int tr = 0; tr < tiers; tr++) {
+        float f = (float)tr / (tiers - 1), y = H * (0.20f + 0.78f * f), R = H * 0.31f * (1.0f - 0.88f * f) * tb_range(0.88f, 1.12f);
+        int n = tr < 10 ? 8 : 5;
+        for (int b = 0; b < n; b++) {
+            float a = 6.2831853f * (b + 0.5f * (tr & 1) + tb_range(-0.15f, 0.15f)) / n, droop = tb_range(0.50f, 0.80f);
+            V3 dir = v3(cosf(a), 0, sinf(a)), side = v3(-sinf(a), 0, cosf(a));
+            V3 root = v3(0, y, 0), tip = vadd(root, v3(dir.x * R, -droop * R, dir.z * R));
+            float w = R * 0.62f, tone = tb_range(0.8f, 1.15f);
+            Color col = {(unsigned char)fminf(255, leaf.r * tone), (unsigned char)fminf(255, leaf.g * tone), (unsigned char)fminf(255, leaf.b * tone), 255};
+            if (snowCover > 0) col = snow_over(col, snowCover * 0.75f);
+            V3 nUp = vnorm(v3(dir.x * 0.5f, 1, dir.z * 0.5f)), nOut = vnorm(v3(dir.x, 0.25f, dir.z));
+            Color cIn = lit(col, nUp, 0.55f), cOut = lit(col, nUp, 1.05f), cSkirt = lit(col, nOut, 0.62f);
+            V3 q0 = vadd(root, vscale(side, -w * 0.25f)), q1 = vadd(root, vscale(side, w * 0.25f)), q2 = vadd(tip, vscale(side, w)), q3 = vadd(tip, vscale(side, -w));
+            tb_push(m, q0, u0, u0, cIn); tb_push(m, q1, u1, u0, cIn); tb_push(m, q2, u1, u1, cOut);
+            tb_push(m, q0, u0, u0, cIn); tb_push(m, q2, u1, u1, cOut); tb_push(m, q3, u0, u1, cOut);
+            V3 h = v3(0, -R * 0.75f, 0);                                         // the skirt hanging under the bough
+            V3 s0 = vadd(root, v3(0, 0.05f, 0)), s1 = vadd(tip, v3(0, 0.05f, 0));
+            tb_push(m, s0, u0, u0, cIn); tb_push(m, s1, u1, u0, cOut); tb_push(m, vadd(s1, h), u1, u1, cSkirt);
+            tb_push(m, s0, u0, u0, cIn); tb_push(m, vadd(s1, h), u1, u1, cSkirt); tb_push(m, vadd(s0, vscale(h, 0.55f)), u0, u1, cSkirt);
+        }
+    }
 }
 
 static void build_trees(int map) {
-    MeshB m = {0};
-    Color bark = {92, 66, 46, 255};
-    if (treeProto[0].v) { MemFree(treeProto[0].v); MemFree(treeProto[0].c); MemFree(treeProto[1].v); MemFree(treeProto[1].c); }
-    if (map == MAP_AIRPORT) {                       // a warm coast: round-crowned oaks and umbrella pines, no firs
-        Color pb = {104, 78, 58, 255};
-        mb_cone(&m, 0, 6.2f, 0.26f, 0.17f, 6, pb, 0);                                 // pine: a bare trunk under a wide flat crown
-        mb_blob(&m, v3(0, 7.6f, 0), 3.3f, 1.7f, (Color){50, 92, 44, 255}, 3);
-        mb_blob(&m, v3(1.5f, 8.3f, 0.6f), 2.2f, 1.3f, (Color){60, 104, 48, 255}, 5);
-        mb_blob(&m, v3(-1.3f, 8.2f, -0.9f), 2.0f, 1.2f, (Color){44, 84, 42, 255}, 9);
-        mb_blob(&m, v3(0.2f, 9.0f, -0.2f), 1.7f, 1.0f, (Color){66, 110, 50, 255}, 13);
-        mb_copy(&treeProto[TREE_CONIFER], &m);
-        treeModel[TREE_CONIFER] = mb_model(&m);
-        mb_cone(&m, 0, 3.4f, 0.24f, 0.17f, 6, bark, 0);                               // oak: a full, lumpy crown
-        mb_blob(&m, v3(0, 5.0f, 0), 2.7f, 2.1f, (Color){62, 104, 46, 255}, 7);
-        mb_blob(&m, v3(1.3f, 5.9f, 0.7f), 1.9f, 1.6f, (Color){74, 118, 52, 255}, 11);
-        mb_blob(&m, v3(-1.2f, 5.6f, -0.8f), 1.8f, 1.5f, (Color){54, 94, 44, 255}, 17);
-        mb_blob(&m, v3(0.1f, 6.8f, -0.3f), 1.6f, 1.3f, (Color){84, 128, 56, 255}, 23);
-        mb_blob(&m, v3(-0.6f, 4.4f, 1.4f), 1.5f, 1.2f, (Color){50, 88, 42, 255}, 29);
-        mb_copy(&treeProto[TREE_BROADLEAF], &m);
-        treeModel[TREE_BROADLEAF] = mb_model(&m);
-        mb_cone(&m, -0.3f, 0.5f, 1.0f, 0.85f, 7, bark, 0);
-        mb_cone(&m, 0.5f, 0.5f, 0.85f, 0.0f, 7, (Color){200, 170, 120, 255}, 0);
-        stumpModel = mb_model(&m);
-        return;
+    build_leaf_texture();
+    Color bark = {104, 96, 86, 255}, pine = {100, 84, 70, 255}, firBark = {84, 62, 46, 255};
+    Color oakLeaf = {66, 96, 46, 255}, pineLeaf = {50, 84, 44, 255}, firLeaf = {40, 74, 48, 255};
+    for (int v = 0; v < TREE_VARIANTS; v++) {
+        tb_free(&treeProto[TREE_BROADLEAF][v]); tb_free(&treeProto[TREE_CONIFER][v]);
+        // White oak: a short stout trunk and a crown as wide as the tree is tall.
+        float w = 0.50f + 0.05f * v, hgt = 0.34f - 0.02f * v;
+        tb_oak(&treeProto[TREE_BROADLEAF][v], BROADLEAF_H * (0.27f + 0.03f * v), v3(0, BROADLEAF_H * 0.61f, 0), v3(BROADLEAF_H * w, BROADLEAF_H * hgt, BROADLEAF_H * w),
+               0.27f, bark, oakLeaf, 101u + 977u * v, 5, 46);
+        if (map == MAP_AIRPORT)                     // a warm coast: umbrella pines instead of firs
+            tb_oak(&treeProto[TREE_CONIFER][v], CONIFER_H * (0.60f + 0.03f * v), v3(0, CONIFER_H * 0.82f, 0), v3(CONIFER_H * 0.36f, CONIFER_H * 0.15f, CONIFER_H * 0.36f),
+                   0.25f, pine, pineLeaf, 303u + 577u * v, 5, 30);
+        else tb_fir(&treeProto[TREE_CONIFER][v], CONIFER_H, firBark, firLeaf, 505u + 131u * v);
+        treeModel[TREE_BROADLEAF][v] = tb_model(&treeProto[TREE_BROADLEAF][v]);
+        treeModel[TREE_CONIFER][v] = tb_model(&treeProto[TREE_CONIFER][v]);
     }
-    mb_cone(&m, 0, 3.0f, 0.25f, 0.18f, 6, bark, 0);                                   // conifer
-    mb_cone(&m, 1.6f, 6.0f, 2.6f, 0.0f, 9, (Color){46, 92, 52, 255}, 0.25f);
-    mb_cone(&m, 3.8f, 8.2f, 2.0f, 0.0f, 9, (Color){52, 102, 56, 255}, 0.25f);
-    mb_cone(&m, 6.0f, CONIFER_H, 1.3f, 0.0f, 8, (Color){60, 112, 60, 255}, 0.25f);
-    mb_copy(&treeProto[TREE_CONIFER], &m);
-    treeModel[TREE_CONIFER] = mb_model(&m);
-    mb_cone(&m, 0, 3.6f, 0.22f, 0.16f, 6, bark, 0);                                   // broadleaf
-    mb_blob(&m, v3(0, 5.2f, 0), 2.6f, 2.2f, (Color){84, 132, 58, 255}, 7);
-    mb_blob(&m, v3(0.9f, 6.3f, 0.5f), 1.6f, 1.4f, (Color){96, 146, 64, 255}, 11);
-    mb_copy(&treeProto[TREE_BROADLEAF], &m);
-    treeModel[TREE_BROADLEAF] = mb_model(&m);
-    mb_cone(&m, -0.3f, 0.5f, 1.0f, 0.85f, 7, bark, 0);                               // stump (scaled by trunk radius)
+    MeshB m = {0};
+    Color stump = {92, 66, 46, 255};
+    mb_cone(&m, -0.3f, 0.5f, 1.0f, 0.85f, 7, stump, 0);                              // stump (scaled by trunk radius)
     mb_cone(&m, 0.5f, 0.5f, 0.85f, 0.0f, 7, (Color){200, 170, 120, 255}, 0);
     stumpModel = mb_model(&m);
 }
@@ -1483,14 +1645,14 @@ static Color tree_tint(int i) { unsigned char t = (unsigned char)(215 + (i * 97 
 
 static void build_tree_patch(const World *w, int pi) {
     if (patchHas[pi]) { UnloadModel(treePatch[pi]); UnloadModel(shadowPatch[pi]); patchHas[pi] = 0; }
-    MeshB m = {0}, sh = {0};
+    TreeB m = {0}; MeshB sh = {0};
     unsigned char sa = (unsigned char)(55 * fminf(1.0f, 0.35f + SUN.y));
     for (int i = 0; i < w->ntree; i++) {
         const Tree *t = &w->tree[i];
         if (tree_patch(t) != pi || t->kind == TREE_POLE) continue;
         treeBaked[i] = !t->broken;
         if (t->broken) continue;
-        const MeshB *P = &treeProto[t->kind];
+        const TreeB *P = &treeProto[t->kind][i % TREE_VARIANTS];
         float s = t->h / (t->kind == TREE_CONIFER ? CONIFER_H : BROADLEAF_H);
         float a = (float)(i * 47 % 360) * DEG2RAD, ca = cosf(a), sn = sinf(a);
         Color tint = tree_tint(i);
@@ -1498,7 +1660,7 @@ static void build_tree_patch(const World *w, int pi) {
             float x = P->v[k * 3] * s, y = P->v[k * 3 + 1] * s, z = P->v[k * 3 + 2] * s;
             V3 p = v3(t->x + x * ca + z * sn, t->y + y, t->z - x * sn + z * ca);
             Color c = {(unsigned char)(P->c[k * 4] * tint.r / 255), (unsigned char)(P->c[k * 4 + 1] * tint.g / 255), (unsigned char)(P->c[k * 4 + 2] * tint.b / 255), 255};
-            mb_push(&m, p, c);
+            tb_push(&m, p, P->t[k * 2], P->t[k * 2 + 1], c);
         }
         // Shadow disc, offset away from the sun and laid on the local slope.
         float R = t->h * (t->kind == TREE_CONIFER ? 0.24f : 0.33f);
@@ -1515,9 +1677,10 @@ static void build_tree_patch(const World *w, int pi) {
             prev = p;
         }
     }
-    if (!m.n) { MemFree(m.v); MemFree(m.c); MemFree(sh.v); MemFree(sh.c); return; }
+    if (!m.n) { tb_free(&m); MemFree(sh.v); MemFree(sh.c); return; }
     for (int k = 0; k < sh.n; k++) sh.c[k * 4 + 3] = sa;
-    treePatch[pi] = mb_model(&m);
+    treePatch[pi] = tb_model(&m);
+    tb_free(&m);
     shadowPatch[pi] = mb_model(&sh);
     patchHas[pi] = 1;
 }
@@ -1579,7 +1742,7 @@ static void draw_trees(const World *w, Vector3 eye) {
         V3 axis = vcross(v3(0, 1, 0), t->fall);
         Vector3 base = {t->x, t->y, t->z};
         Vector3 top = {t->x + t->fall.x * 0.5f * t->r, t->y + 0.5f * s, t->z + t->fall.z * 0.5f * t->r};
-        DrawModelEx(treeModel[t->kind], top, RV(axis), t->tilt * RAD2DEG, (Vector3){s, s, s}, tree_tint(i));
+        DrawModelEx(treeModel[t->kind][i % TREE_VARIANTS], top, RV(axis), t->tilt * RAD2DEG, (Vector3){s, s, s}, tree_tint(i));
         float sr = t->r / 0.25f * (t->kind == TREE_CONIFER ? 1.0f : 0.25f / 0.22f);
         DrawModelEx(stumpModel, base, (Vector3){0, 1, 0}, 0, (Vector3){sr * 0.25f, 1, sr * 0.25f}, WHITE);
     }
@@ -2858,7 +3021,7 @@ static void build_world_meshes(const World *w) {
     if (meshesBuilt) {
         for (int i = 0; i < CH_N * CH_N; i++) UnloadModel(chunks[i]);
         UnloadModel(city); UnloadModel(cityGlow); UnloadModel(cityPool);
-        UnloadModel(treeModel[0]); UnloadModel(treeModel[1]); UnloadModel(stumpModel);
+        for (int v = 0; v < TREE_VARIANTS; v++) { UnloadModel(treeModel[0][v]); UnloadModel(treeModel[1][v]); } UnloadModel(stumpModel);
     }
     for (int z = 0; z < CH_N; z++) for (int x = 0; x < CH_N; x++) chunks[z * CH_N + x] = build_chunk(x, z);
     for (int i = 0; i < nExt; i++) UnloadModel(extChunk[i]);
@@ -4623,7 +4786,7 @@ int main(void) {
 
     for (int i = 0; i < CH_N * CH_N; i++) UnloadModel(chunks[i]);
     UnloadModel(city); UnloadModel(cityGlow); UnloadModel(cityPool);
-    UnloadModel(treeModel[0]); UnloadModel(treeModel[1]); UnloadModel(stumpModel);
+    for (int v = 0; v < TREE_VARIANTS; v++) { UnloadModel(treeModel[0][v]); UnloadModel(treeModel[1][v]); } UnloadModel(stumpModel);
     audio_shutdown();
     post_shutdown();
     CloseWindow();

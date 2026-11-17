@@ -264,6 +264,14 @@ static const char *TERRAIN_FS = GLSL SKY_GLSL
     "  finalColor = vec4(c, 1.0);\n"
     "}\n";
 
+// Foliage: leaf-cluster cards cut out by the texture's alpha, tinted by the baked vertex light.
+static const char *FOLIAGE_FS = GLSL
+    "void main() {\n"
+    "  vec4 t = texture(texture0, fragTexCoord);\n"
+    "  if (t.a < 0.36) discard;\n"
+    "  finalColor = vec4(fragColor.rgb * colDiffuse.rgb * t.rgb * 2.0, 1.0);\n"
+    "}\n";
+
 // City facades. The city mesh is plain vertex-coloured boxes with the lighting baked in; a wall whose
 // vertex alpha is below 250 carries a facade style, and this shader draws that facade on it per pixel:
 // a storefront floor with sign bands, then bays of windows above (curtain wall, punched masonry,
@@ -581,7 +589,7 @@ static Shader shEmissive, shAtmos, shSSR, shComposite, shBright, shBlur, shFinal
 static int locIntensity, locAtmos[U_COUNT], locSSR[U_COUNT], locWet, locRain, locRoads, locNRoads, locNHighway, locRefl;
 static int locBrightTexel, locBrightThr, locBlurStep, locFinal[6];
 static RenderTexture2D scene, hdr, hdr2, refl[2], bl[3][2], aoRT[2];
-static Shader shPaint, shDepth, shAO, shWater, shCity, shTerrain;
+static Shader shPaint, shDepth, shAO, shWater, shCity, shTerrain, shFoliage;
 static int locTerrain[U_COUNT], locTerrainTint;
 static int locCity[U_COUNT], locCityNight;
 static int locWater[U_COUNT], locWaterCol;
@@ -671,6 +679,7 @@ void post_init(void) {
     shCity = LoadShaderFromMemory(CITY_VS, CITY_FS);
     locCityNight = GetShaderLocation(shCity, "night");
     for (int i = 0; i < U_COUNT; i++) locCity[i] = GetShaderLocation(shCity, SKY_UNIFORMS[i]);
+    shFoliage = LoadShaderFromMemory(NULL, FOLIAGE_FS);
     shTerrain = LoadShaderFromMemory(PAINT_VS, TERRAIN_FS);
     for (int i = 0; i < U_COUNT; i++) locTerrain[i] = GetShaderLocation(shTerrain, SKY_UNIFORMS[i]);
     locTerrainTint = GetShaderLocation(shTerrain, "groundTint");
@@ -822,6 +831,8 @@ void post_set_city(const Env *e, float time) {
     SetShaderValue(shCity, locCityNight, &e->lights, SHADER_UNIFORM_FLOAT);
     EndShaderMode();
 }
+
+Shader post_foliage_shader(void) { return shFoliage; }
 
 // The ground shader: terrain models use it as their material; set its uniforms once a frame.
 Shader post_terrain_shader(void) { return shTerrain; }
