@@ -70,6 +70,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b :
 
 static Color terrain_color(float x, float z, float y, V3 n) {
     float r, g, b, cover = 1.0f;
+    int grassy = 0;
     float noise = 0.5f + 0.25f * sinf(x * 0.37f + 1.7f) * sinf(z * 0.41f) + 0.25f * sinf(x * 0.13f - z * 0.17f);
     if (x > 40 && x < 58 && fabsf(z) < 6.5f) { r = 0.72f; g = 0.66f; b = 0.55f; cover = 0.7f; }  // ramp
     else if (dirt_at(x, z)) { r = 0.55f; g = 0.42f; b = 0.28f; cover = 0.8f; }                  // dirt
@@ -89,14 +90,15 @@ static Color terrain_color(float x, float z, float y, V3 n) {
         r = 0.74f - 0.44f * wet + 0.04f * noise; g = 0.69f - 0.36f * wet + 0.04f * noise; b = 0.53f - 0.22f * wet; cover = 0.5f;
     }
     else {                                                                                       // grass / hills
+        grassy = 1;
         r = 0.26f + 0.10f * noise; g = 0.47f + 0.12f * noise; b = 0.20f;
         float rock = fminf(fmaxf((1.0f - n.y) * 4.0f, 0), 1);
-        r += (0.50f - r) * rock; g += (0.47f - g) * rock; b += (0.42f - b) * rock;
+        // (the ground shader draws the rock itself, per pixel, from the slope)
         cover = 1.0f - 0.8f * rock;                                                              // steep rock sheds snow
         (void)y;
     }
     int gx = (int)lroundf(x / CELL), gz = (int)lroundf(z / CELL);
-    if ((gx % 5 == 0 || gz % 5 == 0) && fabsf(x) < 1500 && fabsf(z) < 320) { r *= 0.93f; g *= 0.93f; b *= 0.93f; }  // 10 m grid for speed sense
+    if (!grassy && (gx % 5 == 0 || gz % 5 == 0) && fabsf(x) < 1500 && fabsf(z) < 320) { r *= 0.93f; g *= 0.93f; b *= 0.93f; }  // 10 m grid for speed sense
     Color base = {(unsigned char)fminf(255, r * 255), (unsigned char)fminf(255, g * 255), (unsigned char)fminf(255, b * 255), 255};
     base = snow_over(base, snowCover * cover * (0.92f + 0.08f * noise));
     return lit(base, n, 1.0f);
@@ -113,6 +115,35 @@ static int fine_terrain(float x, float z, float m) {      // inside the finely m
     const float half = CH_N * CH_CELLS * CELL * 0.5f;
     if (fabsf(x) <= half - m && fabsf(z) <= half - m) return 1;
     return x >= EXT_X0 - 1 && x <= EXT_X1 - m && z >= EXT_Z0 + m && z <= EXT_Z1 - m;
+}
+
+// Value noise for laying out scenery (the same on every machine, unlike the shaders' noise).
+static float sc_hash(int x, int z) {
+    unsigned h = (unsigned)x * 374761393u + (unsigned)z * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return ((h ^ (h >> 16)) & 0xFFFFFF) / 16777216.0f;
+}
+static float sc_noise(float x, float z) {
+    int ix = (int)floorf(x), iz = (int)floorf(z);
+    float fx = x - ix, fz = z - iz, ux = fx * fx * (3 - 2 * fx), uz = fz * fz * (3 - 2 * fz);
+    return lerpf(lerpf(sc_hash(ix, iz), sc_hash(ix + 1, iz), ux), lerpf(sc_hash(ix, iz + 1), sc_hash(ix + 1, iz + 1), ux), uz);
+}
+static float sc_fbm(float x, float z) { return 0.57f * sc_noise(x, z) + 0.29f * sc_noise(x * 2.07f + 3.1f, z * 2.07f + 7.7f) + 0.14f * sc_noise(x * 4.3f + 9.2f, z * 4.3f + 1.3f); }
+// Woodland cover (0..1) on the airport's outlying land: the ground shader darkens it and scenery trees stand on it.
+static float forest_mask(float x, float z) {
+    if (fine_terrain(x, z, -30.0f)) return 0;
+    float sd = sea_dist(x, z);
+    if (sd > -30.0f) return 0;
+    float h = terrain_height(x, z) - AP_SEA_Y;
+    if (h < 1.5f) return 0;
+    return smoothk(0.43f, 0.57f, sc_fbm(x * 0.0035f, z * 0.0035f)) * smoothk(-30.0f, -120.0f, sd) * smoothk(1.5f, 6.0f, h);
+}
+// Height of the coarse far-terrain sheet as it is actually drawn (flat triangles between 50 m posts).
+static float coarse_height(float x, float z) {
+    float gx = (x + AP_FAR) / FAR_CELL, gz = (z + AP_FAR) / FAR_CELL;
+    float x0 = floorf(gx) * FAR_CELL - AP_FAR, z0 = floorf(gz) * FAR_CELL - AP_FAR, fx = gx - floorf(gx), fz = gz - floorf(gz);
+    float a = terrain_height(x0, z0), b = terrain_height(x0 + FAR_CELL, z0), c = terrain_height(x0, z0 + FAR_CELL), d = terrain_height(x0 + FAR_CELL, z0 + FAR_CELL);
+    return fx + fz <= 1.0f ? a + (b - a) * fx + (c - a) * fz : d + (c - d) * (1 - fx) + (b - d) * (1 - fz);
 }
 
 static Model build_terrain(float x0, float z0, int cells, float cell, int coarse) {
@@ -134,7 +165,8 @@ static Model build_terrain(float x0, float z0, int cells, float cell, int coarse
         if (coarse) y -= fine_terrain(x, z, 1.0f) ? 6.0f : fine_terrain(x, z, -1.0f) ? 0.4f : 0.0f;
         m.vertices[v * 3] = x; m.vertices[v * 3 + 1] = y; m.vertices[v * 3 + 2] = z;
         m.normals[v * 3] = n.x; m.normals[v * 3 + 1] = n.y; m.normals[v * 3 + 2] = n.z;
-        m.colors[v * 4] = c.r; m.colors[v * 4 + 1] = c.g; m.colors[v * 4 + 2] = c.b; m.colors[v * 4 + 3] = 255;
+        m.colors[v * 4] = c.r; m.colors[v * 4 + 1] = c.g; m.colors[v * 4 + 2] = c.b;
+        m.colors[v * 4 + 3] = coarse ? (unsigned char)(255 - 255 * forest_mask(x, z)) : 255;      // woodland, for the ground shader
     }
     int t = 0;
     for (int j = 0; j < cells; j++)
@@ -144,7 +176,9 @@ static Model build_terrain(float x0, float z0, int cells, float cell, int coarse
         m.indices[t++] = b; m.indices[t++] = c; m.indices[t++] = d;
     }
     UploadMesh(&m, false);
-    return LoadModelFromMesh(m);
+    Model md = LoadModelFromMesh(m);
+    md.materials[0].shader = post_terrain_shader();
+    return md;
 }
 static Model build_chunk(int cx, int cz) {
     const float half = CH_N * CH_CELLS * CELL * 0.5f;
@@ -1188,10 +1222,32 @@ static void mb_copy(MeshB *dst, const MeshB *src) {
     memcpy(dst->c, src->c, src->n * 4);
 }
 
-static void build_trees(void) {
+static void build_trees(int map) {
     MeshB m = {0};
     Color bark = {92, 66, 46, 255};
     if (treeProto[0].v) { MemFree(treeProto[0].v); MemFree(treeProto[0].c); MemFree(treeProto[1].v); MemFree(treeProto[1].c); }
+    if (map == MAP_AIRPORT) {                       // a warm coast: round-crowned oaks and umbrella pines, no firs
+        Color pb = {104, 78, 58, 255};
+        mb_cone(&m, 0, 6.2f, 0.26f, 0.17f, 6, pb, 0);                                 // pine: a bare trunk under a wide flat crown
+        mb_blob(&m, v3(0, 7.6f, 0), 3.3f, 1.7f, (Color){50, 92, 44, 255}, 3);
+        mb_blob(&m, v3(1.5f, 8.3f, 0.6f), 2.2f, 1.3f, (Color){60, 104, 48, 255}, 5);
+        mb_blob(&m, v3(-1.3f, 8.2f, -0.9f), 2.0f, 1.2f, (Color){44, 84, 42, 255}, 9);
+        mb_blob(&m, v3(0.2f, 9.0f, -0.2f), 1.7f, 1.0f, (Color){66, 110, 50, 255}, 13);
+        mb_copy(&treeProto[TREE_CONIFER], &m);
+        treeModel[TREE_CONIFER] = mb_model(&m);
+        mb_cone(&m, 0, 3.4f, 0.24f, 0.17f, 6, bark, 0);                               // oak: a full, lumpy crown
+        mb_blob(&m, v3(0, 5.0f, 0), 2.7f, 2.1f, (Color){62, 104, 46, 255}, 7);
+        mb_blob(&m, v3(1.3f, 5.9f, 0.7f), 1.9f, 1.6f, (Color){74, 118, 52, 255}, 11);
+        mb_blob(&m, v3(-1.2f, 5.6f, -0.8f), 1.8f, 1.5f, (Color){54, 94, 44, 255}, 17);
+        mb_blob(&m, v3(0.1f, 6.8f, -0.3f), 1.6f, 1.3f, (Color){84, 128, 56, 255}, 23);
+        mb_blob(&m, v3(-0.6f, 4.4f, 1.4f), 1.5f, 1.2f, (Color){50, 88, 42, 255}, 29);
+        mb_copy(&treeProto[TREE_BROADLEAF], &m);
+        treeModel[TREE_BROADLEAF] = mb_model(&m);
+        mb_cone(&m, -0.3f, 0.5f, 1.0f, 0.85f, 7, bark, 0);
+        mb_cone(&m, 0.5f, 0.5f, 0.85f, 0.0f, 7, (Color){200, 170, 120, 255}, 0);
+        stumpModel = mb_model(&m);
+        return;
+    }
     mb_cone(&m, 0, 3.0f, 0.25f, 0.18f, 6, bark, 0);                                   // conifer
     mb_cone(&m, 1.6f, 6.0f, 2.6f, 0.0f, 9, (Color){46, 92, 52, 255}, 0.25f);
     mb_cone(&m, 3.8f, 8.2f, 2.0f, 0.0f, 9, (Color){52, 102, 56, 255}, 0.25f);
@@ -1206,6 +1262,159 @@ static void build_trees(void) {
     mb_cone(&m, -0.3f, 0.5f, 1.0f, 0.85f, 7, bark, 0);                               // stump (scaled by trunk radius)
     mb_cone(&m, 0.5f, 0.5f, 0.85f, 0.0f, 7, (Color){200, 170, 120, 255}, 0);
     stumpModel = mb_model(&m);
+}
+
+// ------------------------------------------------------------- scenery ----
+// The airport's outlying land, dressed for the view from the air: woods, hill villages with tiled
+// roofs and the roads that wind out to them. None of it is solid; it stands on the coarse terrain
+// sheet, well outside the area you can reach in a hurry.
+#define SC_VILLAGES 8
+#define SC_ROADPTS 4000
+static Model scTrees[8], scTown, scRoads;
+static int nScTrees, hasScenery;
+static float scVil[SC_VILLAGES][2], scRoad[SC_ROADPTS][2];
+static int nScVil, nScRoad;
+static unsigned scRng;
+static float sc_rnd(void) { scRng = scRng * 1664525u + 1013904223u; return (scRng >> 8) / 16777216.0f; }
+static float sc_range(float a, float b) { return a + (b - a) * sc_rnd(); }
+static float sc_ground(float x, float z) { return fine_terrain(x, z, 0) ? terrain_height(x, z) : coarse_height(x, z); }
+
+// A house: plastered walls sunk into the slope, and a pitched tile roof along its longer side.
+static void sc_house(MeshB *m, float cx, float cz, float yaw, float w, float d, float h, Color wall, Color roof) {
+    float c = cosf(yaw), s = sinf(yaw), base = 1e9f;
+    V3 q[4], e[4];
+    for (int i = 0; i < 4; i++) {
+        float lx = (i == 0 || i == 3 ? -0.5f : 0.5f) * w, lz = (i < 2 ? -0.5f : 0.5f) * d;
+        q[i] = v3(cx + lx * c - lz * s, 0, cz + lx * s + lz * c);
+        e[i] = v3(cx + (lx * c - lz * s) * 1.08f, 0, cz + (lx * s + lz * c) * 1.08f);     // eaves
+        base = fminf(base, sc_ground(q[i].x, q[i].z));
+    }
+    float top = base + h, ridge = top + 0.32f * d;
+    V3 ctr = v3(cx, base + h * 0.5f, cz);
+    for (int i = 0; i < 4; i++) {
+        V3 a = q[i], b = q[(i + 1) % 4];
+        mb_quad(m, v3(a.x, base - 7, a.z), v3(b.x, base - 7, b.z), v3(b.x, top, b.z), v3(a.x, top, a.z), wall, ctr);
+    }
+    V3 r0 = v3((e[0].x + e[3].x) * 0.5f, ridge, (e[0].z + e[3].z) * 0.5f), r1 = v3((e[1].x + e[2].x) * 0.5f, ridge, (e[1].z + e[2].z) * 0.5f);
+    for (int i = 0; i < 4; i++) e[i].y = top - 0.15f;
+    mb_quad(m, e[0], e[1], r1, r0, roof, ctr);
+    mb_quad(m, e[3], e[2], r1, r0, roof, ctr);
+    mb_tri(m, v3(q[0].x, top, q[0].z), v3(q[3].x, top, q[3].z), r0, wall, ctr);
+    mb_tri(m, v3(q[1].x, top, q[1].z), v3(q[2].x, top, q[2].z), r1, wall, ctr);
+}
+static float sc_road_dist2(float x, float z) {
+    float best = 1e12f;
+    for (int i = 0; i < nScRoad; i++) { float dx = x - scRoad[i][0], dz = z - scRoad[i][1], d = dx * dx + dz * dz; if (d < best) best = d; }
+    return best;
+}
+static void sc_flush_trees(MeshB *m) {
+    if (m->n && nScTrees < 8) scTrees[nScTrees++] = mb_model(m);
+    else if (m->v) { MemFree(m->v); MemFree(m->c); }
+    memset(m, 0, sizeof *m);
+}
+
+static void build_scenery(const World *w) {
+    if (hasScenery) { for (int i = 0; i < nScTrees; i++) UnloadModel(scTrees[i]); UnloadModel(scTown); UnloadModel(scRoads); }
+    hasScenery = 0; nScTrees = 0; nScVil = 0; nScRoad = 0;
+    if (w->map != MAP_AIRPORT) return;
+    scRng = 20261116u;
+
+    // Village sites: gentle dry land, a mix of coast and hill, well apart.
+    for (int t = 0; t < 40000 && nScVil < SC_VILLAGES; t++) {
+        float r = sc_range(650, 2700), a = sc_range(0, 6.2831853f), x = r * cosf(a), z = r * sinf(a);
+        float sd = sea_dist(x, z);
+        if (sd > -90.0f || fine_terrain(x, z, -350.0f)) continue;
+        if ((nScVil % 2 == 0) != (sd > -520.0f)) continue;                 // alternate: by the water, then inland
+        int ok = 1;
+        for (int k = 0; k < 9 && ok; k++) {
+            float px = x + (k % 3 - 1) * 90.0f, pz = z + (k / 3 - 1) * 90.0f;
+            if (terrain_height(px, pz) < AP_SEA_Y + 3.0f || sea_dist(px, pz) > -40.0f || terrain_normal(px, pz).y < 0.955f) ok = 0;
+        }
+        for (int k = 0; k < nScVil && ok; k++) if (hypotf(x - scVil[k][0], z - scVil[k][1]) < 800.0f) ok = 0;
+        if (!ok) continue;
+        scVil[nScVil][0] = x; scVil[nScVil][1] = z; nScVil++;
+    }
+
+    // Roads: from the ends of the field's own roads out to each village, wandering as hill roads do.
+    MeshB rm = {0};
+    static const float START[3][2] = {{-299, 0}, {299, 0}, {0, -299}};
+    Color tar = {74, 74, 78, 255}, verge = {150, 140, 112, 255};
+    for (int v = 0; v < nScVil; v++) {
+        int s = 0;
+        for (int k = 1; k < 3; k++) if (hypotf(scVil[v][0] - START[k][0], scVil[v][1] - START[k][1]) < hypotf(scVil[v][0] - START[s][0], scVil[v][1] - START[s][1])) s = k;
+        float ax = START[s][0], az = START[s][1], bx = scVil[v][0], bz = scVil[v][1], len = hypotf(bx - ax, bz - az);
+        float nx = -(bz - az) / len, nz = (bx - ax) / len, amp = 0.10f * len, ph = sc_range(0, 6.28f);
+        int steps = (int)(len / 7.0f), waves = 2 + (int)(len / 700.0f);
+        V3 pl = {0}, pr = {0}, vl = {0}, vr = {0}; int have = 0;
+        for (int i = 0; i <= steps; i++) {
+            float t = (float)i / steps, env = sinf(PI * t);
+            float off = env * (amp * sinf(PI * waves * t) + 0.25f * amp * sinf(PI * (3 * waves + 1) * t + ph));
+            float t2 = fminf(t + 0.002f, 1.0f), env2 = sinf(PI * t2);
+            float off2 = env2 * (amp * sinf(PI * waves * t2) + 0.25f * amp * sinf(PI * (3 * waves + 1) * t2 + ph));
+            float x = ax + (bx - ax) * t + nx * off, z = az + (bz - az) * t + nz * off;
+            float dx = (bx - ax) * (t2 - t) + nx * (off2 - off), dz = (bz - az) * (t2 - t) + nz * (off2 - off), dl = hypotf(dx, dz);
+            if (dl < 1e-6f) { dx = bx - ax; dz = bz - az; dl = len; }
+            float sx = -dz / dl, sz = dx / dl;
+            if (sea_dist(x, z) > -10.0f || terrain_height(x, z) < AP_SEA_Y + 0.8f || fine_terrain(x, z, 0.5f)) { have = 0; continue; }
+            if (nScRoad < SC_ROADPTS) { scRoad[nScRoad][0] = x; scRoad[nScRoad][1] = z; nScRoad++; }
+            V3 l = v3(x + sx * 3.4f, 0, z + sz * 3.4f), r = v3(x - sx * 3.4f, 0, z - sz * 3.4f), l2 = v3(x + sx * 5.2f, 0, z + sz * 5.2f), r2 = v3(x - sx * 5.2f, 0, z - sz * 5.2f);
+            l.y = sc_ground(l.x, l.z) + 0.45f; r.y = sc_ground(r.x, r.z) + 0.45f; l2.y = sc_ground(l2.x, l2.z) + 0.25f; r2.y = sc_ground(r2.x, r2.z) + 0.25f;
+            if (have) {
+                V3 below = v3(x, l.y - 50, z);
+                mb_quad(&rm, vl, vr, r2, l2, verge, below);
+                mb_quad(&rm, pl, pr, r, l, tar, below);
+            }
+            pl = l; pr = r; vl = l2; vr = r2; have = 1;
+        }
+    }
+    scRoads = mb_model(&rm);
+    scRoads.materials[0].shader = post_terrain_shader();
+
+    // The villages: houses packed along two street directions around a church tower.
+    MeshB tm = {0};
+    static const Color WALLS[5] = {{232, 220, 196, 255}, {238, 234, 226, 255}, {224, 190, 138, 255}, {226, 196, 176, 255}, {214, 206, 184, 255}};
+    static const Color ROOFS[3] = {{198, 100, 62, 255}, {182, 88, 58, 255}, {208, 122, 78, 255}};
+    for (int v = 0; v < nScVil; v++) {
+        float cx = scVil[v][0], cz = scVil[v][1], ang = sc_range(0, 3.14f), R = sc_range(85, 130);
+        static float hx[80], hz[80]; int nh = 0;
+        for (int t = 0; t < 900 && nh < 64; t++) {
+            float rr = R * sqrtf(sc_rnd()) , a = sc_range(0, 6.2831853f), x = cx + rr * cosf(a), z = cz + rr * sinf(a);
+            int ok = sea_dist(x, z) < -25.0f && terrain_height(x, z) > AP_SEA_Y + 2.0f && sc_road_dist2(x, z) > 9.0f * 9.0f;
+            for (int k = 0; k < nh && ok; k++) if (hypotf(x - hx[k], z - hz[k]) < 13.5f) ok = 0;
+            if (!ok) continue;
+            hx[nh] = x; hz[nh] = z; nh++;
+            float wd = sc_range(8, 13), dp = sc_range(6.5f, 9), ht = 3.2f * (1 + (int)(sc_rnd() * 2.6f)) + 0.6f;
+            sc_house(&tm, x, z, ang + (sc_rnd() < 0.5f ? 0 : PI / 2) + sc_range(-0.08f, 0.08f), wd, dp, ht, WALLS[(int)(sc_rnd() * 5) % 5], ROOFS[(int)(sc_rnd() * 3) % 3]);
+        }
+        sc_house(&tm, cx, cz, ang, 6, 6, 19, WALLS[1], ROOFS[1]);                    // the bell tower
+        sc_house(&tm, cx + 9 * cosf(ang), cz + 9 * sinf(ang), ang, 16, 9, 8, WALLS[0], ROOFS[0]);
+    }
+    scTown = mb_model(&tm);
+    if (getenv("BEAMLITE_PROF")) for (int v = 0; v < nScVil; v++) printf("village %d at x %.0f z %.0f, ground %.0f m\n", v, scVil[v][0], scVil[v][1], terrain_height(scVil[v][0], scVil[v][1]));
+
+    // Trees: thick where the woodland mask is, a scatter elsewhere. One lumpy crown each.
+    MeshB m = {0};
+    static const Color LEAF[4] = {{46, 82, 38, 255}, {56, 94, 42, 255}, {40, 72, 36, 255}, {66, 102, 46, 255}};
+    const float R = 2700.0f, STEP = 14.5f;
+    for (float gz = -R; gz < R; gz += STEP)
+    for (float gx = -R; gx < R; gx += STEP) {
+        float x = gx + sc_range(0, STEP), z = gz + sc_range(0, STEP), pick = sc_rnd(), size = sc_range(0.75f, 1.3f);
+        unsigned seed = (unsigned)(sc_rnd() * 65536.0f);
+        if (x * x + z * z > R * R || fine_terrain(x, z, -6.0f)) continue;
+        float sd = sea_dist(x, z);
+        if (sd > -14.0f || terrain_height(x, z) < AP_SEA_Y + 1.2f) continue;
+        float f = forest_mask(x, z);
+        if (pick > f * 0.92f + 0.035f) continue;
+        int skip = sc_road_dist2(x, z) < 10.0f * 10.0f;
+        for (int k = 0; k < nScVil && !skip; k++) { float d = hypotf(x - scVil[k][0], z - scVil[k][1]); if (d < 150.0f && sc_hash((int)x, (int)z) > 0.12f) skip = 1; }
+        if (skip) continue;
+        float y = sc_ground(x, z), rx = 5.6f * size, ry = 4.0f * size;
+        Color leaf = LEAF[seed % 4];
+        mb_blob(&m, v3(x, y + ry * 0.95f, z), rx, ry, leaf, seed);
+        if (m.n > 240000) sc_flush_trees(&m);
+    }
+    sc_flush_trees(&m);
+    hasScenery = 1;
 }
 
 #define TCH 12                                  // tree patches per side (50 m each)
@@ -2555,6 +2764,7 @@ static void draw_fx(Camera3D cam, int glow) {
 
 static Model city, cityGlow, cityPool;
 static int meshesBuilt;
+static void build_scenery(const World *w);
 
 static void build_world_meshes(const World *w) {
     if (meshesBuilt) {
@@ -2577,8 +2787,9 @@ static void build_world_meshes(const World *w) {
     city.materials[0].shader = post_city_shader();
     cityGlow.materials[0].shader = post_emissive_shader();
     cityPool.materials[0].shader = post_emissive_shader();
-    build_trees();
+    build_trees(w->map);
     build_tree_patches(w);
+    build_scenery(w);
     meshesBuilt = 1;
 }
 
@@ -4109,6 +4320,7 @@ int main(void) {
         // ---- sun shadow map: the casters, seen from the sun
         post_set_quality(fancy, fancy);
         post_set_city(ENV, (float)GetTime());
+        post_set_terrain(ENV, (float)GetTime());
         if (post_shadow_begin(flying ? RV(ap->pos) : RV(pc->pos), ENV, RV(AMB), RV(SUNC))) {
             depthOnly = 1;
             DrawModel(city, (Vector3){0, 0, 0}, 1.0f, WHITE);
@@ -4130,6 +4342,13 @@ int main(void) {
         for (int i = 0; i < CH_N * CH_N; i++) DrawModel(chunks[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
         for (int i = 0; i < nExt; i++) DrawModel(extChunk[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
         if (hasFar) DrawModel(farTerrain, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        if (hasScenery) {                                // far roads lie on the coarse ground: bias them clear of it
+            rlDrawRenderBatchActive();
+            glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(-4.0f, -4.0f);
+            DrawModel(scRoads, (Vector3){0, 0, 0}, 1.0f, WHITE);
+            rlDrawRenderBatchActive();
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
         if (hasMarkings) DrawModel(markings, (Vector3){0, 0, 0}, 1.0f, WHITE);
         rlDisableBackfaceCulling();
         post_begin_objects();
@@ -4149,6 +4368,7 @@ int main(void) {
         draw_debris(cam.position);
         if (hasScreens) { post_set_billboards((float)GetTime(), 1.4f + 1.6f * ENV->lights); DrawModel(screens, (Vector3){0, 0, 0}, 1.0f, WHITE); }
         draw_trees(&world, cam.position);
+        if (hasScenery) { DrawModel(scTown, (Vector3){0, 0, 0}, 1.0f, WHITE); for (int i = 0; i < nScTrees; i++) DrawModel(scTrees[i], (Vector3){0, 0, 0}, 1.0f, WHITE); }
         post_end_objects();
         rlDrawRenderBatchActive();
         rlDisableDepthMask();                      // see-through decals: no depth writes, so overlaps just add up
@@ -4221,6 +4441,7 @@ int main(void) {
             env.sunCol = Vector3Scale(env.sunCol, 0.35f);
             env.fogDensity *= 2.2f;
         }
+        if (world.map == MAP_AIRPORT) env.fogDensity *= 0.22f;      // sea air: you can see the far shore
         post_present(&env, (float)GetTime(), weather_wet(), weather_rain());
 #ifdef __APPLE__
         if (profEnv && getenv("BEAMLITE_PROF_GPU")) { PMARK(6); glFinish(); PMARK(5); }   // GPU time of the post chain is booked with the GPU wait

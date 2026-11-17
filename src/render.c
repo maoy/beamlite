@@ -199,6 +199,10 @@ static const char *PAINT_FS = GLSL SKY_GLSL
 static const char *WATER_FS = GLSL SKY_GLSL
     "in vec3 fragPos; in vec3 fragNormal;\n"
     "uniform vec3 waterCol;\n"
+    "float sm01(float a, float b, float x) { float t = clamp((x - a) / (b - a), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }\n"
+    "float seaDist(vec2 q) {\n"                               // metres off the shore: the same shoreline the terrain uses
+    "  float shore = 252.0 + 40.0 * sm01(340.0, 270.0, q.x) - 190.0 * sm01(300.0, 420.0, q.x) + 14.0 * sin(q.x * 0.013) + 5.0 * sin(q.x * 0.041 + 1.0);\n"
+    "  return min(q.y - shore, max(q.x - 1325.0, max(116.0 - q.y, q.y - 216.0))); }\n"
     "float wave(vec2 p) { return noise(p * 0.22 + vec2(time * 0.30, time * 0.17)) + 0.5 * noise(p * 0.71 - vec2(time * 0.42, time * 0.26)); }\n"
     "vec3 skyLite(vec3 r) {\n"                                 // the sky without its clouds: cheap enough for a whole sea
     "  float sd = max(dot(r, sunDir), 0.0);\n"
@@ -215,9 +219,49 @@ static const char *WATER_FS = GLSL SKY_GLSL
     "  }\n"
     "  vec3 R = reflect(-V, N); R.y = abs(R.y) + 0.02; R = normalize(R);\n"
     "  float F = 0.03 + 0.97 * pow(1.0 - max(dot(N, V), 0.0), 5.0);\n"
-    "  vec3 col = mix(waterCol * (0.7 + 0.6 * h0), skyLite(R), F);\n"
+    "  float sd = seaDist(p);\n"
+    "  vec3 body = sd < -3.0 ? waterCol * vec3(1.5, 1.7, 1.2) : mix(waterCol * vec3(2.6, 3.4, 2.0), waterCol, 1.0 - exp(-max(sd, 0.0) / 28.0));\n"   // turquoise shallows
+    "  vec3 col = mix(body * (0.7 + 0.6 * h0), skyLite(R), F);\n"
+    "  float surf = smoothstep(-3.0, -1.0, sd) * smoothstep(5.0, 0.5, sd + 1.5 * sin(time * 0.7 + p.x * 0.05)) * smoothstep(0.35, 0.6, noise(p * 0.9 + vec2(time * 0.4, 0.0)));\n"
+    "  col = mix(col, vec3(0.75) * (sunCol.g * 0.5 + 0.25), surf * 0.7 * (1.0 - smoothstep(600.0, 1500.0, dist)));\n"
     "  col += sunCol * pow(max(dot(R, sunDir), 0.0), 220.0) * 3.0;\n"
     "  finalColor = vec4(pow(max(col, 0.0), vec3(1.0 / 2.2)), 1.0);\n"
+    "}\n";
+
+// The ground. Terrain meshes are vertex-coloured with the lighting baked in, which is flat and blurry
+// at 2 m (or 50 m) a vertex. This shader keeps that lighting but redraws the surface per pixel: on
+// grass it paints lush and dry patches, blade-scale grain up close, bare rock where the slope steepens
+// and dark canopy where the vertex alpha marks woodland; other surfaces get grain and staining. It
+// tells grass from tarmac by the colour itself, so snow and paving need no flags.
+static const char *TERRAIN_FS = GLSL SKY_GLSL
+    "in vec3 fragPos; in vec3 fragNormal;\n"
+    "uniform vec3 groundTint;\n"                              // colour of the baked light, green = 1
+    "float fbm3(vec2 p) { return 0.57 * noise(p) + 0.29 * noise(p * 2.07 + vec2(3.1, 7.7)) + 0.14 * noise(p * 4.3 + vec2(9.2, 1.3)); }\n"
+    "void main() {\n"
+    "  vec3 c = fragColor.rgb; vec2 p = fragPos.xz;\n"
+    "  float dist = length(camPos - fragPos);\n"
+    "  float near = 1.0 - smoothstep(30.0, 140.0, dist), mid = 1.0 - smoothstep(250.0, 1100.0, dist);\n"
+    "  float grass = smoothstep(1.10, 1.30, c.g / max(max(c.r, c.b), 1e-3));\n"
+    "  float n2 = mix(0.5, fbm3(p * 0.11 + 17.0), mid);\n"
+    "  if (grass > 0.01) {\n"
+    "    vec3 light = groundTint * (c.g / 0.53);\n"             // the baked light, read off the green of plain grass
+    "    float n1 = fbm3(p * 0.021), n4 = fbm3(p * 0.0023 + 5.0);\n"
+    "    float n3 = noise(p * 1.9) * 0.45 + noise(p * 5.3) * 0.3 + noise(p * 15.0) * 0.25;\n"
+    "    vec3 a = mix(vec3(0.19, 0.29, 0.10), vec3(0.36, 0.41, 0.17), smoothstep(0.25, 0.75, n1));\n"
+    "    a = mix(a, vec3(0.55, 0.50, 0.30), smoothstep(0.46, 0.74, 0.5 * n2 + 0.5 * n4) * 0.8);\n"     // dry, straw-coloured patches
+    "    a *= mix(1.0, 0.70 + 0.60 * n3, near) * (0.90 + 0.20 * n2);\n"
+    "    float slope = 1.0 - normalize(fragNormal).y;\n"
+    "    float rock = smoothstep(0.030, 0.085, slope + (n2 - 0.5) * 0.05 + (n1 - 0.5) * 0.03);\n"
+    "    vec3 rk = vec3(0.52, 0.50, 0.45) * (0.70 + 0.55 * fbm3(vec2(fragPos.y * 0.8 + n2 * 2.0, (p.x + p.y) * 0.06)));\n"
+    "    a = mix(a, rk, rock * 0.85);\n"
+    "    float forest = 1.0 - fragColor.a;\n"
+    "    float crown = mix(0.5, noise(p * 0.16) * 0.6 + noise(p * 0.41) * 0.4, mid);\n"
+    "    a = mix(a, vec3(0.085, 0.165, 0.06) * (0.65 + 0.8 * crown), forest * 0.92);\n"
+    "    c = mix(c, a * light, grass);\n"
+    "  }\n"
+    "  float g2 = noise(p * 3.1) * 0.5 + noise(p * 9.7) * 0.5, st = fbm3(p * 0.13 + 40.0);\n"
+    "  c *= mix(1.0, mix(1.0, 0.92 + 0.16 * g2, near) * (0.90 + 0.20 * mix(0.5, st, mid)), 1.0 - grass);\n"
+    "  finalColor = vec4(c, 1.0);\n"
     "}\n";
 
 // City facades. The city mesh is plain vertex-coloured boxes with the lighting baked in; a wall whose
@@ -537,7 +581,8 @@ static Shader shEmissive, shAtmos, shSSR, shComposite, shBright, shBlur, shFinal
 static int locIntensity, locAtmos[U_COUNT], locSSR[U_COUNT], locWet, locRain, locRoads, locNRoads, locNHighway, locRefl;
 static int locBrightTexel, locBrightThr, locBlurStep, locFinal[6];
 static RenderTexture2D scene, hdr, hdr2, refl[2], bl[3][2], aoRT[2];
-static Shader shPaint, shDepth, shAO, shWater, shCity;
+static Shader shPaint, shDepth, shAO, shWater, shCity, shTerrain;
+static int locTerrain[U_COUNT], locTerrainTint;
 static int locCity[U_COUNT], locCityNight;
 static int locWater[U_COUNT], locWaterCol;
 static int locPaint[U_COUNT], locPaintAmb, locPaintSun, locPaintGround, locPaintLamp, locAO[U_COUNT];
@@ -626,6 +671,9 @@ void post_init(void) {
     shCity = LoadShaderFromMemory(CITY_VS, CITY_FS);
     locCityNight = GetShaderLocation(shCity, "night");
     for (int i = 0; i < U_COUNT; i++) locCity[i] = GetShaderLocation(shCity, SKY_UNIFORMS[i]);
+    shTerrain = LoadShaderFromMemory(PAINT_VS, TERRAIN_FS);
+    for (int i = 0; i < U_COUNT; i++) locTerrain[i] = GetShaderLocation(shTerrain, SKY_UNIFORMS[i]);
+    locTerrainTint = GetShaderLocation(shTerrain, "groundTint");
     shWater = LoadShaderFromMemory(PAINT_VS, WATER_FS);
     locWaterCol = GetShaderLocation(shWater, "waterCol");
     for (int i = 0; i < U_COUNT; i++) locWater[i] = GetShaderLocation(shWater, SKY_UNIFORMS[i]);
@@ -775,6 +823,19 @@ void post_set_city(const Env *e, float time) {
     EndShaderMode();
 }
 
+// The ground shader: terrain models use it as their material; set its uniforms once a frame.
+Shader post_terrain_shader(void) { return shTerrain; }
+void post_set_terrain(const Env *e, float time) {
+    BeginShaderMode(shTerrain);
+    set_sky_uniforms(shTerrain, locTerrain, e, time);
+    Vector3 sd = Vector3Normalize(e->sunDir);
+    float up = sd.y > 0 ? sd.y : 0;
+    Vector3 t = Vector3Add(e->bakeAmbient, Vector3Scale(e->bakeSun, 0.35f + 0.65f * up));
+    t = Vector3Scale(t, 1.0f / t.y);
+    SetShaderValue(shTerrain, locTerrainTint, &t, SHADER_UNIFORM_VEC3);
+    EndShaderMode();
+}
+
 // Water: draw the sea surface (world-space vertices) between these.
 void post_water_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time) {
     BeginShaderMode(shWater);
@@ -782,7 +843,7 @@ void post_water_begin(const Env *e, Vector3 bakeAmb, Vector3 bakeSun, float time
     Vector3 sd = Vector3Normalize(e->sunDir);
     float up = sd.y > 0 ? sd.y : 0;
     float k = bakeAmb.y + bakeSun.y * up;
-    Vector3 wc = {0.010f * k, 0.060f * k, 0.085f * k};
+    Vector3 wc = {0.010f * k, 0.062f * k, 0.125f * k};
     SetShaderValue(shWater, locWaterCol, &wc, SHADER_UNIFORM_VEC3);
 }
 void post_water_end(void) { EndShaderMode(); }

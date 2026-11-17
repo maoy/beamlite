@@ -128,6 +128,9 @@ when you switch maps.
   of service buildings face the runway from it: two cargo sheds, the fire station and an office
   block. Three taxiway crossings over the runway connect it to the south side. The bay lies north and east of the field. To the south and west the land rises into
   coastal hills. The map reaches 6 km from the field in every direction, so there is room to fly.
+  The land stands clear of sea level everywhere, so the only water is the bay. Out past the field
+  the hills are wooded with oaks and umbrella pines, and winding roads lead to hill villages with
+  tiled roofs. That outlying scenery (woods, villages, roads) is for the view: it is not solid.
   An airliner waits lined up on runway 09: press **Tab** to fly it, and **Tab** again to fly the
   helicopter (see above). The parked aircraft are soft bodies and the buildings are solid. The field is graded flat, and this map has no washboard.
 
@@ -261,6 +264,10 @@ when you switch maps.
   rubber or brushed stainless. Diffuse light matches the world's baked lighting. On top come a
   Fresnel reflection of the procedural sky (with clouds), the ground and a dark skyline, and a sun
   highlight. Chrome and stainless are mirrors of that environment, sharp or blurred.
+- **Ground**: terrain keeps its baked vertex lighting but a shader redraws the surface per pixel:
+  lush and dry grass in patches, grain up close, bare rock where the slope steepens, dark canopy
+  where woodland is marked, and grain and staining on tarmac. The bay has turquoise shallows and
+  surf along the shore.
 - **Sun shadows**: a 2048² shadow map, an orthographic view down the sun's rays covering 60 m
   either side of your car, refreshed every other frame. Buildings, trees, vehicles and airliners
   cast. The post pass looks each pixel up in it. Because the world's sunlight is baked into its

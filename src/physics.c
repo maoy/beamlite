@@ -113,14 +113,21 @@ static float terrain_base(float x, float z) {
         if (x > 200.0f) d = fminf(d, fmaxf(fmaxf(0.0f, x - (AP_RWY_X1 + 70.0f)), fmaxf(0.0f, fmaxf(118.0f - z, z - 214.0f))));
         if (d < 1e8f) hills *= smooth01(0.0f, 60.0f, d);
         // Coastal hills well away from the field, for something to fly around.
-        if (r > 600.0f) far = smooth01(600.0f, 2000.0f, r) * smooth01(0.0f, 500.0f, fminf(d, 500.0f)) * smooth01(10.0f, 700.0f, -sea_dist(x, z)) *
-                              (55.0f + 70.0f * sinf(x * 0.0017f + 0.6f) * cosf(z * 0.0013f) + 35.0f * sinf(x * 0.0041f - z * 0.0037f));
+        float land = smooth01(5.0f, 280.0f, -sea_dist(x, z));
+        if (r > 600.0f) far = smooth01(600.0f, 2000.0f, r) * smooth01(0.0f, 500.0f, fminf(d, 500.0f)) * land *
+                              (85.0f + 105.0f * sinf(x * 0.0017f + 0.6f) * cosf(z * 0.0013f) + 50.0f * sinf(x * 0.0041f - z * 0.0037f) +
+                               26.0f * sinf(x * 0.0078f + z * 0.0041f) * sinf(z * 0.0069f + 1.1f));
+        // Outside the field the land stands clear of sea level and rolls: no ponds in the hollows.
+        float q = fmaxf(fabsf(x), fabsf(z));
+        far += smooth01(300.0f, 560.0f, q) * smooth01(0.0f, 300.0f, fminf(d, 300.0f)) * land *
+               (17.0f + 11.0f * (1.0f + sinf(x * 0.0060f + 1.0f) * cosf(z * 0.0052f)) + 8.0f * sinf(x * 0.013f - z * 0.011f + 2.0f));
     }
     float h = hills * (7.0f * sinf(x * 0.019f) * cosf(z * 0.016f) +
                        3.0f * sinf(x * 0.047f + z * 0.031f + 1.3f) +
                        1.2f * sinf(z * 0.11f - x * 0.05f)) + far;
     if (g_map == MAP_AIRPORT) {
         float sd = sea_dist(x, z);
+        if (h < 1.0f) h = 1.0f - 1.5f * (1.0f - expf((h - 1.0f) / 8.0f));   // hollows level off above sea level: the only water is the bay
         if (sd > 0.0f) h = lerpf(h, -4.5f - 40.0f * smooth01(40.0f, 600.0f, sd), smooth01(0.0f, 16.0f, sd));   // beach, then the seabed
     }
     // Launch ramp straight ahead of spawn.
