@@ -127,7 +127,7 @@ static float terrain_base(float x, float z) {
                        1.2f * sinf(z * 0.11f - x * 0.05f)) + far;
     if (g_map == MAP_AIRPORT) {
         float sd = sea_dist(x, z);
-        if (h < 1.0f) h = 1.0f - 1.5f * (1.0f - expf((h - 1.0f) / 8.0f));   // hollows level off above sea level: the only water is the bay
+        if (h < 0.0f) h = -0.6f * (1.0f - expf(h / 4.0f));   // hollows level off above sea level: the only water is the bay (flat ground at 0 is untouched)
         if (sd > 0.0f) h = lerpf(h, -4.5f - 40.0f * smooth01(40.0f, 600.0f, sd), smooth01(0.0f, 16.0f, sd));   // beach, then the seabed
     }
     // Launch ramp straight ahead of spawn.
