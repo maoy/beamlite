@@ -266,6 +266,13 @@ when you switch maps.
   the wall fades to its average so it doesn't shimmer. Position along the wall comes from the
   object-space position and a normal rebuilt from derivatives, so the pattern stays put on a
   building while it collapses.
+- **Building materials** (`src/render.c`, `material()`): everywhere else, the same shader lays a
+  surface on each wall and roof, measured in metres: brick in stretcher bond with mortar and the odd
+  overburnt brick, lapped boards, weathered render, ribbed steel sheet, concrete panels with joints
+  and tie holes, clay pantiles, slates, plank doors, and window glass that mirrors the sky. Houses
+  are brick, boarded or rendered under tile or slate, with framed, barred windows on a concrete
+  footing; hangars and warehouses are sheet steel; the terminal and control tower are concrete and
+  glass; the airfield fire station is red brick with a row of appliance doors.
 - **Vehicle paint** (`src/render.c`): vehicles and airliners are shaded per pixel. Each vertex
   carries a normal and a material: clear-coated paint, flame livery, chrome, glass, satin trim,
   rubber or brushed stainless. Diffuse light matches the world's baked lighting. On top come a

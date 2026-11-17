@@ -277,6 +277,13 @@ static void box_shell(MeshB *m, V3 mn, V3 mx, Color wall, Color top) {
     mb_quad(m, c[2], c[6], c[7], c[3], top, ref);    // top
 }
 
+// Surface materials the city shader draws on a wall or roof (render.c, material()).
+enum { WALL_BRICK = 200, WALL_SIDING, WALL_STUCCO, WALL_METAL, WALL_CONCRETE, WALL_TILE, WALL_SLATE, WALL_GLASS, WALL_PLANK };
+static void box_mat(MeshB *m, V3 mn, V3 mx, Color wall, Color top, int mat) { mbStyle = mat; box_shell(m, mn, mx, wall, top); mbStyle = 0; }
+static void facade_mat(MeshB *m, const Building *B, int s, float u, float y, float w, float h, float out, Color col, int mat) {
+    mbStyle = mat; facade_rect(m, B, s, u, y, w, h, out, col); mbStyle = 0;
+}
+
 // ---------------------------------------------------------------- lights ----
 // Glowing surfaces (lit windows, lamp heads) go in GLOW; additive light pools on walls and
 // the ground go in POOL. Both are drawn only when the environment has its lights on.
@@ -582,8 +589,18 @@ static void build_screens(const World *w) {
 
 // A window: glass, plus a warm glowing pane if someone is home.
 static float glowK = 1.0f;                  // brightness of lit panes (shopfronts are big, so dimmer)
+static Color winTrim;                       // when its alpha is set: a frame and sill in this colour round each window
+static int winBars;                         // and glazing bars across the pane
 static void window(MeshB *m, const Building *B, int s, float u, float y, float w, float h, float litP, Color glass) {
-    facade_rect(m, B, s, u, y, w, h, 0.04f, glass);
+    if (winTrim.a) {
+        facade_rect(m, B, s, u - 0.09f, y - 0.09f, w + 0.18f, h + 0.18f, 0.02f, winTrim);
+        facade_rect(m, B, s, u - 0.16f, y - 0.17f, w + 0.32f, 0.12f, 0.10f, winTrim);
+    }
+    facade_mat(m, B, s, u, y, w, h, 0.04f, glass, WALL_GLASS);
+    if (winBars) {
+        facade_rect(m, B, s, u + w * 0.5f - 0.025f, y, 0.05f, h, 0.058f, winTrim);
+        facade_rect(m, B, s, u, y + h * 0.55f, w, 0.05f, 0.058f, winTrim);
+    }
     if (brnd() < litP) { mbFlat = 1; facade_rect(&GLOW, B, s, u + 0.06f, y + 0.06f, w - 0.12f, h - 0.12f, 0.05f, scale_col(WARM, glowK * (0.75f + 0.25f * brnd()))); mbFlat = 0; }
 }
 
@@ -594,14 +611,16 @@ static const Color LIVERY[] = {{200, 30, 40, 255}, {20, 50, 120, 255}, {0, 130, 
 // Terminal: pale walls, a glass curtain on both long faces, a canopy over the forecourt kerb.
 static void build_terminal(MeshB *m, const Building *B) {
     bseed = B->seed;
-    box_shell(m, B->mn, B->mx, (Color){212, 214, 218, 255}, (Color){150, 154, 160, 255});
+    box_mat(m, B->mn, B->mx, (Color){212, 214, 218, 255}, (Color){150, 154, 160, 255}, WALL_CONCRETE);
     float H = B->mx.y - B->ground, len = B->mx.x - B->mn.x;
     Color glass = {52, 70, 90, 255};
+    winTrim = (Color){104, 110, 118, 255}; winBars = 1;     // aluminium frames
     for (int s = 2; s <= 3; s++) {                         // +z (airside) and -z (landside) faces
         int nc = (int)(len / 3.0f);
         for (int i = 0; i < nc; i++)
             for (float y = 0.6f; y + 3.4f < H - 2.0f; y += 4.2f) window(m, B, s, i * 3.0f + 0.15f, y, 2.7f, 3.4f, 0.22f, glass);
     }
+    winTrim = (Color){0}; winBars = 0;
     for (int s = 0; s <= 1; s++) facade_rect(m, B, s, 2.0f, H - 3.0f, (B->mx.z - B->mn.z) - 4.0f, 1.6f, 0.04f, (Color){30, 90, 160, 255});
     float g = B->ground;
     box_shell(m, v3(B->mn.x - 2, g + 7.0f, B->mn.z - 4.5f), v3(B->mx.x + 2, g + 7.6f, B->mn.z), (Color){190, 194, 200, 255}, (Color){170, 174, 180, 255});
@@ -616,9 +635,9 @@ static void build_atc(MeshB *m, const Building *B) {
     float g = B->ground, top = B->mx.y, cabLo = top - 7.0f, cabHi = top - 2.5f;
     V3 c = v3((B->mn.x + B->mx.x) * 0.5f, 0, (B->mn.z + B->mx.z) * 0.5f);
     Color conc = {196, 194, 188, 255};
-    box_shell(m, v3(B->mn.x + 1, B->mn.y, B->mn.z + 1), v3(B->mx.x - 1, cabLo, B->mx.z - 1), conc, conc);
-    box_shell(m, v3(c.x - 6, cabLo, c.z - 6), v3(c.x + 6, cabLo + 0.8f, c.z + 6), conc, conc);
-    box_shell(m, v3(c.x - 5.6f, cabLo + 0.8f, c.z - 5.6f), v3(c.x + 5.6f, cabHi, c.z + 5.6f), (Color){44, 58, 72, 255}, conc);
+    box_mat(m, v3(B->mn.x + 1, B->mn.y, B->mn.z + 1), v3(B->mx.x - 1, cabLo, B->mx.z - 1), conc, conc, WALL_CONCRETE);
+    box_mat(m, v3(c.x - 6, cabLo, c.z - 6), v3(c.x + 6, cabLo + 0.8f, c.z + 6), conc, conc, WALL_CONCRETE);
+    box_mat(m, v3(c.x - 5.6f, cabLo + 0.8f, c.z - 5.6f), v3(c.x + 5.6f, cabHi, c.z + 5.6f), (Color){44, 58, 72, 255}, conc, WALL_GLASS);
     mbFlat = 1;
     for (int s = 0; s < 4; s++) {                           // lit cab glazing
         V3 n = s == 0 ? v3(1, 0, 0) : s == 1 ? v3(-1, 0, 0) : s == 2 ? v3(0, 0, 1) : v3(0, 0, -1);
@@ -637,10 +656,10 @@ static void build_atc(MeshB *m, const Building *B) {
 // Hangar: corrugated walls, a low curved-look gable roof, huge doors with a lit gap.
 static void build_hangar(MeshB *m, const Building *B) {
     Color wall = {168, 172, 178, 255};
-    box_shell(m, B->mn, B->mx, wall, wall);
+    box_mat(m, B->mn, B->mx, wall, wall, WALL_METAL);
     float H = B->mx.y - B->ground, len = B->mx.x - B->mn.x;
     for (float u = 0.6f; u < len; u += 1.2f) facade_rect(m, B, 3, u, 0.0f, 0.12f, H, 0.03f, (Color){150, 154, 160, 255});   // ribs (back)
-    facade_rect(m, B, 2, 1.5f, 0.0f, len - 3.0f, H * 0.82f, 0.04f, (Color){74, 78, 86, 255});                          // doors
+    facade_mat(m, B, 2, 1.5f, 0.0f, len - 3.0f, H * 0.82f, 0.04f, (Color){74, 78, 86, 255}, WALL_METAL);               // doors
     for (float u = 1.5f; u < len - 1.5f; u += (len - 3.0f) / 6.0f) facade_rect(m, B, 2, u, 0.0f, 0.12f, H * 0.82f, 0.05f, (Color){50, 52, 58, 255});
     mbFlat = 1; facade_rect(&GLOW, B, 2, len * 0.5f - 2.5f, 0.0f, 5.0f, H * 0.82f - 0.2f, 0.06f, scale_col(WARM, 0.55f)); mbFlat = 0;   // doors ajar
     V3 o, a, n; float l;
@@ -650,10 +669,12 @@ static void build_hangar(MeshB *m, const Building *B) {
     float e = 0.5f, wt = B->mx.y, rt = B->mx.y + B->roof, cx = (B->mn.x + B->mx.x) * 0.5f;
     V3 ref = v3(cx, B->mx.y - 2, (B->mn.z + B->mx.z) * 0.5f);
     Color roofc = {130, 134, 140, 255};
+    mbStyle = WALL_METAL;
     mb_quad(m, v3(B->mn.x - e, wt, B->mn.z - e), v3(B->mn.x - e, wt, B->mx.z + e), v3(cx, rt, B->mx.z + e), v3(cx, rt, B->mn.z - e), roofc, ref);
     mb_quad(m, v3(B->mx.x + e, wt, B->mn.z - e), v3(B->mx.x + e, wt, B->mx.z + e), v3(cx, rt, B->mx.z + e), v3(cx, rt, B->mn.z - e), roofc, ref);
     mb_tri(m, v3(B->mn.x, wt, B->mn.z), v3(B->mx.x, wt, B->mn.z), v3(cx, rt, B->mn.z), wall, ref);
     mb_tri(m, v3(B->mn.x, wt, B->mx.z), v3(B->mx.x, wt, B->mx.z), v3(cx, rt, B->mx.z), wall, ref);
+    mbStyle = 0;
 }
 
 // Tall apron floodlight mast.
@@ -1058,7 +1079,32 @@ static void build_building(MeshB *m, const Building *B) {
     Color glass = {48, 62, 80, 255}, glassLit = {92, 118, 140, 255}, frame = {70, 70, 72, 255};
     float H = B->mx.y - B->ground;                  // wall height above the street
 
-    box_shell(m, B->mn, B->mx, wall, city || B->kind == BLD_SHOP ? (Color){96, 96, 100, 255} : roof);
+    // What it is built of. Drawn from the seed on its own, so the rest of the building stays as it was.
+    static const Color BRICKS[] = {{160, 84, 66, 255}, {142, 74, 58, 255}, {178, 112, 84, 255}, {192, 162, 124, 255}, {126, 76, 64, 255}};
+    unsigned ms = B->seed * 2654435761u; ms ^= ms >> 15; ms *= 0x2c1b3c6du; ms ^= ms >> 12;
+    float mr = (ms & 0xffff) / 65536.0f;
+    Color brick = BRICKS[(ms >> 20) % 5];
+    int wmat = WALL_STUCCO, rmat = roof.r > 95 ? WALL_TILE : WALL_SLATE;
+    Color trim = {236, 232, 224, 255};
+    switch (B->kind) {
+        case BLD_HOUSE: wmat = mr < 0.42f ? WALL_BRICK : mr < 0.72f ? WALL_SIDING : WALL_STUCCO; break;
+        case BLD_SHOP: wmat = cityMap == MAP_AIRPORT || mr < 0.55f ? WALL_BRICK : WALL_STUCCO; if (cityMap == MAP_AIRPORT) brick = BRICKS[0]; break;
+        case BLD_APARTMENT: wmat = mr < 0.6f ? WALL_BRICK : WALL_CONCRETE; break;
+        case BLD_TOWER: wmat = WALL_CONCRETE; break;
+        case BLD_WAREHOUSE: wmat = mr < 0.3f ? WALL_BRICK : WALL_METAL; rmat = WALL_METAL; break;
+    }
+    if (wmat == WALL_BRICK) { wall = brick; trim = (Color){212, 206, 194, 255}; }
+    int homes = B->kind == BLD_HOUSE || B->kind == BLD_APARTMENT;
+    winTrim = homes ? trim : (Color){0};
+    winBars = B->kind == BLD_HOUSE;
+
+    box_mat(m, B->mn, B->mx, wall, city || B->kind == BLD_SHOP ? (Color){96, 96, 100, 255} : roof, wmat);
+    if (homes || B->kind == BLD_SHOP)               // a concrete footing, down into the slope
+        for (int s = 0; s < 4; s++) {
+            V3 o, a, n; float len;
+            facade(B, s, &o, &a, &n, &len);
+            facade_mat(m, B, s, -0.03f, B->mn.y - B->ground, len + 0.06f, B->ground - B->mn.y + 0.35f, 0.03f, (Color){146, 144, 138, 255}, WALL_CONCRETE);
+        }
 
     for (int s = 0; s < 4; s++) {
         V3 o, a, n; float len;
@@ -1088,31 +1134,44 @@ static void build_building(MeshB *m, const Building *B) {
                 }
             if (front) {
                 float u = (nc / 2) * sp + sp * 0.5f;
-                facade_rect(m, B, s, u - 0.6f, 0.0f, 1.2f, 2.2f, 0.04f, (Color){90, 60, 40, 255});
+                facade_rect(m, B, s, u - 0.72f, 0.0f, 1.44f, 2.32f, 0.045f, trim);
+                facade_mat(m, B, s, u - 0.6f, 0.0f, 1.2f, 2.2f, 0.06f, (Color){104, 66, 42, 255}, WALL_PLANK);
                 wall_lamp(m, B, s, B->kind == BLD_HOUSE ? u + 1.1f : u, B->kind == BLD_HOUSE ? 2.3f : 3.0f);
             }
         } break;
         case BLD_SHOP:
-            if (front) {                            // shopfront, sign band, door
+            if (front && cityMap == MAP_AIRPORT) {  // the airfield fire station: a row of red appliance doors
+                int nb = (int)((len - 2.0f) / 5.2f);
+                float sp = (len - 2.0f) / nb;
+                for (int i = 0; i < nb; i++) {
+                    float u = 1.0f + i * sp + (sp - 4.2f) * 0.5f;
+                    facade_rect(m, B, s, u - 0.15f, 0.0f, 4.5f, 4.75f, 0.03f, trim);
+                    facade_mat(m, B, s, u, 0.0f, 4.2f, 4.6f, 0.05f, (Color){176, 38, 32, 255}, WALL_METAL);
+                    facade_mat(m, B, s, u + 0.5f, 2.6f, 3.2f, 0.8f, 0.07f, glass, WALL_GLASS);
+                    wall_lamp(m, B, s, u + 2.1f, 5.4f);
+                }
+                facade_rect(m, B, s, 0.4f, H - 1.5f, len - 0.8f, 0.8f, 0.06f, (Color){232, 228, 220, 255});
+            } else if (front) {                     // shopfront, sign band, door
                 glowK = 0.42f; window(m, B, s, 0.8f, 0.5f, len - 1.6f, 2.5f, 0.75f, glass); glowK = 1.0f;
                 wall_lamp(m, B, s, len * 0.5f, 3.3f);
                 facade_rect(m, B, s, 0.4f, H - 1.4f, len - 0.8f, 0.9f, 0.06f, SIGNS[(int)(brnd() * 5)]);
                 facade_rect(m, B, s, len * 0.5f - 0.8f, 0.0f, 1.6f, 2.4f, 0.07f, frame);
             } else if (len > 6) {
-                for (float u = 2.0f; u + 1.2f < len - 1.0f; u += 4.0f) facade_rect(m, B, s, u, 2.0f, 1.2f, 1.0f, 0.04f, glass);
+                for (float u = 2.0f; u + 1.2f < len - 1.0f; u += 4.0f) facade_mat(m, B, s, u, 2.0f, 1.2f, 1.0f, 0.04f, glass, WALL_GLASS);
             }
             break;
         case BLD_WAREHOUSE:
             if (front)
                 for (float u = 2.0f; u + 4.0f < len - 1.0f; u += 6.0f) {
-                    facade_rect(m, B, s, u, 0.0f, 4.0f, 4.5f, 0.04f, (Color){58, 62, 68, 255});
+                    facade_mat(m, B, s, u, 0.0f, 4.0f, 4.5f, 0.04f, (Color){58, 62, 68, 255}, WALL_METAL);
                     for (float y = 0.5f; y < 4.4f; y += 0.5f) facade_rect(m, B, s, u, y, 4.0f, 0.04f, 0.05f, (Color){40, 42, 46, 255});
                     wall_lamp(m, B, s, u + 2.0f, 5.3f);
                 }
-            for (float u = 1.5f; u + 3.0f < len - 1.0f; u += 4.5f) facade_rect(m, B, s, u, H - 1.6f, 3.0f, 0.8f, 0.04f, glass);
+            for (float u = 1.5f; u + 3.0f < len - 1.0f; u += 4.5f) facade_mat(m, B, s, u, H - 1.6f, 3.0f, 0.8f, 0.04f, glass, WALL_GLASS);
             break;
         }
     }
+    winTrim = (Color){0}; winBars = 0;
 
     // Roofs.
     V3 mn = B->mn, mx = B->mx;
@@ -1121,28 +1180,34 @@ static void build_building(MeshB *m, const Building *B) {
         V3 ref = v3((mn.x + mx.x) * 0.5f, mx.y - 1.0f, (mn.z + mx.z) * 0.5f);
         if (mx.x - mn.x >= mx.z - mn.z) {
             float cz = (mn.z + mx.z) * 0.5f;
+            mbStyle = rmat;
             mb_quad(m, v3(mn.x - e, wt, mn.z - e), v3(mx.x + e, wt, mn.z - e), v3(mx.x + e, rt, cz), v3(mn.x - e, rt, cz), roof, ref);
             mb_quad(m, v3(mn.x - e, wt, mx.z + e), v3(mx.x + e, wt, mx.z + e), v3(mx.x + e, rt, cz), v3(mn.x - e, rt, cz), roof, ref);
+            mbStyle = wmat;
             mb_tri(m, v3(mn.x, mx.y, mn.z), v3(mn.x, mx.y, mx.z), v3(mn.x, rt, cz), wall, ref);
             mb_tri(m, v3(mx.x, mx.y, mn.z), v3(mx.x, mx.y, mx.z), v3(mx.x, rt, cz), wall, ref);
+            mbStyle = 0;
         } else {
             float cx = (mn.x + mx.x) * 0.5f;
+            mbStyle = rmat;
             mb_quad(m, v3(mn.x - e, wt, mn.z - e), v3(mn.x - e, wt, mx.z + e), v3(cx, rt, mx.z + e), v3(cx, rt, mn.z - e), roof, ref);
             mb_quad(m, v3(mx.x + e, wt, mn.z - e), v3(mx.x + e, wt, mx.z + e), v3(cx, rt, mx.z + e), v3(cx, rt, mn.z - e), roof, ref);
+            mbStyle = wmat;
             mb_tri(m, v3(mn.x, mx.y, mn.z), v3(mx.x, mx.y, mn.z), v3(cx, rt, mn.z), wall, ref);
             mb_tri(m, v3(mn.x, mx.y, mx.z), v3(mx.x, mx.y, mx.z), v3(cx, rt, mx.z), wall, ref);
+            mbStyle = 0;
         }
         if (B->kind == BLD_HOUSE && brnd() < 0.7f) {    // chimney
             float x = lerpf(mn.x + 1.5f, mx.x - 1.5f, brnd()), z = lerpf(mn.z + 1.5f, mx.z - 1.5f, brnd());
-            box_shell(m, v3(x - 0.35f, mx.y, z - 0.35f), v3(x + 0.35f, rt + 0.6f, z + 0.35f), (Color){150, 80, 64, 255}, (Color){60, 50, 48, 255});
+            box_mat(m, v3(x - 0.35f, mx.y, z - 0.35f), v3(x + 0.35f, rt + 0.6f, z + 0.35f), (Color){150, 80, 64, 255}, (Color){60, 50, 48, 255}, WALL_BRICK);
         }
     } else {                                        // flat: parapet and rooftop plant
         Color pc = {(unsigned char)(wall.r * 0.85f), (unsigned char)(wall.g * 0.85f), (unsigned char)(wall.b * 0.85f), 255};
         float t = 0.3f, py = mx.y + 0.6f;
-        box_shell(m, v3(mn.x, mx.y, mn.z), v3(mx.x, py, mn.z + t), pc, pc);
-        box_shell(m, v3(mn.x, mx.y, mx.z - t), v3(mx.x, py, mx.z), pc, pc);
-        box_shell(m, v3(mn.x, mx.y, mn.z), v3(mn.x + t, py, mx.z), pc, pc);
-        box_shell(m, v3(mx.x - t, mx.y, mn.z), v3(mx.x, py, mx.z), pc, pc);
+        box_mat(m, v3(mn.x, mx.y, mn.z), v3(mx.x, py, mn.z + t), pc, pc, wmat);
+        box_mat(m, v3(mn.x, mx.y, mx.z - t), v3(mx.x, py, mx.z), pc, pc, wmat);
+        box_mat(m, v3(mn.x, mx.y, mn.z), v3(mn.x + t, py, mx.z), pc, pc, wmat);
+        box_mat(m, v3(mx.x - t, mx.y, mn.z), v3(mx.x, py, mx.z), pc, pc, wmat);
         if (city || B->kind == BLD_WAREHOUSE) {
             int units = 1 + (int)(brnd() * 3);
             for (int i = 0; i < units; i++) {
@@ -1506,14 +1571,17 @@ static void sc_house(MeshB *m, float cx, float cz, float yaw, float w, float d, 
     V3 ctr = v3(cx, base + h * 0.5f, cz);
     for (int i = 0; i < 4; i++) {
         V3 a = q[i], b = q[(i + 1) % 4];
-        mb_quad(m, v3(a.x, base - 7, a.z), v3(b.x, base - 7, b.z), v3(b.x, top, b.z), v3(a.x, top, a.z), wall, ctr);
+        mbStyle = WALL_STUCCO; mb_quad(m, v3(a.x, base - 7, a.z), v3(b.x, base - 7, b.z), v3(b.x, top, b.z), v3(a.x, top, a.z), wall, ctr); mbStyle = 0;
     }
     V3 r0 = v3((e[0].x + e[3].x) * 0.5f, ridge, (e[0].z + e[3].z) * 0.5f), r1 = v3((e[1].x + e[2].x) * 0.5f, ridge, (e[1].z + e[2].z) * 0.5f);
     for (int i = 0; i < 4; i++) e[i].y = top - 0.15f;
+    mbStyle = WALL_TILE;
     mb_quad(m, e[0], e[1], r1, r0, roof, ctr);
     mb_quad(m, e[3], e[2], r1, r0, roof, ctr);
+    mbStyle = WALL_STUCCO;
     mb_tri(m, v3(q[0].x, top, q[0].z), v3(q[3].x, top, q[3].z), r0, wall, ctr);
     mb_tri(m, v3(q[1].x, top, q[1].z), v3(q[2].x, top, q[2].z), r1, wall, ctr);
+    mbStyle = 0;
 }
 static float sc_road_dist2(float x, float z) {
     float best = 1e12f;
@@ -1603,6 +1671,7 @@ static void build_scenery(const World *w) {
         sc_house(&tm, cx + 9 * cosf(ang), cz + 9 * sinf(ang), ang, 16, 9, 8, WALLS[0], ROOFS[0]);
     }
     scTown = mb_model(&tm);
+    scTown.materials[0].shader = post_city_shader();
     if (getenv("BEAMLITE_PROF")) for (int v = 0; v < nScVil; v++) printf("village %d at x %.0f z %.0f, ground %.0f m\n", v, scVil[v][0], scVil[v][1], terrain_height(scVil[v][0], scVil[v][1]));
 
     // Trees: thick where the woodland mask is, a scatter elsewhere. One lumpy crown each.

@@ -278,6 +278,7 @@ static const char *FOLIAGE_FS = GLSL
 // ribbons, piers), each pane reflecting the sky or, when someone is in, lit from inside. Position
 // along the wall comes from the object-space position and a normal rebuilt from its derivatives, so no
 // extra vertex data is needed and the pattern stays put on a building that is collapsing.
+// Styles 200 and up are plain materials instead (brick, boards, sheet steel, tiles, glass...): see material().
 static const char *CITY_VS =
     "#version 330\n"
     "in vec3 vertexPosition; in vec4 vertexColor;\n"
@@ -292,10 +293,93 @@ static const char *CITY_FS = GLSL SKY_GLSL
     "  float sd = max(dot(r, sunDir), 0.0);\n"
     "  return mix(horizonCol(r), zenith, pow(clamp(r.y, 0.0, 1.0), 0.5)) + sunCol * (pow(sd, 6.0) * 0.30 + pow(sd, 90.0) * 0.9); }\n"
     "float band(float f, float a, float b, float w) { return smoothstep(a - w, a + w, f) * (1.0 - smoothstep(b - w, b + w, f)); }\n"
+    // Building materials (styles 200 and up): the wall or roof colour comes in already lit, and this
+    // lays the surface on it in metres: brick courses, lapped boards, render, ribbed sheet, concrete
+    // panels, tiles, slates, glass that mirrors the sky, plank doors. Each fades to its average colour
+    // once its pattern is smaller than a pixel.
+    "float lum(vec3 c) { return dot(c, vec3(0.30, 0.59, 0.11)); }\n"
+    "vec3 material(float st, vec3 base) {\n"
+    "  vec3 N = normalize(cross(dFdx(objPos), dFdy(objPos)));\n"
+    "  vec3 V = normalize(fragPos - camPos);\n"
+    "  if (dot(N, V) > 0.0) N = -N;\n"
+    "  float up = abs(N.y);\n"
+    "  vec2 p;\n"                                               // metres across the surface and up it
+    "  if (up > 0.97) p = objPos.xz;\n"
+    "  else { vec3 H = normalize(vec3(N.x, 0.0, N.z)); p = vec2(dot(objPos, vec3(-H.z, 0.0, H.x)), objPos.y / max(sqrt(1.0 - N.y * N.y), 0.25)); }\n"
+    "  vec2 px = max(fwidth(p), vec2(1e-4));\n"
+    "  float blot = fbm(p * 0.45 + st);\n"                      // weathering: broad patches
+    "  float streak = noise(vec2(p.x * 1.2, p.y * 0.13) + st);\n"   // and runs down the wall
+    "  vec3 col = base;\n"
+    "  bool roofing = st > 202.5 && st < 203.5 || st > 204.5 && st < 206.5;\n"
+    "  if (up > 0.5 && !roofing) {\n"                           // a flat roof: felt and grit
+    "    col = base * (0.84 + 0.20 * noise(p * 9.0)) * (0.88 + 0.24 * blot);\n"
+    "    col *= 1.0 - 0.12 * (1.0 - band(fract(p.x / 1.0), 0.03, 0.97, px.x));\n"
+    "  } else if (st < 200.5) {\n"                              // brick, stretcher bond
+    "    const vec2 B = vec2(0.29, 0.095);\n"
+    "    float row = floor(p.y / B.y);\n"
+    "    vec2 q = vec2(p.x / B.x + 0.5 * mod(row, 2.0), p.y / B.y), id = floor(q), f = fract(q), w = px / B;\n"
+    "    float brick = band(f.x, 0.035, 0.965, w.x) * band(f.y, 0.11, 0.89, w.y);\n"
+    "    vec3 bc = base * (0.78 + 0.44 * hash(id + st));\n"
+    "    bc = mix(bc, bc * vec3(0.72, 0.68, 0.70), step(0.93, hash(id + 7.3)));\n"      // overburnt ones
+    "    bc *= 0.93 + 0.14 * noise(p * 42.0);\n"
+    "    vec3 mortar = base * 0.35 + vec3(lum(base)) * 0.80;\n"
+    "    col = mix(mix(mortar, bc, brick), mix(mortar, base, 0.80), smoothstep(0.30, 1.2, w.y));\n"
+    "    col *= (0.88 + 0.22 * blot) * (0.94 + 0.10 * streak);\n"
+    "  } else if (st < 201.5) {\n"                              // lapped boards
+    "    float q = p.y / 0.17, row = floor(q), f = fract(q), w = px.y / 0.17;\n"
+    "    float k = (1.0 - 0.32 * smoothstep(0.70, 0.98, f)) * (1.0 + 0.07 * (1.0 - smoothstep(0.0, 0.14, f)));\n"
+    "    k *= 0.95 + 0.10 * noise(vec2(p.x * 2.5 + row * 13.7, row));\n"
+    "    k *= 1.0 - 0.25 * (1.0 - band(fract(p.x / 3.6 + hash(vec2(row, st))), 0.004, 0.996, px.x / 3.6));\n"   // butt joints
+    "    col = base * mix(k, 0.93, smoothstep(0.30, 1.1, w)) * (0.94 + 0.10 * blot);\n"
+    "  } else if (st < 202.5) {\n"                              // render
+    "    col = base * (0.88 + 0.14 * fbm(p * 5.0) + 0.10 * blot) * (0.93 + 0.12 * streak);\n"
+    "  } else if (st < 203.5) {\n"                              // ribbed steel sheet
+    "    float a = p.x / 0.22, w = px.x / 0.22;\n"
+    "    float k = 0.90 + 0.16 * sin(6.2831 * a) * (1.0 - smoothstep(0.22, 0.65, w));\n"
+    "    k *= 0.95 + 0.10 * hash(vec2(floor(a / 4.0), floor(p.y / 2.6)) + st);\n"                                // sheet to sheet
+    "    k *= 1.0 - 0.22 * (1.0 - band(fract(p.y / 2.6), 0.012, 0.988, px.y / 2.6));\n"                          // laps
+    "    col = base * k * (0.90 + 0.16 * streak) * (0.95 + 0.08 * blot);\n"
+    "  } else if (st < 204.5) {\n"                              // concrete panels
+    "    const vec2 P = vec2(2.4, 1.35);\n"
+    "    vec2 q = p / P, id = floor(q), f = fract(q), w = px / P;\n"
+    "    float joint = 1.0 - band(f.x, 0.007, 0.993, w.x) * band(f.y, 0.012, 0.988, w.y);\n"
+    "    vec2 t = (fract(q * 2.0) - 0.5) * P * 0.5;\n"
+    "    float tie = (1.0 - smoothstep(0.025, 0.045, length(t))) * (1.0 - smoothstep(0.01, 0.04, px.y));\n"     // formwork tie holes
+    "    col = base * (0.93 + 0.10 * hash(id + st)) * (0.88 + 0.20 * blot) * (0.96 + 0.07 * noise(p * 18.0)) * (0.90 + 0.16 * streak);\n"
+    "    col *= (1.0 - 0.42 * joint) * (1.0 - 0.35 * tie);\n"
+    "  } else if (st < 205.5) {\n"                              // clay pantiles
+    "    const vec2 T = vec2(0.27, 0.33);\n"
+    "    vec2 q = p / T, id = floor(q), f = fract(q), w = px / T;\n"
+    "    float k = (0.80 + 0.26 * sin(3.14159 * f.x)) * (1.0 - 0.38 * smoothstep(0.72, 1.0, f.y));\n"
+    "    k *= 0.82 + 0.34 * hash(id + st);\n"
+    "    col = base * mix(k, 0.90, smoothstep(0.30, 1.1, max(w.x, w.y))) * (0.86 + 0.26 * blot);\n"
+    "  } else if (st < 206.5) {\n"                              // slates
+    "    const vec2 T = vec2(0.42, 0.26);\n"
+    "    float row = floor(p.y / T.y);\n"
+    "    vec2 q = vec2(p.x / T.x + 0.5 * mod(row, 2.0), p.y / T.y), id = floor(q), f = fract(q), w = px / T;\n"
+    "    float k = band(f.x, 0.02, 0.98, w.x) * 0.25 + 0.75;\n"
+    "    k *= (1.0 - 0.30 * smoothstep(0.80, 1.0, f.y)) * (0.84 + 0.30 * hash(id + st));\n"
+    "    col = base * mix(k, 0.92, smoothstep(0.30, 1.1, max(w.x, w.y))) * (0.88 + 0.22 * blot);\n"
+    "  } else if (st < 207.5) {\n"                              // window glass
+    "    vec3 Nh = normalize(vec3(N.x, 0.0, N.z) + vec3(1e-5, 0.0, 0.0));\n"
+    "    vec3 R = reflect(V, Nh);\n"
+    "    vec3 refl = pow(skyLite(normalize(vec3(R.x, abs(R.y) * 0.7 + 0.04, R.z))), vec3(1.0 / 2.2));\n"
+    "    float open = smoothstep(-0.10, 0.22, R.y + 0.22 * (noise(vec2(p.x * 0.6 + st, 2.0)) - 0.5));\n"        // sky above, the street's dark shapes below
+    "    refl = mix(vec3(lum(refl)) * vec3(0.34, 0.38, 0.34), refl, open);\n"
+    "    float F = clamp(0.14 + 0.86 * pow(1.0 - max(dot(-V, Nh), 0.0), 4.0), 0.0, 1.0);\n"
+    "    col = mix(base * (0.55 + 0.25 * noise(p * 1.7)), refl * 0.9, F * 0.75 + 0.18);\n"
+    "  } else {\n"                                              // plank door
+    "    float q = p.x / 0.14, f = fract(q), w = px.x / 0.14;\n"
+    "    col = base * (0.88 + 0.22 * hash(vec2(floor(q), st))) * (0.92 + 0.14 * noise(vec2(p.x * 70.0, p.y * 3.0)));\n"
+    "    col *= 1.0 - 0.45 * (1.0 - band(f, 0.07, 0.93, w)) * (1.0 - smoothstep(0.3, 1.0, w));\n"
+    "  }\n"
+    "  return col;\n"
+    "}\n"
     "void main() {\n"
     "  float st = floor(fragColor.a * 255.0 + 0.5);\n"
     "  vec3 base = fragColor.rgb;\n"
     "  if (st > 249.5) { finalColor = vec4(base, 1.0); return; }\n"
+    "  if (st > 199.5) { finalColor = vec4(material(st, base), 1.0); return; }\n"
     "  vec3 N = normalize(cross(dFdx(objPos), dFdy(objPos)));\n"
     "  if (abs(N.y) > 0.5) { finalColor = vec4(base, 1.0); return; }\n"
     "  vec3 V = normalize(fragPos - camPos);\n"
