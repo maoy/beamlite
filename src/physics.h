@@ -28,7 +28,7 @@ static inline V3 vrot(V3 v, V3 k, float a) {
 #define MAX_CARS 14
 #define MAX_BOXES 1000
 #define MAX_BLD 900
-#define MAX_TREES 1024
+#define MAX_TREES 2048
 #define GRID_N 100               // collision grid over the 600 m world
 #define GRID_CELL 6.0f
 #define MAX_GRID_ITEMS 32000
@@ -178,7 +178,7 @@ typedef struct { int bld; V3 p, n; float imp; int collapse; } BldEvent;
 #define MAX_BLD_EVENTS 64
 
 // Trees collide as a vertical trunk cylinder. Thin ones snap and fall when hit hard enough.
-enum { TREE_CONIFER, TREE_BROADLEAF };
+enum { TREE_CONIFER, TREE_BROADLEAF, TREE_POLE };     // a pole is a street lamp: a thin steel post that shears off
 typedef struct {
     float x, y, z;              // trunk base
     float r, h;                 // trunk radius, overall height

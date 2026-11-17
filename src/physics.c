@@ -2354,7 +2354,8 @@ int world_add_tree(World *w, float x, float z, float h, int kind) {
     t->h = h; t->kind = (unsigned char)kind;
     t->r = (kind == TREE_CONIFER ? 0.025f : 0.0275f) * h;
     // Saplings and young trees snap; mature trunks stop a truck dead.
-    if (t->r < 0.17f) t->breakImp = 3500.0f;
+    if (kind == TREE_POLE) { t->r = 0.16f; t->breakImp = 12000.0f; }    // stops a slow car, shears off under a fast one
+    else if (t->r < 0.17f) t->breakImp = 3500.0f;
     else if (t->r < 0.25f) t->breakImp = 14000.0f;
     return w->ntree++;
 }
@@ -2658,7 +2659,7 @@ void world_init(World *w, int map) {
     for (float z = -80; z > -250; z -= 12) { try_tree(w, 12, z, frange(6, 10), TREE_CONIFER, 2.0f); try_tree(w, -12, z - 6, frange(6, 10), TREE_CONIFER, 2.0f); }
 
     // Forest on the hills, thicker further out; a few loners on the flat.
-    for (int i = 0; i < 2600 && w->ntree < MAX_TREES - 40; i++) {
+    for (int i = 0; i < 2600 && w->ntree < 1024 - 40; i++) {
         float r = frange(95, 290), a = frange(0, 6.2831853f);
         float x = r * cosf(a), z = r * sinf(a);
         if (in_city(x, z) || in_airport(x, z)) continue;

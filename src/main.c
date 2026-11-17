@@ -334,8 +334,25 @@ static void wall_lamp(MeshB *m, const Building *B, int s, float u, float y) {
     ground_pool(g, 4.2f, scale_col(LAMP, 0.42f));
 }
 
+// Street lamps are solid: each is also a pole in the world's tree list, so a car that hits one hard
+// enough shears it off. They are placed once when the map loads (street_lamp records them), then
+// baked into the city meshes from that list, each with its vertex ranges so it can be blanked when
+// it goes down; the fallen pole is drawn on its own.
+#define MAX_POLES 1400
+typedef struct { float x, z, dx, dz; int tree, gone; VRange c, g, p; } Pole;
+static Pole poles[MAX_POLES];
+static int nPoles, poleCollect;
+static World *poleWorld;
+
+static void pole_mesh(MeshB *m, float x, float z, float dx, float dz);
 // A street lamp at (x, z) with its arm reaching toward (dx, dz).
 static void street_lamp(MeshB *m, float x, float z, float dx, float dz) {
+    (void)m;
+    if (!poleCollect || nPoles >= MAX_POLES) return;
+    Pole *P = &poles[nPoles++];
+    *P = (Pole){x, z, dx, dz, world_add_tree(poleWorld, x, z, 6.6f, TREE_POLE), 0, {0, 0}, {0, 0}, {0, 0}};
+}
+static void pole_mesh(MeshB *m, float x, float z, float dx, float dz) {
     float g = terrain_height(x, z);
     Color pole = {58, 60, 64, 255};
     box_shell(m, v3(x - 0.09f, g - 0.3f, z - 0.09f), v3(x + 0.09f, g + 6.6f, z + 0.09f), pole, pole);
@@ -679,13 +696,6 @@ static void build_airport_extras(MeshB *m, const World *w) {
             float x0 = x + 0.1f + k * 0.62f, r0 = 0.42f - k * 0.06f;
             box_shell(m, v3(x0, g + 5.85f - r0, z - r0), v3(x0 + 0.62f, g + 5.85f + r0, z + r0), k & 1 ? white : sock, k & 1 ? white : sock);
         }
-    }
-    for (float x = -60; x < 104; x += 18) {                // forecourt lamps
-        if (lamp_spot_ok(w, x, 35.3f)) street_lamp(m, x, 35.3f, 0, 1);
-    }
-    for (float z = 12; z < 76; z += 20) {
-        if (lamp_spot_ok(w, -64.7f, z)) street_lamp(m, -64.7f, z, 1, 0);
-        if (lamp_spot_ok(w, -7.7f, z) && z < 34) street_lamp(m, -7.7f, z, 1, 0);
     }
     // Parked cars in the car parks: simple boxes, but they fill the bays.
     bseed = 99u;
@@ -1137,6 +1147,25 @@ static void build_building(MeshB *m, const Building *B) {
     }
 }
 
+static void place_lamps_airport(MeshB *m, const World *w) {
+    for (float x = -60; x < 104; x += 18) {                // forecourt lamps
+        if (lamp_spot_ok(w, x, 35.3f)) street_lamp(m, x, 35.3f, 0, 1);
+    }
+    for (float z = 12; z < 76; z += 20) {
+        if (lamp_spot_ok(w, -64.7f, z)) street_lamp(m, -64.7f, z, 1, 0);
+        if (lamp_spot_ok(w, -7.7f, z) && z < 34) street_lamp(m, -7.7f, z, 1, 0);
+    }
+}
+// Once per map load: decide where the lamps stand and make each one a solid pole.
+static void place_poles(World *w) {
+    nPoles = 0; poleCollect = 1; poleWorld = w;
+    if (w->map == MAP_NEWYORK) place_lamps_newyork(NULL, w);
+    else if (w->map == MAP_AIRPORT) place_lamps_airport(NULL, w);
+    else place_street_lamps(NULL, w);
+    poleCollect = 0;
+    world_build_grid(w);
+}
+
 static Model build_city(const World *w, Model *glow, Model *pool) {
     MeshB m = {0};
     cityMap = w->map;
@@ -1146,9 +1175,15 @@ static Model build_city(const World *w, Model *glow, Model *pool) {
         build_building(&m, &w->bld[i]);
         rngCity[i].e = m.n; rngGlow[i].e = GLOW.n; rngPool[i].e = POOL.n;
     }
-    if (w->map == MAP_NEWYORK) { place_lamps_newyork(&m, w); build_ny_street(&m, w); }
+    for (int i = 0; i < nPoles; i++) {                   // the standing lamps (a fallen one is drawn on its own)
+        Pole *P = &poles[i];
+        P->c.s = m.n; P->g.s = GLOW.n; P->p.s = POOL.n;
+        P->gone = P->tree >= 0 && w->tree[P->tree].broken;
+        if (!P->gone) pole_mesh(&m, P->x, P->z, P->dx, P->dz);
+        P->c.e = m.n; P->g.e = GLOW.n; P->p.e = POOL.n;
+    }
+    if (w->map == MAP_NEWYORK) build_ny_street(&m, w);
     else if (w->map == MAP_AIRPORT) build_airport_extras(&m, w);
-    else place_street_lamps(&m, w);
     for (int i = 0; i < traffic_signal_count(); i++) {   // traffic signals: pole, mast arm, housing
         V3 head, face, pole; int st;
         traffic_signal(i, &head, &face, &pole, &st);
@@ -1436,7 +1471,7 @@ static void build_tree_patch(const World *w, int pi) {
     unsigned char sa = (unsigned char)(55 * fminf(1.0f, 0.35f + SUN.y));
     for (int i = 0; i < w->ntree; i++) {
         const Tree *t = &w->tree[i];
-        if (tree_patch(t) != pi) continue;
+        if (tree_patch(t) != pi || t->kind == TREE_POLE) continue;
         treeBaked[i] = !t->broken;
         if (t->broken) continue;
         const MeshB *P = &treeProto[t->kind];
@@ -1482,11 +1517,41 @@ static void refresh_tree_patches(const World *w) {
         if (w->tree[i].broken && treeBaked[i]) build_tree_patch(w, tree_patch(&w->tree[i]));
 }
 
+// A lamp that has been knocked over: the pole, arm and head as one piece, lying where it fell.
+static Model poleModel;
+static void build_pole_model(void) {
+    static int built;
+    if (built) UnloadModel(poleModel);
+    MeshB m = {0};
+    Color pole = {58, 60, 64, 255};
+    box_shell(&m, v3(-0.09f, 0, -0.09f), v3(0.09f, 6.6f, 0.09f), pole, pole);
+    box_shell(&m, v3(-0.05f, 6.45f, -0.05f), v3(1.55f, 6.55f, 0.05f), pole, pole);
+    box_shell(&m, v3(1.18f, 6.3f, -0.18f), v3(1.82f, 6.5f, 0.18f), pole, (Color){150, 150, 146, 255});
+    poleModel = mb_model(&m);
+    built = 1;
+}
+static void draw_fallen_poles(const World *w, Vector3 eye) {
+    for (int i = 0; i < nPoles; i++) {
+        const Pole *P = &poles[i];
+        if (P->tree < 0 || !w->tree[P->tree].broken) continue;
+        const Tree *t = &w->tree[P->tree];
+        float dx = t->x - eye.x, dz = t->z - eye.z;
+        if (dx * dx + dz * dz > 300.0f * 300.0f) continue;
+        V3 axis = vcross(v3(0, 1, 0), t->fall);
+        rlPushMatrix();
+        rlTranslatef(t->x, t->y + 0.12f, t->z);
+        rlRotatef(t->tilt * RAD2DEG, axis.x, axis.y, axis.z);
+        rlRotatef(atan2f(-P->dz, P->dx) * RAD2DEG, 0, 1, 0);
+        DrawModel(poleModel, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        rlPopMatrix();
+    }
+}
+
 static void draw_trees(const World *w, Vector3 eye) {
     for (int i = 0; i < TCH * TCH; i++) if (patchHas[i]) DrawModel(treePatch[i], (Vector3){0, 0, 0}, 1.0f, WHITE);
     for (int i = 0; i < w->ntree; i++) {
         const Tree *t = &w->tree[i];
-        if (!t->broken) continue;
+        if (!t->broken || t->kind == TREE_POLE) continue;
         float dx = t->x - eye.x, dz = t->z - eye.z;
         if (dx * dx + dz * dz > 300.0f * 300.0f) continue;
         float s = t->h / (t->kind == TREE_CONIFER ? CONIFER_H : BROADLEAF_H);
@@ -1497,6 +1562,7 @@ static void draw_trees(const World *w, Vector3 eye) {
         float sr = t->r / 0.25f * (t->kind == TREE_CONIFER ? 1.0f : 0.25f / 0.22f);
         DrawModelEx(stumpModel, base, (Vector3){0, 1, 0}, 0, (Vector3){sr * 0.25f, 1, sr * 0.25f}, WHITE);
     }
+    draw_fallen_poles(w, eye);
 }
 
 static void draw_tree_shadows(void) {
@@ -2788,6 +2854,7 @@ static void build_world_meshes(const World *w) {
     cityGlow.materials[0].shader = post_emissive_shader();
     cityPool.materials[0].shader = post_emissive_shader();
     build_trees(w->map);
+    build_pole_model();
     build_tree_patches(w);
     build_scenery(w);
     meshesBuilt = 1;
@@ -2951,6 +3018,18 @@ static void blank_range(Model *m, VRange r) {
     UpdateMeshBuffer(m->meshes[0], 0, zeros, n * 3 * sizeof(float), r.s * 3 * sizeof(float));
     memcpy(m->meshes[0].vertices + r.s * 3, zeros, n * 3 * sizeof(float));
     MemFree(zeros);
+}
+// A lamp that has just been knocked down goes dark and leaves the baked city mesh.
+static void refresh_poles(const World *w) {
+    static int lastDown = -1;
+    if (w->treesDown == lastDown) return;
+    lastDown = w->treesDown;
+    for (int i = 0; i < nPoles; i++) {
+        Pole *P = &poles[i];
+        if (P->gone || P->tree < 0 || !w->tree[P->tree].broken) continue;
+        blank_range(&city, P->c); blank_range(&cityGlow, P->g); blank_range(&cityPool, P->p);
+        P->gone = 1;
+    }
 }
 static Model model_from_range(const Model *src, VRange r) {
     Mesh mesh = {0};
@@ -3694,7 +3773,7 @@ static void sound_frame(World *w, Camera3D cam, int flying, const Airframe *ap, 
     if (sndTrees >= 0 && w->treesDown > sndTrees)
         for (int i = 0; i < w->ntree; i++) {
             const Tree *T = &w->tree[i];
-            if (T->broken && T->tilt < 0.12f) audio_play(SND_TREE, clampf(T->h / 12.0f, 0.4f, 1.0f), T->x, T->y + 1.0f, T->z);
+            if (T->broken && T->tilt < 0.12f) audio_play(T->kind == TREE_POLE ? SND_CRASH : SND_TREE, clampf(T->h / 12.0f, 0.4f, 1.0f), T->x, T->y + 1.0f, T->z);
         }
     sndTrees = w->treesDown;
 }
@@ -3708,6 +3787,7 @@ static void load_map(World *w, int map, int *nextSlot) {
     traffic_clear(w);
     traffic_set_map(map);
     world_init(w, map);
+    place_poles(w);
     build_world_meshes(w);
     float rr[32][4]; int nh;
     int n = road_rects(rr, 32, &nh);
@@ -4217,6 +4297,7 @@ int main(void) {
         update_shards(paused ? 0.0f : dt * (slowmo ? 0.2f : 1.0f));
         if (steps) update_skids(&world);
         refresh_tree_patches(&world);
+        refresh_poles(&world);
         for (int i = 0; i < world.ncars; i++) world.cars[i].grip = weather_grip();
         snowTracks = weather == 3;
         {
@@ -4480,6 +4561,8 @@ int main(void) {
         }
         if (getenv("BEAMLITE_PROF_SOUND")) printf("sounds played: crash %u, glass %u, explosion %u, collapse %u, breach %u, tree %u, splash %u, duck %u, rotor %u\n", audio_played(SND_CRASH), audio_played(SND_GLASS),
                                                   audio_played(SND_EXPLODE), audio_played(SND_COLLAPSE), audio_played(SND_BREACH), audio_played(SND_TREE), audio_played(SND_SPLASH), audio_played(SND_QUACK), audio_played(SND_ROTOR));
+        { int down = 0; for (int i = 0; i < nPoles; i++) down += poles[i].tree >= 0 && world.tree[poles[i].tree].broken;
+          printf("lamp poles: %d standing, %d knocked down, %d not solid; player at x %.1f, %.0f km/h\n", nPoles - down, down, nPoles - (int)({ int k = 0; for (int i = 0; i < nPoles; i++) k += poles[i].tree >= 0; k; }), world.cars[0].pos.x, 3.6f * vlen(world.cars[0].vel)); }
         if (prof_substeps) printf("substeps only: %.2f ms per frame (%.1f substeps/frame, %.0f us each)\n", 1000 * prof_sub / (prof_frames[0] + prof_frames[1]), (double)prof_substeps / (prof_frames[0] + prof_frames[1]), 1e6 * prof_sub / prof_substeps);
         if (world.flyable >= 0) printf("plane end state: airspeed %.0f m/s, agl %.0f m, x %.0f\n", world.air[world.flyable].airspeed, world.air[world.flyable].agl, world.air[world.flyable].pos.x);
         fflush(stdout);
