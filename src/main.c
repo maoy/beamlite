@@ -2505,6 +2505,32 @@ static void draw_gauges(const Car *c) {
 typedef struct { V3 a, b; Color col; } EdgeSeg;
 static EdgeSeg edgeBuf[MAX_TRIS * 3]; static int edgeN;
 static void edge_push(V3 a, V3 b, Color col) { if (edgeN < MAX_TRIS * 3) edgeBuf[edgeN++] = (EdgeSeg){a, b, col}; }
+// The police SUV's roof light bar (the lenses light up in the emissive pass) and its push bar.
+#define PB_X0 -0.26f
+#define PB_X1 -0.02f
+static void police_lens(const Car *c, int side, Color col, int mat) {       // side 0 left (red), 1 right (blue)
+    float z0 = side ? 0.05f : -0.60f;
+    lbox(c, RN(11, side ? 5 : 4), PB_X0 + 0.01f, PB_X1 - 0.01f, 1.60f, 1.70f, z0, z0 + 0.55f, col, mat);
+}
+static int police_flash(const Car *c, int side) {       // which half is lit now: two quick flashes a side, in turn
+    if (!c->siren) return 0;
+    double ph = fmod(GetTime() * 2.4, 1.0);
+    return (ph < 0.5) == (side == 0) && fmod(ph * 8.0, 1.0) < 0.6;
+}
+static void draw_police_parts(const Car *c) {
+    Color blk = {20, 20, 22, 255};
+    for (int s = 0; s < 2; s++) {
+        int nd = RN(11, s ? 5 : 4);
+        lbox(c, nd, PB_X0, PB_X1, 1.545f, 1.60f, s ? 0.0f : -0.62f, s ? 0.62f : 0.0f, blk, MAT_SATIN);         // base
+        lbox(c, nd, PB_X0 + 0.06f, PB_X1 - 0.06f, 1.50f, 1.56f, s ? 0.40f : -0.46f, s ? 0.46f : -0.40f, blk, MAT_SATIN);   // foot
+        police_lens(c, s, s ? (Color){24, 40, 120, 255} : (Color){120, 22, 20, 255}, MAT_GLOSS);
+    }
+    // Push bar: two uprights off the bumper, joined by two rails.
+    for (int s = -1; s <= 1; s += 2) lbox(c, RN(0, s < 0 ? 3 : 6), 2.53f, 2.60f, 0.26f, 0.86f, s * 0.36f - 0.035f, s * 0.36f + 0.035f, blk, MAT_SATIN);
+    lbox(c, RN(0, 4), 2.56f, 2.62f, 0.76f, 0.83f, -0.52f, 0.52f, blk, MAT_SATIN);
+    lbox(c, RN(0, 3), 2.56f, 2.62f, 0.44f, 0.51f, -0.52f, 0.52f, blk, MAT_SATIN);
+}
+
 static void edge_flush(void) {
     if (!edgeN) return;
     rlBegin(RL_LINES);
@@ -2520,6 +2546,10 @@ static void edge_flush(void) {
 static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
     Color body = {(unsigned char)(c->color.x * 255), (unsigned char)(c->color.y * 255), (unsigned char)(c->color.z * 255), 255};
     Color glass = {34, 46, 60, 255}, under = {35, 35, 38, 255}, tonneau = {52, 54, 58, 255}, trim = {30, 31, 33, 255};
+    int police = c->type == VEH_POLICE;
+    const Color PWHITE = {232, 234, 236, 255};
+    float pdx0 = police ? c->def->st[13].x - 0.01f : 0, pdx1 = police ? c->def->st[8].x + 0.01f : 0;   // black and white: the doors and the roof over them
+    if (police) body = (Color){12, 12, 14, 255};
 
     // Blob shadow: project the underside onto the ground.
     Color sh = {0, 0, 0, 90};
@@ -2551,6 +2581,11 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
             const Tri *t = &c->t[i];
             if (t->kind != SURF_BODY && t->kind != SURF_TRIM) continue;
             Color base = t->kind == SURF_TRIM ? trim : body;
+            if (police && t->kind == SURF_BODY) {
+                int in = 1;
+                for (int k = 0; k < 3; k++) { float rx = c->rest[t->v[k]].x; if (t->v[k] >= c->nBody || rx < pdx0 || rx > pdx1) in = 0; }
+                if (in) base = PWHITE;
+            }
             float gloss = t->kind == SURF_TRIM ? 0.25f : 1.0f;
             int inside = 0;
             if (interior) {
@@ -2691,6 +2726,7 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
     }
 
     if (!beamView && c->type == VEH_SEMI) draw_semi_parts(c);
+    if (!beamView && police) draw_police_parts(c);
     for (int i = 0; i < c->nw; i++) draw_wheel(c, i);
 }
 
@@ -2698,8 +2734,9 @@ static void draw_car(const Car *c, int beamView, V3 eye, int interior) {
 // Car lights are drawn grouped by emissive intensity: every post_emissive_begin/end is a shader switch
 // and a draw call, so doing it per light strip per car cost more than the car bodies. Each car exposes
 // its lights as numbered items with an intensity (< 0: skip); the caller makes one pass per distinct intensity.
-static int car_light_count(const Car *c) { return c->def->lightStyle == 2 ? 3 : c->nlights; }
+static int car_light_count(const Car *c) { return c->def->lightStyle == 2 ? 3 : c->nlights + (c->type == VEH_POLICE ? 2 : 0); }
 static float car_light_intensity(const Car *c, int on, int item) {
+    if (c->def->lightStyle != 2 && item >= c->nlights) return police_flash(c, item - c->nlights) ? 7.0f : -1.0f;
     float front = on ? 3.2f : 0.9f, rear = (on ? 2.2f : 1.4f) * (c->ctl.brake > 0.1f ? 2.0f : 1.0f);
     if (c->def->lightStyle == 2) return item == 0 ? front : item == 1 ? (on ? 2.4f : 0.8f) : rear;
     const LightStrip *L = &c->lights[item];
@@ -2725,6 +2762,7 @@ static void car_light_draw(const Car *c, int item) {
         }
         return;
     }
+    if (item >= c->nlights) { police_lens(c, item - c->nlights, item - c->nlights ? (Color){40, 90, 255, 255} : (Color){255, 30, 24, 255}, MAT_UNLIT); return; }
     const LightStrip *L = &c->lights[item];
     draw_lightbar(c, L, L->rear ? (Color){255, 26, 20, 255} : (Color){235, 242, 255, 255});
 }
@@ -2771,6 +2809,25 @@ static void draw_headlights(const Car *c) {
         V(pts[0], off); V(pts[3], off); V(pts[4], c1);   V(pts[0], off); V(pts[4], c1); V(pts[1], c0);
         V(pts[1], c0); V(pts[4], c1); V(pts[5], off);   V(pts[1], c0); V(pts[5], off); V(pts[2], off);
         #undef V
+        rlEnd();
+    }
+}
+
+// Red and blue from a police light bar, washing over the ground around the car (additive).
+static void draw_beacon_spill(const Car *c) {
+    for (int s = 0; s < 2; s++) {
+        if (!police_flash(c, s)) continue;
+        Color in = s ? (Color){10, 20, 66, 255} : (Color){66, 9, 7, 255}, off = {0, 0, 0, 255};
+        V3 o = vadd(c->pos, vscale(c->right, s ? 0.5f : -0.5f));
+        o.y = terrain_height(o.x, o.z) + 0.07f;
+        rlBegin(RL_TRIANGLES);
+        for (int k = 0; k < 16; k++) {
+            float a0 = 6.2831853f * k / 16, a1 = 6.2831853f * (k + 1) / 16, R = 11.0f;
+            V3 p0 = v3(o.x + cosf(a0) * R, 0, o.z + sinf(a0) * R), p1 = v3(o.x + cosf(a1) * R, 0, o.z + sinf(a1) * R);
+            p0.y = terrain_height(p0.x, p0.z) + 0.07f; p1.y = terrain_height(p1.x, p1.z) + 0.07f;
+            rlColor4ub(in.r, in.g, in.b, 255); rlVertex3f(o.x, o.y, o.z);
+            rlColor4ub(off.r, off.g, off.b, 255); rlVertex3f(p1.x, p1.y, p1.z); rlVertex3f(p0.x, p0.y, p0.z);
+        }
         rlEnd();
     }
 }
@@ -3591,7 +3648,7 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
         const char *lines[] = {
             "W/S  throttle / brake / reverse", "A/D  steer      SPACE  handbrake", "MOUSE  orbit camera, wheel to zoom",
             "C  dash cam      B  beam view      V  choose vehicle", "N  spawn truck ahead      X  clear trucks", "Q  recover in place      R  reset to start",
-            "T  slow-mo      P  pause      K  clear skids      H  help", "U  rebuild knocked-down buildings      Y  collect a rubber duck", "Z  sound on / off", "G  drop tailgate      L  lighting      O  weather",
+            "T  slow-mo      P  pause      K  clear skids      H  help", "U  rebuild knocked-down buildings      Y  collect a rubber duck", "Z  sound on / off      I  siren (police SUV)", "G  drop tailgate      L  lighting      O  weather",
             "M  map menu      J  traffic",
             "TAB  fly: airliner, then helicopter (Airport map)",
             "F2  sun shadows + ambient occlusion on / off",
@@ -3755,7 +3812,7 @@ static void draw_picker(void) {
     const char *title = "CHOOSE YOUR VEHICLE";
     slash(sw * 0.5f - txtw(title, 30) * 0.5f - 34, sh * 0.5f - 238, 6, 30, HUD_ORANGE);
     txt(title, sw * 0.5f - txtw(title, 30) * 0.5f, sh * 0.5f - 238, 30, RAYWHITE);
-    float cw = 420, ch = 380, gap = 30, x0 = sw * 0.5f - (VEH_COUNT * cw + (VEH_COUNT - 1) * gap) * 0.5f, y0 = sh * 0.5f - 180;
+    float gap = 24, cw = fminf(420, (sw - 48 - (VEH_COUNT - 1) * gap) / VEH_COUNT), ch = 380, x0 = sw * 0.5f - (VEH_COUNT * cw + (VEH_COUNT - 1) * gap) * 0.5f, y0 = sh * 0.5f - 180;
     for (int i = 0; i < VEH_COUNT; i++) {
         const VehicleDef *d = vehicle_def(i);
         float x = x0 + i * (cw + gap);
@@ -3991,6 +4048,14 @@ static void sound_frame(World *w, Camera3D cam, int flying, const Airframe *ap, 
         float gl, gr;
         audio_spatial(c->pos.x, c->pos.y, c->pos.z, 10.0f, &gl, &gr);
         P.scrape = fmaxf(P.scrape, 0.5f * (gl + gr) * fminf(1.0f, vlen(c->vel) / 15.0f));
+    }
+    for (int i = 0; i < w->ncars; i++) {                    // the nearest siren
+        const Car *c = &w->cars[i];
+        if (!c->active || !c->siren) continue;
+        float gl, gr;
+        audio_spatial(c->pos.x, c->pos.y, c->pos.z, 28.0f, &gl, &gr);
+        if (i == 0 && inside && !flying) gl = gr = 0.45f;
+        if (gl + gr > P.sirenL + P.sirenR) { P.sirenL = gl; P.sirenR = gr; }
     }
     for (int ai = 0; ai < w->nplanes; ai++) {
         if (fireT[ai] <= 0) continue;
@@ -4462,6 +4527,11 @@ int main(void) {
             hud_toast(n ? TextFormat("%d BUILDING%s REBUILT", n, n == 1 ? "" : "S") : "NOTHING TO REBUILD");
         }
         if (IsKeyPressed(KEY_Z)) { soundOff = !soundOff; hud_toast(soundOff ? "SOUND OFF" : "SOUND ON"); }
+        if (profEnv && getenv("BEAMLITE_SIREN")) pc->siren = pc->type == VEH_POLICE && !pc->exploded;   // scripted runs: siren on
+        if (IsKeyPressed(KEY_I) && !flying) {       // lights and siren, if this is the police car
+            if (pc->type == VEH_POLICE && !pc->exploded) { pc->siren = !pc->siren; hud_toast(pc->siren ? "SIREN ON" : "SIREN OFF"); }
+            else hud_toast("NO SIREN ON THIS VEHICLE");
+        }
         if (IsKeyPressed(KEY_B)) beamView = !beamView;
         if (IsKeyPressed(KEY_C)) camMode = !camMode;
         if (IsKeyPressed(KEY_P)) paused = !paused;
@@ -4777,6 +4847,7 @@ int main(void) {
             DrawModel(cityPool, (Vector3){0, 0, 0}, 1.0f, WHITE);
             post_emissive_begin(ENV->lights);
             draw_headlights(pc);
+            for (int i = 0; i < world.ncars; i++) if (world.cars[i].active && world.cars[i].siren) draw_beacon_spill(&world.cars[i]);
             post_emissive_end();
             EndBlendMode();
             rlEnableDepthMask();

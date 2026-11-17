@@ -406,5 +406,23 @@ int main(void) {
         printf("  %.0f%% -> %.0f km/h (engine %.0f%%)", DMG[k], 3.6f * vlen(W.cars[0].vel), 100 * car_engine_health(&(Car){.damage = DMG[k]}));
     }
     printf("\n");
+
+    // The police SUV: sits on its wheels undamaged, pulls hard, and its siren flag starts off.
+    {
+        const VehicleDef *D = vehicle_def(VEH_POLICE);
+        world_init(&W, MAP_DEFAULT);
+        W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_POLICE, v3(-20, D->spawnH, 3.5f), 0, D->paint);
+        int sirenOff = !W.cars[0].siren;
+        for (int i = 0; i < (int)(2.0f * SIM_HZ); i++) world_substep(&W, H);
+        car_update_frame(&W.cars[0]);
+        float low = 1e9f;
+        for (int i = 0; i < W.cars[0].nBody; i++) low = fminf(low, W.cars[0].n[i].p.y - terrain_height(W.cars[0].n[i].p.x, W.cars[0].n[i].p.z));
+        float dmg0 = W.cars[0].damage, rest = vlen(W.cars[0].vel);
+        for (int i = 0; i < (int)(6.0f * SIM_HZ); i++) { W.cars[0].ctl = (Controls){1, 0, 0, 0}; world_substep(&W, H); }
+        car_update_frame(&W.cars[0]);
+        printf("police SUV: siren off at build %d, settled at %.2f m/s with %.0f%% damage, floor %.2f m up, 6 s flat out -> %.0f km/h (damage %.0f%%)\n",
+               sirenOff, rest, dmg0, low, 3.6f * vlen(W.cars[0].vel), W.cars[0].damage);
+    }
     return 0;
 }

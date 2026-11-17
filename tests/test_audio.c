@@ -50,6 +50,7 @@ int main(int argc, char **argv) {
     p = base(); p.fire = 1; audio_set(&p); render("fire", 1.5f, 0.02f, 0.3f);
     p = base(); p.heliRpm = 1; p.heliLoad = 0.2f; p.heliL = p.heliR = 1; audio_set(&p); render("helicopter, flat pitch", 2.0f, 0.03f, 0.45f);
     p.heliLoad = 0.6f; audio_set(&p); render("helicopter, hover", 2.0f, 0.05f, 0.5f);
+    p = base(); p.sirenL = p.sirenR = 1; audio_set(&p); render("police siren", 4.0f, 0.04f, 0.4f);
     p = base(); p.jetN1 = 0.22f; p.jetL = p.jetR = 1; audio_set(&p); render("jet spooling to idle", 6.0f, 0.005f, 0.2f);
     p.jetN1 = 1.0f; audio_set(&p); render("jet spooling to takeoff", 8.0f, 0.08f, 0.6f);
     p = base(); audio_set(&p); render("(jet winding down)", 8.0f, 0.0f, 0.6f);

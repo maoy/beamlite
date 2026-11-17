@@ -207,6 +207,7 @@ static struct {
     Svf skid1, skid2, scr; float scrRough, lfoZ;
     float rph, tph, turbPh, heliZ, heliHiss;
     float jn1, jph1, jph2, jetZ, jetHiss, jetRum;
+    float sirPh, sirT;
 } S;
 
 void audio_set(const AudioParams *p) { tgt = *p; started = 1; }
@@ -215,7 +216,7 @@ static void smooth(unsigned n) {
     float k = 1.0f - expf(-(float)n / SR / 0.035f), kr = 1.0f - expf(-(float)n / SR / 0.07f);
     #define GO(f) cur.f += k * (tgt.f - cur.f)
     GO(master); GO(rate); GO(wind); GO(road); GO(skid); GO(rain); GO(scrape); GO(fire);
-    GO(heliRpm); GO(heliLoad); GO(heliL); GO(heliR); GO(heliTail); GO(jetL); GO(jetR);
+    GO(heliRpm); GO(heliLoad); GO(heliL); GO(heliR); GO(heliTail); GO(jetL); GO(jetR); GO(sirenL); GO(sirenR);
     #undef GO
     for (int i = 0; i < AUD_CARS; i++) {
         AudCar *c = &cur.car[i]; const AudCar *t = &tgt.car[i];
@@ -336,6 +337,15 @@ void audio_mix(float *out, unsigned frames) {
                 jet += (sinf(TAU * S.jph1) + sinf(TAU * S.jph2)) * (0.012f + 0.03f * n1) * fminf(n1 * 8.0f, 1.0f);
                 jet += (e - lp1(&S.jetHiss, e, 0.3f)) * 0.14f * n1 * n1;
                 L += jet * cur.jetL; R += jet * cur.jetR;
+            }
+            // Police siren: an electronic wail, up in a second and a half and slowly back down.
+            if (cur.sirenL + cur.sirenR > 0.002f) {
+                S.sirT = wrap1(S.sirT + dt / 3.6f);
+                float u = S.sirT < 0.42f ? S.sirT / 0.42f : 1.0f - (S.sirT - 0.42f) / 0.58f;
+                S.sirPh = wrap1(S.sirPh + 620.0f * powf(2.3f, u * u * (3.0f - 2.0f * u)) * dt);
+                float x = TAU * S.sirPh;
+                float s = (sinf(x) + 0.55f * sinf(2 * x) + 0.40f * sinf(3 * x) + 0.22f * sinf(4 * x) + 0.15f * sinf(5 * x)) * 0.085f;
+                L += s * cur.sirenL; R += s * cur.sirenR;
             }
             for (int v = 0; v < NV; v++) {
                 if (!voice[v].on) continue;

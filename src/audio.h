@@ -27,6 +27,7 @@ typedef struct {
     float fire;                 // burning wreckage
     float heliRpm, heliLoad, heliL, heliR;      // rotor speed 0..1, collective 0..1
     float heliTail;             // 1 while the tail rotor still turns
+    float sirenL, sirenR;       // a police siren wailing
     float jetN1, jetL, jetR;    // airliner engines: fan speed 0..1 (the synth adds the spool lag)
 } AudioParams;
 

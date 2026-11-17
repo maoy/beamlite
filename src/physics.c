@@ -317,10 +317,61 @@ static void define_semi(VehicleDef *d) {
     d->paint = v3(0.05f, 0.09f, 0.42f);                       // deep blue under the flames
 }
 
+// ---- Police interceptor: a full-size five-door SUV in black and white. 5.04 m long, 1.96 m wide,
+// 1.78 m tall, 3.03 m wheelbase, 2.25 t, 400 hp through all four wheels. Upright nose and tailgate,
+// a long flat roof (the light bar sits on it; the renderer draws that and the push bar), and a
+// third side window behind the rear doors. Heights are above the floor underside, ~0.22 m up.
+static void define_police(VehicleDef *d) {
+    // x, floor, sill, belt, top, roof-edge half-width, width scale, arch, bulkhead, seam, top glass, side glass
+    static const Station S[] = {
+        { 2.520f, 0.28f, 0.34f, 0.58f, 0.70f, 0.70f, 0.84f, 0, 1, 0, -1, -1},   //  0 nose
+        { 2.420f, 0.16f, 0.20f, 0.66f, 0.78f, 0.76f, 0.92f, 0, 0, 0, -1, -1},   //  1 hood leading edge
+        { 2.220f, 0.05f, 0.10f, 0.72f, 0.83f, 0.80f, 0.97f, 0, 0, 0, -1, -1},   //  2
+        { 2.040f, 0.00f, 0.10f, 0.76f, 0.86f, 0.82f, 1.00f, 0, 0, 0, -1, -1},   //  3 front arch, lower front
+        { 1.880f, 0.00f, 0.56f, 0.78f, 0.88f, 0.82f, 1.00f, 1, 0, 0, -1, -1},   //  4
+        { 1.580f, 0.00f, 0.68f, 0.81f, 0.91f, 0.82f, 1.00f, 1, 1, 0, -1, -1},   //  5 front axle
+        { 1.280f, 0.00f, 0.56f, 0.84f, 0.93f, 0.82f, 1.00f, 1, 0, 0, -1, -1},   //  6
+        { 1.120f, 0.00f, 0.10f, 0.86f, 0.95f, 0.81f, 1.00f, 0, 0, 0, -1, -1},   //  7 front arch, lower rear
+        { 0.950f, 0.00f, 0.08f, 0.88f, 0.97f, 0.80f, 1.00f, 0, 1, 1,  0,  2},   //  8 cowl / A-pillar base / dash
+        { 0.620f, 0.00f, 0.08f, 0.90f, 1.24f, 0.75f, 1.00f, 0, 0, 0,  0,  2},   //  9
+        { 0.300f, 0.00f, 0.08f, 0.92f, 1.47f, 0.72f, 1.00f, 0, 0, 0,  0,  2},   // 10 windshield top
+        { 0.050f, 0.00f, 0.08f, 0.93f, 1.54f, 0.72f, 1.00f, 0, 0, 0, -1,  2},   // 11 roof header
+        {-0.350f, 0.00f, 0.08f, 0.94f, 1.56f, 0.72f, 1.00f, 0, 1, 1, -1,  4},   // 12 B-pillar
+        {-0.990f, 0.00f, 0.10f, 0.96f, 1.56f, 0.72f, 1.00f, 0, 0, 1, -1,  6},   // 13 rear door shut / arch lower front
+        {-1.150f, 0.00f, 0.56f, 0.97f, 1.55f, 0.72f, 1.00f, 1, 0, 0, -1,  6},   // 14
+        {-1.450f, 0.00f, 0.68f, 0.98f, 1.54f, 0.71f, 1.00f, 1, 1, 0, -1,  6},   // 15 rear axle
+        {-1.750f, 0.00f, 0.56f, 0.99f, 1.52f, 0.71f, 1.00f, 1, 0, 0, -1,  6},   // 16
+        {-1.910f, 0.00f, 0.10f, 1.00f, 1.50f, 0.70f, 0.99f, 0, 0, 0,  1, -1},   // 17 rear arch lower rear; roof end, D-pillar
+        {-2.290f, 0.03f, 0.12f, 0.98f, 1.06f, 0.76f, 0.97f, 0, 0, 0, -1, -1},   // 18 tailgate glass bottom
+        {-2.450f, 0.15f, 0.22f, 0.80f, 0.90f, 0.76f, 0.92f, 0, 0, 0, -1, -1},   // 19 lower tailgate
+        {-2.520f, 0.28f, 0.34f, 0.62f, 0.74f, 0.72f, 0.86f, 0, 1, 0, -1, -1},   // 20 tail
+    };
+    d->nr = (int)(sizeof S / sizeof S[0]);
+    for (int r = 0; r < d->nr; r++) d->st[r] = S[r];
+    d->name = "POLICE INTERCEPTOR";
+    d->blurb = "2.25 t  |  400 hp AWD  |  siren: I";
+    d->floorHalf = 0.66f; d->sillHalf = 0.95f; d->beltHalf = 0.98f;
+    d->axleF = 5; d->axleR = 15; d->doorR0 = 8; d->doorR1 = 12; d->dashRing = 8; d->bRing = 12;
+    d->mass = 2250.0f;
+    d->batW = 1.0f; d->batX0 = -1.40f; d->batX1 = -0.60f;     // fuel tank under the rear seat
+    d->engW = 2.4f; d->engX0 = 0.95f; d->engX1 = 2.35f;       // twin-turbo V6, gearbox and transfer case
+    d->crumpleF = 2.05f; d->crumpleR = -2.15f; d->cabinX0 = -1.00f; d->cabinX1 = 0.96f;
+    d->kScale = 0.70f; d->yScale = 0.92f;
+    d->wheelR = 0.38f; d->wheelW = 0.255f; d->trackHalf = 0.84f;      // 255/60 R18
+    d->suspRest = -0.06f; d->suspTravel = 0.20f; d->ks = 52000.0f; d->cs = 4200.0f; d->kbump = 450000.0f;
+    d->brakeMax = 6500.0f; d->engineF = 13000.0f; d->enginePower = 298000.0f; d->reverseF = 5500.0f; d->driveFront = 0.40f;
+    d->rearSteer = 0.0f; d->maxLock = 0.60f; d->cdA = 0.85f;
+    d->spawnH = 0.30f;
+    d->seat = v3(-0.25f, 1.22f, -0.42f); d->dashX = 0.72f; d->dashY = 0.96f; d->rearSeatX = -1.05f;
+    d->npanels = 8; d->hasTailgate = 0; d->lightStyle = 1;
+    d->smooth = 1; d->wheelStyle = 1; d->mirrorRing = 8; d->spoilerRing = -1;
+    d->paint = v3(0.05f, 0.05f, 0.06f);                       // black; the renderer paints the doors and roof white
+}
+
 const VehicleDef *vehicle_def(int type) {
     if (!defsReady) {
-        define_pickup(&DEFS[VEH_PICKUP]); define_hatch(&DEFS[VEH_HATCH]); define_semi(&DEFS[VEH_SEMI]);
-        DEFS[VEH_PICKUP].axleR2 = DEFS[VEH_HATCH].axleR2 = -1;
+        define_pickup(&DEFS[VEH_PICKUP]); define_hatch(&DEFS[VEH_HATCH]); define_semi(&DEFS[VEH_SEMI]); define_police(&DEFS[VEH_POLICE]);
+        DEFS[VEH_PICKUP].axleR2 = DEFS[VEH_HATCH].axleR2 = DEFS[VEH_POLICE].axleR2 = -1;
         defsReady = 1;
     }
     return &DEFS[type < 0 || type >= VEH_COUNT ? 0 : type];

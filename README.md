@@ -1,9 +1,10 @@
 # BeamLite
 
 A small soft-body driving sandbox in the spirit of BeamNG.drive, written from scratch in C.
-Three vehicles, picked with **V**: an angular stainless-steel electric pickup (a Cybertruck-style
+Four vehicles, picked with **V**: an angular stainless-steel electric pickup (a Cybertruck-style
 wedge), the Sparrow, a modern compact sport hatchback (unbadged, proportioned after a current
-C-segment five-door), and a long-nose semi tractor in a red-and-blue flame livery (unbadged).
+C-segment five-door), a long-nose semi tractor in a red-and-blue flame livery (unbadged), and a
+black-and-white police SUV with a light bar and siren (**I**).
 Runs natively on macOS (Apple Silicon or Intel).
 
 ## Build & run (macOS)
@@ -41,6 +42,7 @@ xcode-select --install        # once, if you don't have the command line tools
 | K | clear skid marks |
 | Y | collect the rubber duck in reach |
 | Z | sound on / off |
+| I | lights and siren on / off (police SUV) |
 | U | rebuild every knocked-down building (clears the rubble; anything parked on it is moved out) |
 | Tab | Airport map: fly the airliner on the runway, then the helicopter on the pad, then back to the car |
 
@@ -156,6 +158,11 @@ when you switch maps.
     a window line that kicks up into a pointed rear quarter window, round arches and flared rear
     haunches. Drawn with smooth-shaded clear-coat paint (no panel outlines, just shut lines),
     door mirrors, a roof spoiler, a black grille, intake and diffuser, and dark ten-spoke alloys.
+  - *Police interceptor*: a full-size five-door SUV, unbadged. 5.04 m long, 1.96 m wide, 1.78 m
+    tall, 3.03 m wheelbase, 2.25 t, 400 hp through all four wheels. Black with white doors and roof,
+    a push bar on the nose and a red and blue light bar on the roof. **I** switches the lights and
+    siren on and off together: the bar flashes each side in turn and washes the road red and blue
+    after dark, and the siren wails from wherever the car is.
   - *Long-nose semi*: a classic conventional tractor with a sleeper, bobtail. 8.25 m long, 3.0 m
     tall, 8.2 t, ~600 hp, three axles with tandem drive: six wheels in the physics, duals on the
     rear. The node/beam body is the narrow hood, cab, sleeper and bare frame. The chrome bumper,
@@ -321,7 +328,8 @@ when you switch maps.
     semi a diesel six with injector clatter. The pickup is electric, so it has no engine sound:
     silent at rest, then a thin motor whine that climbs with speed. The physics has no
     gearbox, so engine speed comes from road speed through made-up gears, and wheelspin lets it
-    rev. Your car and the three loudest others each get a voice.
+    rev. Your car and the three loudest others each get a voice. The police SUV's siren is an
+    electronic wail, sweeping up in a second and a half and slowly back down.
   - Helicopter: blade slap three times per rotor turn, a turbine whine and the tail rotor's buzz,
     all following rotor speed and collective. Airliner: exhaust roar, the whine of two fans
     slightly out of tune, and a spool-up that takes a couple of seconds.

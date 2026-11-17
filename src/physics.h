@@ -88,7 +88,7 @@ typedef struct {
 
 typedef struct { int q[4]; float t, u0, u1, out; unsigned char rear; } LightStrip;
 
-enum { VEH_PICKUP, VEH_HATCH, VEH_SEMI, VEH_COUNT };
+enum { VEH_PICKUP, VEH_HATCH, VEH_SEMI, VEH_POLICE, VEH_COUNT };
 
 typedef struct {
     const char *name, *blurb;
@@ -133,6 +133,7 @@ typedef struct {
     float damage;               // 0..100
     int brokenBeams;
     int exploded;
+    int siren;                  // police: lights and siren running
     int active;
     // Glass: each panel shatters as a whole when its frame is strained.
     int npanels, glassBrokenCount;
