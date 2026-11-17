@@ -684,6 +684,16 @@ void car_update_frame(Car *c) {
 
 static int intact(const Car *c, int bi) { return bi >= 0 && !c->b[bi].broken; }
 
+// How much of its drive a damaged car has left (1 = all, 0 = the engine is dead). A scrape costs
+// nothing; past 15% damage power falls away, a badly crumpled car crawls, and past 70% it won't pull at all.
+float car_engine_health(const Car *c) {
+    float d = c->damage;
+    if (d <= 15.0f) return 1.0f;
+    if (d <= 50.0f) return 1.0f - 0.7f * (d - 15.0f) / 35.0f;
+    if (d <= 70.0f) return 0.3f * (70.0f - d) / 20.0f;
+    return 0.0f;
+}
+
 void car_update_damage(Car *c) {
     float sum = 0; int broken = 0, n = 0;
     for (int i = 0; i < c->nb; i++) {
@@ -796,6 +806,7 @@ static void wheel_forces(Car *c, float h) {
     float drive = 0;
     if (ctl->throttle > 0) drive = ctl->throttle * fminf(D->engineF, D->enginePower / fmaxf(fabsf(vF), 2.0f));
     else if (ctl->throttle < 0 && vF > -12.0f) drive = ctl->throttle * D->reverseF;
+    drive *= car_engine_health(c);
 
     for (int i = 0; i < c->nw; i++) {
         Wheel *W = &c->w[i];

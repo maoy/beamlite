@@ -83,6 +83,10 @@ Town**, **New York City** or **The Airport**, each shown with an aerial view. Ch
 Enter, the number keys, or a click. **M** brings the menu back at any time. The pictures are frames
 from the game itself and live in `assets/`; without them the screens fall back to a plain backdrop.
 
+Damage costs power. Up to 15% damage a car drives as new; beyond that the engine fades (about 70%
+of its pull at 30% damage, 30% at 50%), and past 70% it is dead and the car only rolls. The HUD shows
+the engine's remaining power under the damage bar. **Q** or **R** gives you a fresh car.
+
 All three maps share the proving ground: a launch ramp straight ahead, a
 crash-test wall behind you, concrete pillars, a warehouse district off a service road to the right,
 and forest on the hills past ~100 m. Saplings and young trees snap when you hit them; mature

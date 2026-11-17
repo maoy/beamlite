@@ -369,6 +369,7 @@ void car_build_vehicle(Car *c, int type, V3 pos, float yaw, V3 color);
 void car_build(Car *c, V3 pos, float yaw, V3 color);       // the pickup
 void car_update_frame(Car *c);
 void car_update_damage(Car *c);
+float car_engine_health(const Car *c);  // 1 = full power .. 0 = engine dead, from the car's damage
 void car_pop_tailgate(Car *c);
 
 #endif

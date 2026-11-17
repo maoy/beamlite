@@ -392,5 +392,19 @@ int main(void) {
         printf("map: %d buildings, %d trees\n", W.nbld, W.ntree);
     }
     snapshot("/tmp/tbone_striker.ppm", &W.cars[0]);
+    // A damaged car has less drive: the same pickup, full throttle for 5 s from rest, at pinned damage levels.
+    printf("engine vs damage (pickup, 5 s flat out):");
+    static const float DMG[] = {0, 15, 30, 50, 60, 70, 90};
+    for (int k = 0; k < 7; k++) {
+        world_init(&W, MAP_DEFAULT);
+        W.ncars = 1;
+        car_build_vehicle(&W.cars[0], VEH_PICKUP, v3(-20, CAR_SPAWN_H, 3.5f), 0, v3(0.8f, 0.8f, 0.8f));
+        for (int i = 0; i < (int)(1.0f * SIM_HZ); i++) world_substep(&W, H);         // settle
+        W.cars[0].damage = DMG[k];
+        for (int i = 0; i < (int)(5.0f * SIM_HZ); i++) { W.cars[0].ctl = (Controls){1, 0, 0, 0}; world_substep(&W, H); }
+        car_update_frame(&W.cars[0]);
+        printf("  %.0f%% -> %.0f km/h (engine %.0f%%)", DMG[k], 3.6f * vlen(W.cars[0].vel), 100 * car_engine_health(&(Car){.damage = DMG[k]}));
+    }
+    printf("\n");
     return 0;
 }

@@ -3328,6 +3328,9 @@ static void draw_hud(const Car *pc, const World *w, float vF, Controls ctl, int 
     DrawRectangle((int)px + 30, (int)py + 56, 230, 8, (Color){50, 52, 58, 255});
     DrawRectangle((int)px + 30, (int)py + 56, (int)(230 * pc->damage / 100.0f), 8, dc);
     txt(TextFormat("TORN BEAMS  %d", pc->brokenBeams), px + 30, py + 72, 14, HUD_DIM);
+    float eng = car_engine_health(pc);
+    if (eng <= 0) txt("ENGINE DEAD", px + 30, py + 92, 14, (Color){240, 60, 50, 255});
+    else txt(TextFormat("ENGINE  %.0f%%", 100 * eng), px + 30, py + 92, 14, eng < 0.999f ? dc : HUD_DIM);
     DrawLine((int)px + 290, (int)py + 14, (int)px + 290, (int)(py + ph - 14), HUD_LINE);
     static const char *TG[] = {"LATCHED", "OPEN", "HANGING", "GONE", "N/A"};
     const char *lab[4] = {"GLASS", "TAILGATE", "TREES", "BLDGS"};
@@ -3708,7 +3711,9 @@ static void sound_frame(World *w, Camera3D cam, int flying, const Airframe *ap, 
         float rev = car_rev(i, c, dt), sp = vlen(c->vel);
         float load = fmaxf(c->ctl.throttle, vdot(c->vel, c->fwd) < -0.3f ? c->ctl.brake : 0.0f);
         int running = i == 0 ? !flying : (sp > 0.5f || c->ctl.throttle > 0.02f);    // parked cars are switched off
-        if (!running) continue;
+        float eng = car_engine_health(c);
+        if (!running || eng <= 0) continue;                 // a dead engine makes no sound
+        load *= eng; rev *= 0.5f + 0.5f * eng;              // a hurt one labours
         float gl, gr;
         audio_spatial(c->pos.x, c->pos.y, c->pos.z, 7.0f, &gl, &gr);
         if (i == 0 && inside) gl = gr = 0.75f;
@@ -4239,7 +4244,7 @@ int main(void) {
         float vF = vdot(pc->vel, pc->fwd);
         Controls ctl = {0, 0, (float)(left - right), IsKeyDown(KEY_SPACE)};
         if (profEnv && !profCrash) { ctl.throttle = 0.5f; ctl.steer = 0.3f * sinf((prof_frames[0] + prof_frames[1]) / 120.0f); }
-        if (profDrive) { ctl.throttle = 0.3f; ctl.steer = 0; }
+        if (profDrive) { ctl.throttle = getenv("BEAMLITE_GAS") ? (float)atof(getenv("BEAMLITE_GAS")) : 0.3f; ctl.steer = 0; }
         if (up) { if (vF < -1.0f) ctl.brake = 1; else ctl.throttle = 1; }
         if (down) { if (vF > 1.0f) ctl.brake = 1; else ctl.throttle = -1; }
         if (pickerOpen) ctl = (Controls){0, 0, 0, 1};
