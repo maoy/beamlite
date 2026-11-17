@@ -86,7 +86,7 @@ from the game itself and live in `assets/`; without them the screens fall back t
 All three maps share the proving ground: a launch ramp straight ahead, a
 crash-test wall behind you, concrete pillars, a warehouse district off a service road to the right,
 and forest on the hills past ~100 m. Saplings and young trees snap when you hit them; mature
-trunks stop you dead. Street lamps are solid too: a slow car is stopped by one, a fast or heavy one
+trunks stop you dead. Street lamps and traffic-signal posts are solid too: a slow car is stopped by one, a fast or heavy one
 shears it off, and it goes dark and falls where it was hit. Every building on every map can be knocked down: hard hits punch holes in
 the walls and throw out masonry, and once a building has taken enough it collapses into a rubble
 pile you can drive over. A fast car takes out a house, a semi gets through warehouses and

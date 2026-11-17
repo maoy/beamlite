@@ -339,10 +339,16 @@ static void wall_lamp(MeshB *m, const Building *B, int s, float u, float y) {
 // baked into the city meshes from that list, each with its vertex ranges so it can be blanked when
 // it goes down; the fallen pole is drawn on its own.
 #define MAX_POLES 1400
-typedef struct { float x, z, dx, dz; int tree, gone; VRange c, g, p; } Pole;
+#define MAX_SIGNALS 256
+typedef struct { float x, z, dx, dz; int tree, gone; VRange c, g, p; int sig, hasFallen; Model fallen; } Pole;   // sig: a traffic signal's index, or -1 for a lamp
 static Pole poles[MAX_POLES];
-static int nPoles, poleCollect;
+static int nPoles, poleCollect, sigPole[MAX_SIGNALS];
 static World *poleWorld;
+static int signal_down(int i) {                 // has this traffic signal been knocked over?
+    if (i >= MAX_SIGNALS || sigPole[i] < 0 || !poleWorld) return 0;
+    const Pole *P = &poles[sigPole[i]];
+    return P->tree >= 0 && poleWorld->tree[P->tree].broken;
+}
 
 static void pole_mesh(MeshB *m, float x, float z, float dx, float dz);
 // A street lamp at (x, z) with its arm reaching toward (dx, dz).
@@ -350,7 +356,7 @@ static void street_lamp(MeshB *m, float x, float z, float dx, float dz) {
     (void)m;
     if (!poleCollect || nPoles >= MAX_POLES) return;
     Pole *P = &poles[nPoles++];
-    *P = (Pole){x, z, dx, dz, world_add_tree(poleWorld, x, z, 6.6f, TREE_POLE), 0, {0, 0}, {0, 0}, {0, 0}};
+    *P = (Pole){x, z, dx, dz, world_add_tree(poleWorld, x, z, 6.6f, TREE_POLE), 0, {0, 0}, {0, 0}, {0, 0}, -1, 0, {0}};
 }
 static void pole_mesh(MeshB *m, float x, float z, float dx, float dz) {
     float g = terrain_height(x, z);
@@ -1147,6 +1153,20 @@ static void build_building(MeshB *m, const Building *B) {
     }
 }
 
+// A traffic signal: pole, mast arm and housing, drawn relative to `o` (zero for its place in the world).
+static void signal_mesh(MeshB *m, int i, V3 o) {
+    V3 head, face, pole; int st;
+    traffic_signal(i, &head, &face, &pole, &st);
+    head = vsub(head, o); pole = vsub(pole, o);
+    Color metal = {48, 50, 54, 255}, housing = {30, 30, 32, 255};
+    float top = pole.y + 6.0f;
+    box_shell(m, v3(pole.x - 0.1f, pole.y - 0.3f, pole.z - 0.1f), v3(pole.x + 0.1f, top, pole.z + 0.1f), metal, metal);
+    box_shell(m, v3(fminf(pole.x, head.x) - 0.05f, top - 0.25f, fminf(pole.z, head.z) - 0.05f),
+              v3(fmaxf(pole.x, head.x) + 0.05f, top - 0.15f, fmaxf(pole.z, head.z) + 0.05f), metal, metal);
+    V3 side = v3(-face.z, 0, face.x);
+    V3 c0 = vsub(vsub(head, vscale(side, 0.2f)), vscale(face, 0.14f)), c1 = vadd(vadd(head, vscale(side, 0.2f)), vscale(face, 0.14f));
+    box_shell(m, v3(fminf(c0.x, c1.x), head.y - 0.55f, fminf(c0.z, c1.z)), v3(fmaxf(c0.x, c1.x), head.y + 0.55f, fmaxf(c0.z, c1.z)), housing, housing);
+}
 static void place_lamps_airport(MeshB *m, const World *w) {
     for (float x = -60; x < 104; x += 18) {                // forecourt lamps
         if (lamp_spot_ok(w, x, 35.3f)) street_lamp(m, x, 35.3f, 0, 1);
@@ -1158,11 +1178,19 @@ static void place_lamps_airport(MeshB *m, const World *w) {
 }
 // Once per map load: decide where the lamps stand and make each one a solid pole.
 static void place_poles(World *w) {
+    for (int i = 0; i < nPoles; i++) if (poles[i].hasFallen) UnloadModel(poles[i].fallen);
     nPoles = 0; poleCollect = 1; poleWorld = w;
     if (w->map == MAP_NEWYORK) place_lamps_newyork(NULL, w);
     else if (w->map == MAP_AIRPORT) place_lamps_airport(NULL, w);
     else place_street_lamps(NULL, w);
     poleCollect = 0;
+    for (int i = 0; i < MAX_SIGNALS; i++) sigPole[i] = -1;
+    for (int i = 0; i < traffic_signal_count() && i < MAX_SIGNALS && nPoles < MAX_POLES; i++) {     // traffic signal posts
+        V3 head, face, pole; int st;
+        traffic_signal(i, &head, &face, &pole, &st);
+        sigPole[i] = nPoles;
+        poles[nPoles++] = (Pole){pole.x, pole.z, 0, 0, world_add_tree(w, pole.x, pole.z, 6.0f, TREE_POLE), 0, {0, 0}, {0, 0}, {0, 0}, i, 0, {0}};
+    }
     world_build_grid(w);
 }
 
@@ -1179,23 +1207,11 @@ static Model build_city(const World *w, Model *glow, Model *pool) {
         Pole *P = &poles[i];
         P->c.s = m.n; P->g.s = GLOW.n; P->p.s = POOL.n;
         P->gone = P->tree >= 0 && w->tree[P->tree].broken;
-        if (!P->gone) pole_mesh(&m, P->x, P->z, P->dx, P->dz);
+        if (!P->gone) { if (P->sig >= 0) signal_mesh(&m, P->sig, v3(0, 0, 0)); else pole_mesh(&m, P->x, P->z, P->dx, P->dz); }
         P->c.e = m.n; P->g.e = GLOW.n; P->p.e = POOL.n;
     }
     if (w->map == MAP_NEWYORK) build_ny_street(&m, w);
     else if (w->map == MAP_AIRPORT) build_airport_extras(&m, w);
-    for (int i = 0; i < traffic_signal_count(); i++) {   // traffic signals: pole, mast arm, housing
-        V3 head, face, pole; int st;
-        traffic_signal(i, &head, &face, &pole, &st);
-        Color metal = {48, 50, 54, 255}, housing = {30, 30, 32, 255};
-        float top = pole.y + 6.0f;
-        box_shell(&m, v3(pole.x - 0.1f, pole.y - 0.3f, pole.z - 0.1f), v3(pole.x + 0.1f, top, pole.z + 0.1f), metal, metal);
-        box_shell(&m, v3(fminf(pole.x, head.x) - 0.05f, top - 0.25f, fminf(pole.z, head.z) - 0.05f),
-                  v3(fmaxf(pole.x, head.x) + 0.05f, top - 0.15f, fmaxf(pole.z, head.z) + 0.05f), metal, metal);
-        V3 side = v3(-face.z, 0, face.x);
-        V3 c0 = vsub(vsub(head, vscale(side, 0.2f)), vscale(face, 0.14f)), c1 = vadd(vadd(head, vscale(side, 0.2f)), vscale(face, 0.14f));
-        box_shell(&m, v3(fminf(c0.x, c1.x), head.y - 0.55f, fminf(c0.z, c1.z)), v3(fmaxf(c0.x, c1.x), head.y + 0.55f, fmaxf(c0.z, c1.z)), housing, housing);
-    }
     build_screens(w);                                   // also adds the screens' street glow to POOL
     *glow = mb_model(&GLOW);
     *pool = mb_model(&POOL);
@@ -1532,7 +1548,7 @@ static void build_pole_model(void) {
 }
 static void draw_fallen_poles(const World *w, Vector3 eye) {
     for (int i = 0; i < nPoles; i++) {
-        const Pole *P = &poles[i];
+        Pole *P = &poles[i];
         if (P->tree < 0 || !w->tree[P->tree].broken) continue;
         const Tree *t = &w->tree[P->tree];
         float dx = t->x - eye.x, dz = t->z - eye.z;
@@ -1541,8 +1557,13 @@ static void draw_fallen_poles(const World *w, Vector3 eye) {
         rlPushMatrix();
         rlTranslatef(t->x, t->y + 0.12f, t->z);
         rlRotatef(t->tilt * RAD2DEG, axis.x, axis.y, axis.z);
-        rlRotatef(atan2f(-P->dz, P->dx) * RAD2DEG, 0, 1, 0);
-        DrawModel(poleModel, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        if (P->sig >= 0) {                              // a signal keeps its own shape: mast arm and housing as built
+            if (!P->hasFallen) { MeshB f = {0}; signal_mesh(&f, P->sig, v3(t->x, t->y, t->z)); P->fallen = mb_model(&f); P->hasFallen = 1; }
+            DrawModel(P->fallen, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        } else {
+            rlRotatef(atan2f(-P->dz, P->dx) * RAD2DEG, 0, 1, 0);
+            DrawModel(poleModel, (Vector3){0, 0, 0}, 1.0f, WHITE);
+        }
         rlPopMatrix();
     }
 }
@@ -2227,6 +2248,7 @@ static void draw_signal_lamps(int lit) {
     for (int i = 0; i < traffic_signal_count(); i++) {
         V3 head, face, pole; int st;
         traffic_signal(i, &head, &face, &pole, &st);
+        if (signal_down(i)) continue;                     // knocked over: dark
         for (int k = 0; k < 3; k++) {                     // k: 0 red (top), 1 amber, 2 green
             int state = k == 0 ? LIGHT_RED : k == 1 ? LIGHT_YELLOW : LIGHT_GREEN;
             if ((state == st) != lit) continue;
@@ -4563,6 +4585,7 @@ int main(void) {
                                                   audio_played(SND_EXPLODE), audio_played(SND_COLLAPSE), audio_played(SND_BREACH), audio_played(SND_TREE), audio_played(SND_SPLASH), audio_played(SND_QUACK), audio_played(SND_ROTOR));
         { int down = 0; for (int i = 0; i < nPoles; i++) down += poles[i].tree >= 0 && world.tree[poles[i].tree].broken;
           printf("lamp poles: %d standing, %d knocked down, %d not solid; player at x %.1f, %.0f km/h\n", nPoles - down, down, nPoles - (int)({ int k = 0; for (int i = 0; i < nPoles; i++) k += poles[i].tree >= 0; k; }), world.cars[0].pos.x, 3.6f * vlen(world.cars[0].vel)); }
+        for (int i = 0, k = 0; i < nPoles && k < 3; i++) if (poles[i].sig >= 0) { printf("signal post %d at x %.1f z %.1f, down %d\n", poles[i].sig, poles[i].x, poles[i].z, signal_down(poles[i].sig)); k++; }
         if (prof_substeps) printf("substeps only: %.2f ms per frame (%.1f substeps/frame, %.0f us each)\n", 1000 * prof_sub / (prof_frames[0] + prof_frames[1]), (double)prof_substeps / (prof_frames[0] + prof_frames[1]), 1e6 * prof_sub / prof_substeps);
         if (world.flyable >= 0) printf("plane end state: airspeed %.0f m/s, agl %.0f m, x %.0f\n", world.air[world.flyable].airspeed, world.air[world.flyable].agl, world.air[world.flyable].pos.x);
         fflush(stdout);
